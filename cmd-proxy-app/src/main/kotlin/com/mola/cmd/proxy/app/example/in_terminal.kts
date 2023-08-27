@@ -1,7 +1,5 @@
 import com.alibaba.fastjson.JSONObject
 import com.google.common.collect.Maps
-import com.mola.cmd.proxy.app.chatgpt.ChatGptProxy
-import com.mola.cmd.proxy.app.utils.NetworkUtils
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
