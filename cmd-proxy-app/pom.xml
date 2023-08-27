@@ -6,7 +6,7 @@
     <parent>
         <groupId>com.mola</groupId>
         <artifactId>cmd-proxy</artifactId>
-        <version>1.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </parent>
 
     <artifactId>cmd-proxy-app</artifactId>
