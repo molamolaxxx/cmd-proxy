@@ -11,7 +11,6 @@ import com.mola.rpc.common.entity.RpcMetaData
 import com.mola.rpc.core.properties.RpcProperties
 import com.mola.rpc.core.proto.ProtoRpcConfigFactory
 import com.mola.rpc.core.proto.RpcInvoker
-import kotlinx.coroutines.runBlocking
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -31,7 +30,7 @@ object CmdReceiver {
     private val callbackConsumerMapByGroup: MutableMap<String, CmdProxyCallbackService> = Maps.newConcurrentMap()
 
     private val receiverFuncMap: MutableMap<String,
-            suspend (param: CmdInvokeParam) -> Map<String, String>> = Maps.newConcurrentMap()
+            (param: CmdInvokeParam) -> Map<String, String?>> = Maps.newConcurrentMap()
 
     private fun init(serverPort: Int) {
         val protoRpcConfigFactory = ProtoRpcConfigFactory.fetch()
@@ -80,12 +79,12 @@ object CmdReceiver {
         callbackConsumerMapByGroup[group] = RpcInvoker.consumer(
                 CmdProxyCallbackService::class.java,
                 rpcMetaData,
-                "cmdProxyCallbackService"
+                "cmdProxyCallbackService#$group"
         )
     }
 
     fun register(cmdName: String, cmdGroup: String,
-                 receiver: suspend (param: CmdInvokeParam) -> Map<String, String>) {
+                 receiver: (param: CmdInvokeParam) -> Map<String, String?>) {
         start(cmdGroup)
         if (receiverFuncMap.containsKey("$cmdName$cmdGroup")) {
             log.warn("registerCallback already contains, key = $cmdName$cmdGroup")
@@ -111,11 +110,8 @@ object CmdReceiver {
                 return CmdInvokeResponse.error("not available cmd ${param.cmdName} " +
                         "in group $cmdGroup")
             }
-            return runBlocking {
-                val resultMap = receiverFuncMap[funcKey]?.invoke(param)!!
-                CmdInvokeResponse.success(CmdResponseContent(param.cmdId, resultMap)
-                )
-            }
+            val resultMap = receiverFuncMap[funcKey]?.invoke(param)!!
+            return CmdInvokeResponse.success(CmdResponseContent(param.cmdId, resultMap))
         }
     }
 }

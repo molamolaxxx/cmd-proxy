@@ -1,6 +1,6 @@
 package com.mola.cmd.proxy.client.resp
 
-import com.mola.cmd.proxy.client.enums.ResponseCode
+import com.mola.cmd.proxy.client.enums.CmdResponseCode
 import java.io.Serializable
 
 
@@ -60,29 +60,33 @@ class CmdInvokeResponse<T> : Serializable {
         this.data = data
     }
 
+    fun isSuccess() : Boolean {
+        return this.status == CmdResponseCode.SUCCESS
+    }
+
     companion object {
         fun <T> success(): CmdInvokeResponse<T> {
-            return CmdInvokeResponse<T>(ResponseCode.SUCCESS.getCode(), ResponseCode.SUCCESS.getDesc())
+            return CmdInvokeResponse<T>(CmdResponseCode.SUCCESS, CmdResponseCode.SUCCESS_DESC)
         }
 
         fun <T> success(msg: String): CmdInvokeResponse<T> {
-            return CmdInvokeResponse<T>(ResponseCode.SUCCESS.getCode(), msg)
+            return CmdInvokeResponse<T>(CmdResponseCode.SUCCESS, msg)
         }
 
         fun <T> success(data: T): CmdInvokeResponse<T> {
-            return CmdInvokeResponse<T>(ResponseCode.SUCCESS.getCode(), data)
+            return CmdInvokeResponse<T>(CmdResponseCode.SUCCESS, data)
         }
 
         fun <T> success(msg: String, data: T): CmdInvokeResponse<T> {
-            return CmdInvokeResponse<T>(ResponseCode.SUCCESS.getCode(), msg, data)
+            return CmdInvokeResponse<T>(CmdResponseCode.SUCCESS, msg, data)
         }
 
         fun <T> error(): CmdInvokeResponse<T> {
-            return CmdInvokeResponse<T>(ResponseCode.ERROR.getCode(), ResponseCode.ERROR.getDesc())
+            return CmdInvokeResponse<T>(CmdResponseCode.ERROR, CmdResponseCode.ERROR_DESC)
         }
 
         fun <T> error(errorMessage: String): CmdInvokeResponse<T> {
-            return CmdInvokeResponse<T>(ResponseCode.ERROR.getCode(), errorMessage)
+            return CmdInvokeResponse<T>(CmdResponseCode.ERROR, errorMessage)
         }
 
         fun <T> error(errorCode: Int, errorMessage: String): CmdInvokeResponse<T> {

@@ -12,7 +12,7 @@ import com.google.common.collect.Maps
 
 class CmdResponseContent {
 
-    constructor(cmdId: String, resultMap: Map<String, String>) {
+    constructor(cmdId: String, resultMap: Map<String, String?>) {
         this.cmdId = cmdId
         this.resultMap = resultMap
     }
@@ -28,5 +28,5 @@ class CmdResponseContent {
     /**
      * 返回内容
      */
-    lateinit var resultMap : Map<String, String>
+    lateinit var resultMap : Map<String, String?>
 }

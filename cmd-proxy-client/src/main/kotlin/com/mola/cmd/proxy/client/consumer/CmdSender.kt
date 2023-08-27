@@ -70,7 +70,7 @@ object CmdSender {
         sendConsumerMapByGroup[group] = RpcInvoker.consumer(
                 CmdProxyInvokeService::class.java,
                 rpcMetaData,
-                "cmdProxyInvokeService"
+                "cmdProxyInvokeService#$group"
         )
     }
 

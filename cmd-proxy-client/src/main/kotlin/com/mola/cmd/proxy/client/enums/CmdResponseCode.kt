@@ -7,23 +7,10 @@ package com.mola.cmd.proxy.client.enums
  * @author : molamola
  * @date : 2023-08-06 22:37
  **/
-enum class ResponseCode(code: Int, desc: String) {
-    SUCCESS(0, "SUCCESS"),
-    ERROR(1, "ERROR");
+object CmdResponseCode {
+    const val SUCCESS = 0
+    const val ERROR = 1
 
-    private val code: Int
-    private val desc: String
-
-    init {
-        this.code = code
-        this.desc = desc
-    }
-
-    fun getCode(): Int {
-        return code
-    }
-
-    fun getDesc(): String {
-        return desc
-    }
+    const val SUCCESS_DESC = "success"
+    const val ERROR_DESC = "error"
 }
