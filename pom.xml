@@ -24,7 +24,7 @@
 
         <dependency>
             <groupId>com.mola</groupId>
-            <artifactId>spring-boot-starter-rpc</artifactId>
+            <artifactId>rpc-core</artifactId>
         </dependency>
 
         <dependency>
@@ -50,7 +50,7 @@
         <dependencies>
             <dependency>
                 <groupId>com.mola</groupId>
-                <artifactId>spring-boot-starter-rpc</artifactId>
+                <artifactId>rpc-core</artifactId>
                 <version>1.0.1</version>
             </dependency>
 
