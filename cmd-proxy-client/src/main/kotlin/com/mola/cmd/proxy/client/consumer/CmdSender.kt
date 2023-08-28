@@ -1,6 +1,5 @@
 package com.mola.cmd.proxy.client.consumer
 
-import com.google.common.collect.Maps
 import com.mola.cmd.proxy.client.CmdProxyCallbackService
 import com.mola.cmd.proxy.client.CmdProxyInvokeService
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
@@ -26,12 +25,11 @@ object CmdSender {
 
     private val log: Logger = LoggerFactory.getLogger(CmdSender::class.java)
 
-    private val sendConsumerMapByGroup: MutableMap<String, CmdProxyInvokeService> = Maps.newConcurrentMap()
+    private val sendConsumerMapByGroup: MutableMap<String, CmdProxyInvokeService> = mutableMapOf()
 
-    private val callbackProviderMapByGroup: MutableMap<String, CmdProxyCallbackService> = Maps.newConcurrentMap()
+    private val callbackProviderMapByGroup: MutableMap<String, CmdProxyCallbackService> = mutableMapOf()
 
-    private val callbackFuncMap: MutableMap<String,
-            (response:CmdResponseContent) -> Unit> = Maps.newConcurrentMap()
+    private val callbackFuncMap: MutableMap<String, (response:CmdResponseContent) -> Unit> = mutableMapOf()
 
     fun start(cmdGroupList: List<String>) {
         cmdGroupList.forEach {group ->

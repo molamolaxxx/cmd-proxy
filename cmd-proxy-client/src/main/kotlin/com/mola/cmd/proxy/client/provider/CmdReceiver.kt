@@ -1,6 +1,5 @@
 package com.mola.cmd.proxy.client.provider
 
-import com.google.common.collect.Maps
 import com.mola.cmd.proxy.client.CmdProxyCallbackService
 import com.mola.cmd.proxy.client.CmdProxyInvokeService
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
@@ -25,12 +24,11 @@ object CmdReceiver {
 
     private val log: Logger = LoggerFactory.getLogger(CmdReceiver::class.java)
 
-    private val receiverProviderMapByGroup: MutableMap<String, CmdProxyInvokeService> = Maps.newConcurrentMap()
+    private val receiverProviderMapByGroup: MutableMap<String, CmdProxyInvokeService> = mutableMapOf()
 
-    private val callbackConsumerMapByGroup: MutableMap<String, CmdProxyCallbackService> = Maps.newConcurrentMap()
+    private val callbackConsumerMapByGroup: MutableMap<String, CmdProxyCallbackService> = mutableMapOf()
 
-    private val receiverFuncMap: MutableMap<String,
-            (param: CmdInvokeParam) -> Map<String, String?>> = Maps.newConcurrentMap()
+    private val receiverFuncMap: MutableMap<String, (param: CmdInvokeParam) -> Map<String, String?>> = mutableMapOf()
 
     private fun init(serverPort: Int) {
         val protoRpcConfigFactory = ProtoRpcConfigFactory.fetch()
