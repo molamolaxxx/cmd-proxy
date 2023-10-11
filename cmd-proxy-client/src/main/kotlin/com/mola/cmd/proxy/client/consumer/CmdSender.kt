@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.client.conf.CmdProxyConf
 import com.mola.cmd.proxy.client.param.CmdInvokeParam
 import com.mola.cmd.proxy.client.resp.CmdInvokeResponse
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
+import com.mola.rpc.common.context.InvokeContext
 import com.mola.rpc.common.entity.RpcMetaData
 import com.mola.rpc.core.properties.RpcProperties
 import com.mola.rpc.core.proto.ProtoRpcConfigFactory
@@ -95,6 +96,9 @@ object CmdSender {
         param.cmdId = UUID.randomUUID().toString()
         param.cmdArgs = cmdArgs
         param.cmdName = cmdName
+
+        // 路由分组tag，使用命令名称
+        InvokeContext.routeTag(cmdName)
         return cmdProxyInvokeService.invoke(param)
     }
 

@@ -9,7 +9,7 @@ import java.util.Scanner
 
 val log: Logger = LoggerFactory.getLogger(CmdReceiver::class.java)
 fun main() {
-    CmdProxyConf.serverPort = 9001
+    CmdProxyConf.serverPort = 9003
     // 1
     CmdSender.start(arrayListOf("test"))
     // 2

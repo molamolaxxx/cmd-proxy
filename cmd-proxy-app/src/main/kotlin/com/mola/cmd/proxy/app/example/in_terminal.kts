@@ -9,21 +9,13 @@ import org.slf4j.LoggerFactory
 
 val log: Logger = LoggerFactory.getLogger(CmdReceiver::class.java)
 fun main() {
+    CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
     CmdProxyConf.serverPort = 9002
     // 1
-    CmdReceiver.register("test", "test") {
+    CmdReceiver.register("testlocal", "1680059511788nQPEXtoolRobot") {
         param ->
         log.info("receive cmd args ${JSONObject.toJSONString(param)}")
         var resultMap : MutableMap<String, String> = Maps.newHashMap()
-        resultMap["content"] = "mytest"
-
-        CoroutineScope(Dispatchers.IO).launch {
-            println("${Thread.currentThread().name} in async")
-            Thread.sleep(3000)
-            CmdReceiver.callback("test", "test", CmdResponseContent(
-                    param.cmdId, resultMap
-            ))
-        }
         println("${Thread.currentThread().name}")
         resultMap
     }

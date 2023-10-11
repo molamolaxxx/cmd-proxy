@@ -41,36 +41,40 @@ object CmdReceiver {
         protoRpcConfigFactory.init(prop)
     }
 
-    private fun start(group: String) {
+    private fun start(cmdName: String, cmdGroup: String) {
         try {
-            if (receiverProviderMapByGroup.containsKey(group)) {
+            if (receiverProviderMapByGroup.containsKey("$cmdGroup$cmdName")) {
                 return
             }
             init(CmdProxyConf.serverPort)
             // 接收器provider
-            startReceiverProvider(group)
+            startReceiverProvider(cmdName, cmdGroup)
             // 回调consumer
-            startCallbackConsumer(group)
+            startCallbackConsumer(cmdGroup)
         } catch (e: Exception) {
             log.error("ProxyProviderStarter start exception, msg = ${e.message}", e)
         }
     }
 
-    private fun startReceiverProvider(group: String) {
+    private fun startReceiverProvider(cmdName: String, cmdGroup: String) {
         val rpcMetaData = RpcMetaData()
         rpcMetaData.reverseMode = true
         rpcMetaData.reverseModeConsumerAddress = arrayListOf(CmdProxyConf.Receiver.listenedSenderAddress)
-        rpcMetaData.group = group
-        val provider = CmdProxyInvokeServiceImpl(group)
+        rpcMetaData.group = cmdGroup
+        rpcMetaData.routeTag = cmdName
+        val provider = CmdProxyInvokeServiceImpl(cmdGroup)
         RpcInvoker.provider(
                 CmdProxyInvokeService::class.java,
                 provider,
                 rpcMetaData
         )
-        receiverProviderMapByGroup[group] = provider
+        receiverProviderMapByGroup["$cmdGroup$cmdName"] = provider
     }
 
     private fun startCallbackConsumer(group: String) {
+        if (callbackConsumerMapByGroup.containsKey(group)) {
+            return
+        }
         val rpcMetaData = RpcMetaData()
         rpcMetaData.appointedAddress = arrayListOf(CmdProxyConf.Receiver.listenedSenderAddress)
         rpcMetaData.group = group
@@ -83,7 +87,7 @@ object CmdReceiver {
 
     fun register(cmdName: String, cmdGroup: String,
                  receiver: (param: CmdInvokeParam) -> Map<String, String?>) {
-        start(cmdGroup)
+        start(cmdName, cmdGroup)
         if (receiverFuncMap.containsKey("$cmdName$cmdGroup")) {
             log.warn("registerCallback already contains, key = $cmdName$cmdGroup")
             return
