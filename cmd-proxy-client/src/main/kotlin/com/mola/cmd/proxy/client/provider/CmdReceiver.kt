@@ -10,6 +10,7 @@ import com.mola.rpc.common.entity.RpcMetaData
 import com.mola.rpc.core.properties.RpcProperties
 import com.mola.rpc.core.proto.ProtoRpcConfigFactory
 import com.mola.rpc.core.proto.RpcInvoker
+import com.mola.rpc.core.system.ReverseInvokeHelper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -43,9 +44,6 @@ object CmdReceiver {
 
     private fun start(cmdName: String, cmdGroup: String) {
         try {
-            if (receiverProviderMapByGroup.containsKey("$cmdGroup$cmdName")) {
-                return
-            }
             init(CmdProxyConf.serverPort)
             // 接收器provider
             startReceiverProvider(cmdName, cmdGroup)
@@ -57,18 +55,24 @@ object CmdReceiver {
     }
 
     private fun startReceiverProvider(cmdName: String, cmdGroup: String) {
+        if (receiverProviderMapByGroup.containsKey(cmdGroup)) {
+            val providerImpl = receiverProviderMapByGroup["$cmdGroup"] as CmdProxyInvokeServiceImpl
+            providerImpl.fetchMetaData().routeTags.add(cmdName)
+            ReverseInvokeHelper.instance().registerProviderToServer(providerImpl.fetchMetaData())
+            return
+        }
         val rpcMetaData = RpcMetaData()
         rpcMetaData.reverseMode = true
         rpcMetaData.reverseModeConsumerAddress = arrayListOf(CmdProxyConf.Receiver.listenedSenderAddress)
         rpcMetaData.group = cmdGroup
-        rpcMetaData.routeTag = cmdName
-        val provider = CmdProxyInvokeServiceImpl(cmdGroup)
+        rpcMetaData.routeTags = mutableSetOf(cmdName)
+        val provider = CmdProxyInvokeServiceImpl(cmdGroup, rpcMetaData)
         RpcInvoker.provider(
                 CmdProxyInvokeService::class.java,
                 provider,
                 rpcMetaData
         )
-        receiverProviderMapByGroup["$cmdGroup$cmdName"] = provider
+        receiverProviderMapByGroup["$cmdGroup"] = provider
     }
 
     private fun startCallbackConsumer(group: String) {
@@ -104,7 +108,10 @@ object CmdReceiver {
         cmdProxyCallbackService.callback(cmdName, response)
     }
 
-    class CmdProxyInvokeServiceImpl(private var cmdGroup: String) : CmdProxyInvokeService {
+    class CmdProxyInvokeServiceImpl(
+        private var cmdGroup: String,
+        private var rpcMetaData: RpcMetaData
+    ) : CmdProxyInvokeService {
 
         override fun invoke(param: CmdInvokeParam): CmdInvokeResponse<CmdResponseContent?> {
             val funcKey = "${param.cmdName}${cmdGroup}"
@@ -114,6 +121,10 @@ object CmdReceiver {
             }
             val resultMap = receiverFuncMap[funcKey]?.invoke(param)!!
             return CmdInvokeResponse.success(CmdResponseContent(param.cmdId, resultMap))
+        }
+
+        open fun fetchMetaData(): RpcMetaData{
+            return rpcMetaData
         }
     }
 }
