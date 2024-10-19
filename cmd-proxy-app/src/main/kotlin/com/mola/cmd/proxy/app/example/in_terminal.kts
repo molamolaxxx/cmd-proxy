@@ -12,7 +12,7 @@ fun main() {
     CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
     CmdProxyConf.serverPort = 9002
     // 1
-    CmdReceiver.register("testlocal", "1643966206421DbO9ItoolRobot") {
+    CmdReceiver.register("testlocal", listOf("toolRobot1714275929071AqUVE", "1680059511788nQPEXtoolRobot")) {
         param ->
         log.info("receive cmd args ${JSONObject.toJSONString(param)}")
         var resultMap : MutableMap<String, String> = Maps.newHashMap()

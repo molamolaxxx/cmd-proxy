@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.client.consumer
 
+import com.alibaba.fastjson.TypeReference
 import com.mola.cmd.proxy.client.CmdProxyCallbackService
 import com.mola.cmd.proxy.client.CmdProxyInvokeService
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
@@ -8,6 +9,7 @@ import com.mola.cmd.proxy.client.resp.CmdInvokeResponse
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
 import com.mola.rpc.common.context.InvokeContext
 import com.mola.rpc.common.entity.RpcMetaData
+import com.mola.rpc.common.utils.JSONUtil
 import com.mola.rpc.core.properties.RpcProperties
 import com.mola.rpc.core.proto.ProtoRpcConfigFactory
 import com.mola.rpc.core.proto.RpcInvoker
@@ -92,7 +94,7 @@ object CmdSender {
             cmdProxyInvokeService = sendConsumerMapByGroup[cmdGroup]?: return CmdInvokeResponse.success()
         }
 
-        var param = CmdInvokeParam()
+        val param = CmdInvokeParam()
         param.cmdId = UUID.randomUUID().toString()
         param.cmdArgs = cmdArgs
         param.cmdName = cmdName
@@ -100,6 +102,30 @@ object CmdSender {
         // 路由分组tag，使用命令名称
         InvokeContext.routeTag(cmdName)
         return cmdProxyInvokeService.invoke(param)
+    }
+
+    /**
+     * 查询某个cmGroup下所有的命令描述
+     */
+    fun fetchDescriptionMap(cmdGroup: String) : Map<String, String> {
+        val nettyConnectPool = ProtoRpcConfigFactory.fetch().nettyConnectPool
+        val providerChannelGroup =
+            nettyConnectPool.reverseChannelsKeyMap["com.mola.cmd.proxy.client.CmdProxyInvokeService:$cmdGroup:1.0.0"]
+                ?: return mapOf()
+
+        val allDescriptionMap = mutableMapOf<String, String>()
+        providerChannelGroup.reverseAddress2ProviderMap.values.forEach { meta ->
+            if (meta.description.isBlank()) {
+                return@forEach
+            }
+            val oneDescriptionMap : MutableMap<String, String> =
+                JSONUtil.parseObject(meta.description, object : TypeReference<MutableMap<String, String>>() {})
+            oneDescriptionMap.forEach { (k, v) ->
+                allDescriptionMap[k] = v
+            }
+        }
+
+        return allDescriptionMap
     }
 
     fun registerCallback(cmdName:String, cmdGroup:String, callback: (response:CmdResponseContent) -> Unit) {
