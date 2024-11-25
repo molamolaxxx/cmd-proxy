@@ -68,6 +68,7 @@ object CmdSender {
         val rpcMetaData = RpcMetaData()
         rpcMetaData.reverseMode = true
         rpcMetaData.group = group
+        rpcMetaData.clientTimeout = 60 * 1000
         sendConsumerMapByGroup[group] = RpcInvoker.consumer(
                 CmdProxyInvokeService::class.java,
                 rpcMetaData,

@@ -103,6 +103,7 @@ object CmdReceiver {
         val rpcMetaData = RpcMetaData()
         rpcMetaData.appointedAddress = arrayListOf(CmdProxyConf.Receiver.listenedSenderAddress)
         rpcMetaData.group = group
+        rpcMetaData.clientTimeout = 60 * 1000
         callbackConsumerMapByGroup[group] = RpcInvoker.consumer(
                 CmdProxyCallbackService::class.java,
                 rpcMetaData,
