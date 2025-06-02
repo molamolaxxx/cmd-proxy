@@ -12,12 +12,12 @@ object McpProxy {
 
     private val log: Logger = LoggerFactory.getLogger(McpProxy::class.java)
 
-    private val metaDataList : MutableList<McdMetaData> = mutableListOf()
+    val metaDataList : MutableList<McdMetaData> = mutableListOf()
 
     fun start(cmdGroupList: List<String>) {
         register("listFile", "listFile {'path':'/xxx'}", "列出/xxx下文件列表")
         { param ->
-            val path: String = param.getString("path") ?: "/" // ????????????
+            val path: String = param.getString("path") ?: "/"
             val targetDir = File(path)
             val fileMap = mutableMapOf<String, String>()
 
@@ -57,6 +57,12 @@ object McpProxy {
         register("openFile", "openFile {'path':'/xxx'}", "打开/xxx对应的文件或文件夹") {
                 param ->
             var path = param.getString("path")
+            // 检查文件是否存在
+            val file = File(path)
+            if (!file.exists()) {
+                return@register "文件不存在,请重新查找"
+            }
+
             when {
                 getOS().contains("win") -> {
                     executeCommand("start $path")
@@ -121,7 +127,7 @@ object McpProxy {
             // 检查源文件是否存在
             if (!sourceFile.exists()) {
                 // 读取文件内容
-                return@register "源文件不存在"
+                return@register "源文件不存在，请重新查找"
             }
 
             // 如果目标文件已存在，可以选择删除或重命名
@@ -162,9 +168,10 @@ object McpProxy {
         }
     }
 
-    fun register(cmdName: String, cmdExample: String, cmdDesc: String, executor: (param: JSONObject) -> String) {
-        metaDataList.add(McdMetaData(cmdName, cmdExample, cmdDesc, executor))
-    }
+}
+
+fun register(cmdName: String, cmdExample: String, cmdDesc: String, executor: (param: JSONObject) -> String) {
+    McpProxy.metaDataList.add(McdMetaData(cmdName, cmdExample, cmdDesc, executor))
 }
 
 data class McdMetaData (
