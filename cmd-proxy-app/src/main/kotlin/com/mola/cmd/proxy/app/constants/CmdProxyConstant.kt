@@ -5,4 +5,6 @@ object CmdProxyConstant {
     const val CHAT_GPT = "chatgpt"
 
     const val IMAGE_GENERATE = "imageGenerate"
+
+    const val MCP = "mcp";
 }
