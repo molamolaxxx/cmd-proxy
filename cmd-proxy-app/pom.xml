@@ -34,6 +34,20 @@
             <artifactId>kotlinx-coroutines-core</artifactId>
             <version>1.6.0</version>
         </dependency>
+
+        <dependency>
+            <groupId>org.codehaus.groovy</groupId>
+            <artifactId>groovy-all</artifactId>
+            <version>3.0.6</version>
+            <type>pom</type>
+        </dependency>
+
+        <!-- Maven -->
+        <dependency>
+            <groupId>org.apache.ivy</groupId>
+            <artifactId>ivy</artifactId>
+            <version>2.5.0</version>
+        </dependency>
     </dependencies>
 
     <build>

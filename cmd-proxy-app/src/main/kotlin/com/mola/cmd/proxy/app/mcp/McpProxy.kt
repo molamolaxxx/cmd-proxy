@@ -7,6 +7,9 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.Paths
+import kotlin.io.path.absolutePathString
 
 object McpProxy {
 
@@ -157,6 +160,8 @@ object McpProxy {
             "打开成功"
         }
 
+        loadExtensions()
+
         for (mcdMetaData in metaDataList) {
             CmdReceiver.register(mcdMetaData.cmdName, cmdGroupList,
                 "#mcp:${mcdMetaData.cmdExample}\n${mcdMetaData.cmdDesc}") { params ->
@@ -165,9 +170,22 @@ object McpProxy {
                 resultMap["result"] = mcdMetaData.executor.invoke(param)
                 resultMap
             }
+            log.info("register cmd ${mcdMetaData.cmdName} : ${mcdMetaData.cmdDesc}")
         }
     }
 
+    private fun loadExtensions() {
+        Files.walk(Paths.get("."))
+            .filter { path ->
+                Files.isRegularFile(path) &&
+                        path.toString().endsWith(".groovy")
+            }.forEach {
+                log.info("start load extension : ${it.absolutePathString()}")
+                val file = File(it.absolutePathString())
+                McpExtensionEngine.eval(file.readText(Charset.forName("UTF-8")))
+                log.info("finish load extension : ${it.absolutePathString()}")
+            }
+    }
 }
 
 fun register(cmdName: String, cmdExample: String, cmdDesc: String, executor: (param: JSONObject) -> String) {
@@ -180,28 +198,3 @@ data class McdMetaData (
     val cmdDesc: String,
     val executor: (param: JSONObject) -> String
 )
-
-fun executeCommand(command: String): String {
-    return try {
-        val parts = if (System.getProperty("os.name").lowercase().contains("win")) {
-            // Windows 需要显式调用 cmd.exe
-            arrayOf("cmd.exe", "/c", command)
-        } else {
-            // Unix-like 系统直接使用 shell
-            arrayOf("/bin/sh", "-c", command)
-        }
-
-        val process = Runtime.getRuntime().exec(parts)
-        val output = process.inputStream.bufferedReader().readText()
-        val error = process.errorStream.bufferedReader().readText()
-        process.waitFor()
-
-        if (process.exitValue() == 0) output else error
-    } catch (e: Exception) {
-        e.message ?: "Unknown error"
-    }
-}
-
-fun getOS(): String {
-    return System.getProperty("os.name").lowercase()
-}
