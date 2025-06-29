@@ -78,7 +78,7 @@ object McpProxy {
         }
 
 
-        register("writeFile", "writeFile {'path':'/xxx', 'content':'yyyyy'}", "在path路径创建文件，并写入content中的内容")
+        register("writeFile", "writeFile {\"path\":\"/xxx\", \"content\":\"yyyyy\"}", "在path路径创建文件，并写入content中的内容")
         { param ->
             val filePath: String = param.getString("path") ?: "/"
             val content: String = param.getString("content") ?: ""
