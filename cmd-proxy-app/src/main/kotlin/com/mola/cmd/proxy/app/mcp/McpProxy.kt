@@ -8,7 +8,9 @@ import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.charset.Charset
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import kotlin.io.path.absolutePathString
 
 object McpProxy {
@@ -78,7 +80,7 @@ object McpProxy {
         }
 
 
-        register("writeFile", "writeFile {\"path\":\"/xxx\", \"content\":\"yyyyy\"}", "在path路径创建文件，并写入content中的内容")
+        register("createFile", "createFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "在path路径创建文件，并将content中的内容写入文件")
         { param ->
             val filePath: String = param.getString("path") ?: "/"
             val content: String = param.getString("content") ?: ""
@@ -86,8 +88,32 @@ object McpProxy {
             // 检查文件是否存在
             val file = File(filePath)
             if (file.exists()) {
-                return@register "文件或文件夹已存在，不允许写入"
+                return@register "文件已存在，不允许写入"
             }
+
+            File(filePath).bufferedWriter().use { writer ->
+                writer.write(content)
+            }
+
+            // 读取文件内容
+            return@register "文件写入成功"
+        }
+
+        register("modifyFile", "modifyFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "修改path路径的文件，并将content中的内容写入文件")
+        { param ->
+            val filePath: String = param.getString("path") ?: "/"
+            val content: String = param.getString("content") ?: ""
+
+            // 检查文件是否存在
+            val file = File(filePath)
+            if (!file.exists()) {
+                return@register "文件不存在，不允许修改"
+            }
+
+            // 文件备份
+            val source: Path = Paths.get(filePath)
+            val target: Path = Paths.get("$filePath.${System.currentTimeMillis()}")
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
 
             File(filePath).bufferedWriter().use { writer ->
                 writer.write(content)
