@@ -99,10 +99,13 @@ object McpProxy {
             return@register "文件写入成功"
         }
 
-        register("modifyFile", "modifyFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "修改path路径的文件，并将content中的内容写入文件")
+        register("modifyFile",
+            "modifyFile {\"path\":\"/xxx\", \"originContent\":\"aaa\", \"modifyContent\":\"bbb\"}",
+            "修改path路径的文件，将原文件中的originContent内容替换为modifyContent")
         { param ->
             val filePath: String = param.getString("path") ?: "/"
-            val content: String = param.getString("content") ?: ""
+            val originContent: String = param.getString("originContent") ?: ""
+            val modifyContent: String = param.getString("modifyContent") ?: ""
 
             // 检查文件是否存在
             val file = File(filePath)
@@ -110,13 +113,15 @@ object McpProxy {
                 return@register "文件不存在，不允许修改"
             }
 
+            val newContent = file.readText(Charset.forName("UTF-8")).replace(originContent, modifyContent)
+
             // 文件备份
             val source: Path = Paths.get(filePath)
             val target: Path = Paths.get("$filePath.${System.currentTimeMillis()}")
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
 
             File(filePath).bufferedWriter().use { writer ->
-                writer.write(content)
+                writer.write(newContent)
             }
 
             // 读取文件内容
