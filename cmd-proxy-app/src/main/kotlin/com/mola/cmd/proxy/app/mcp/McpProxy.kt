@@ -49,10 +49,14 @@ object McpProxy {
                 return@register "文件不存在"
             }
 
-            // 检查文件大小不超过16KB (16 * 1024 = 16384字节)
-            val maxSize = 16 * 1024
+            if (file.isDirectory) {
+                return@register "此路径为文件夹，无法直接读取"
+            }
+
+            // 检查文件大小不超过32KB
+            val maxSize = 32 * 1024
             if (file.length() > maxSize) {
-                return@register "文件大小超过16KB限制，读取失败，流程终止"
+                return@register "文件大小超过32KB限制，读取失败，请终止流程"
             }
 
             // 读取文件内容
@@ -101,11 +105,11 @@ object McpProxy {
 
         register("modifyFile",
             "modifyFile {\"path\":\"/xxx\", \"originContent\":\"aaa\", \"modifyContent\":\"bbb\"}",
-            "修改path路径的文件，将原文件中的originContent内容替换为modifyContent")
+            "修改path路径的文件，将原文件中的所有的originContent文本，替换为modifyContent")
         { param ->
             val filePath: String = param.getString("path") ?: "/"
-            val originContent: String = param.getString("originContent") ?: ""
-            val modifyContent: String = param.getString("modifyContent") ?: ""
+            var originContent: String = param.getString("originContent") ?: ""
+            var modifyContent: String = param.getString("modifyContent") ?: ""
 
             // 检查文件是否存在
             val file = File(filePath)
@@ -113,7 +117,12 @@ object McpProxy {
                 return@register "文件不存在，不允许修改"
             }
 
-            val newContent = file.readText(Charset.forName("UTF-8")).replace(originContent, modifyContent)
+            val fileContent = file.readText(Charsets.UTF_8)
+            if (fileContent.indexOf("\r\n") != -1) {
+                originContent = originContent.replace("\n", "\r\n")
+                modifyContent = modifyContent.replace("\n", "\r\n")
+            }
+            val newContent = fileContent.replace(originContent, modifyContent)
 
             // 文件备份
             val source: Path = Paths.get(filePath)
@@ -189,6 +198,32 @@ object McpProxy {
                 }
             }
             "打开成功"
+        }
+
+        register("treeFile", "treeFile {'path':'/xxx'}", "以树型结构打印该路径下的所有文件") { param ->
+            val path: String = param.getString("path") ?: "/"
+            val root = File(path)
+            if (!root.exists()) {
+                return@register "路径不存在"
+            }
+            if (!root.isDirectory) {
+                return@register "路径不是文件夹"
+            }
+            val sb = StringBuilder()
+            fun walk(dir: File, prefix: String) {
+                dir.listFiles()?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name })?.forEachIndexed { index, file ->
+                    val isLast = index == dir.listFiles()!!.size - 1
+                    val node = if (isLast) "└──" else "├──"
+                    sb.appendLine("$prefix$node${file.name}")
+                    if (file.isDirectory) {
+                        val nextPrefix = prefix + (if (isLast) "    " else "│   ")
+                        walk(file, nextPrefix)
+                    }
+                }
+            }
+            sb.appendLine(root.name)
+            walk(root, "")
+            sb.toString()
         }
 
         loadExtensions()
