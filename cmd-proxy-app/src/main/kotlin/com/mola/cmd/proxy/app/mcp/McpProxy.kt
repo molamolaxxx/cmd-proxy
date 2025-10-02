@@ -63,7 +63,7 @@ object McpProxy {
             file.readText(Charset.forName("UTF-8"))
         }
 
-        register("openFile", "openFile {'path':'/xxx'}", "打开/xxx对应的文件或文件夹") {
+        register("triggerFileOpen", "triggerFileOpen {'path':'/xxx'}", "在文件管理器中，打开对应的文件或文件夹") {
                 param ->
             var path = param.getString("path")
             // 检查文件是否存在
@@ -125,8 +125,15 @@ object McpProxy {
             val newContent = fileContent.replace(originContent, modifyContent)
 
             // 文件备份
+            val userHome = System.getProperty("user.home")
+            val backupDir = Paths.get(userHome, ".mcp-file-history")
+            if (!Files.exists(backupDir)) {
+                Files.createDirectories(backupDir)
+            }
             val source: Path = Paths.get(filePath)
-            val target: Path = Paths.get("$filePath.${System.currentTimeMillis()}")
+            val fileName = File(filePath).name
+            val timestamp = System.currentTimeMillis()
+            val target: Path = backupDir.resolve("${fileName}.${timestamp}")
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
 
             File(filePath).bufferedWriter().use { writer ->
@@ -216,8 +223,15 @@ object McpProxy {
                     val node = if (isLast) "└──" else "├──"
                     sb.appendLine("$prefix$node${file.name}")
                     if (file.isDirectory) {
-                        val nextPrefix = prefix + (if (isLast) "    " else "│   ")
-                        walk(file, nextPrefix)
+                        // 检查是否为隐藏文件夹（以.开头）
+                        if (file.name.startsWith(".")) {
+                            return@forEachIndexed
+                        }
+                        if ((file.listFiles()?.size ?: 0) > 100) {
+                            sb.appendLine(prefix + (if (isLast) "    └──(文件数量过多，已隐藏)" else "│   └──(文件数量过多，已隐藏)"))
+                        } else {
+                            walk(file, prefix + (if (isLast) "    " else "│   "))
+                        }
                     }
                 }
             }
@@ -226,11 +240,36 @@ object McpProxy {
             sb.toString()
         }
 
+        register("listJavaDependencyPath", "listJavaDependencyPath {'javaFilePath':'/xxx'}", "列出Java文件的所有import类的绝对路径") { param ->
+            val javaPath: String = param.getString("javaFilePath") ?: return@register "路径不能为空"
+            val javaFile = File(javaPath)
+            if (!javaFile.exists() || !javaFile.isFile) return@register "文件不存在"
+
+            val importRegex = Regex("^import\\s+([\\w.\\*]+);?")
+            val imports = javaFile.readLines()
+                .mapNotNull { line -> importRegex.matchEntire(line.trim())?.groupValues?.get(1) }
+                .filterNot { it.startsWith("java.") || it.startsWith("javax.") }
+
+            val result = StringBuilder()
+            result.appendLine("| 类名称 | 绝对路径地址 |")
+            result.appendLine("|--------|--------------|")
+
+            imports.forEach { fqcn ->
+                val className = fqcn.substringAfterLast('.')
+                val relativePath = fqcn.replace('.', '/') + ".java"
+                val absolutePath = javaFile.parentFile?.parentFile?.parentFile?.parentFile?.parentFile?.parentFile?.parentFile
+                    ?.resolve("src/main/java/$relativePath")
+                    ?.absolutePath ?: "未找到"
+                result.appendLine("| $className | $absolutePath |")
+            }
+            result.toString()
+        }
+
         loadExtensions()
 
         for (mcdMetaData in metaDataList) {
             CmdReceiver.register(mcdMetaData.cmdName, cmdGroupList,
-                "#mcp:${mcdMetaData.cmdExample}\n${mcdMetaData.cmdDesc}") { params ->
+                "#mcp:${mcdMetaData.cmdExample}#next#${mcdMetaData.cmdDesc}") { params ->
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
                 val resultMap = mutableMapOf<String, String>()
                 resultMap["result"] = mcdMetaData.executor.invoke(param)
