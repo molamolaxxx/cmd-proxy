@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.mcp
 
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
+import com.google.common.collect.Maps
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -20,33 +21,20 @@ object McpProxy {
     val metaDataList : MutableList<McdMetaData> = mutableListOf()
 
     fun start(cmdGroupList: List<String>) {
-        register("listFile", "listFile {'path':'/xxx'}", "列出/xxx下文件列表")
+        register("treeFile", "treeFile {'path':'/xxx'}", "以树型结构输出path路径下的所有文件")
         { param ->
             val path: String = param.getString("path") ?: "/"
-            val targetDir = File(path)
-            val fileMap = mutableMapOf<String, String>()
-
-            if (!targetDir.exists() || !targetDir.isDirectory) {
-                fileMap["result"] = "路径不存在或不是目录"
-            } else {
-                val files = targetDir.listFiles()
-                val fileList = files?.filter { it.isFile }?.joinToString("\n") { it.name } ?: ""
-                val dirList = files?.filter { it.isDirectory }?.joinToString("\n") { it.name } ?: ""
-
-                fileMap["文件列表"] = fileList.ifEmpty { "无" }
-                fileMap["文件夹列表"] = dirList.ifEmpty { "无" }
-            }
-            JSON.toJSONString(fileMap)
+            return@register printTree(path, 20)
         }
 
-        register("readFile", "readFile {'path':'/xxx'}", "读取/xxx的文件内容")
+        register("readFile", "readFile {'path':'/xxx'}", "读取path路径对应的文件内容")
         { param ->
             val filePath: String = param.getString("path") ?: "/"
 
             // 检查文件是否存在
             val file = File(filePath)
             if (!file.exists()) {
-                return@register "文件不存在"
+                return@register "文件不存在，请先treeFile查看文件列表"
             }
 
             if (file.isDirectory) {
@@ -62,27 +50,6 @@ object McpProxy {
             // 读取文件内容
             file.readText(Charset.forName("UTF-8"))
         }
-
-        register("triggerFileOpen", "triggerFileOpen {'path':'/xxx'}", "在文件管理器中，打开对应的文件或文件夹") {
-                param ->
-            var path = param.getString("path")
-            // 检查文件是否存在
-            val file = File(path)
-            if (!file.exists()) {
-                return@register "文件不存在,请重新查找"
-            }
-
-            when {
-                getOS().contains("win") -> {
-                    executeCommand("start $path")
-                }
-                getOS().contains("linux") -> {
-                    executeCommand("xdg-open $path")
-                }
-            }
-            "打开成功"
-        }
-
 
         register("createFile", "createFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "在path路径创建文件，并将content中的内容写入文件")
         { param ->
@@ -114,7 +81,7 @@ object McpProxy {
             // 检查文件是否存在
             val file = File(filePath)
             if (!file.exists()) {
-                return@register "文件不存在，不允许修改"
+                return@register "文件不存在，请先treeFile查看文件列表"
             }
 
             val fileContent = file.readText(Charsets.UTF_8)
@@ -166,7 +133,7 @@ object McpProxy {
             return@register createRes
         }
 
-        register("moveFile", "moveFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将/xxx文件的路径转换为/yyy")
+        register("moveFile", "moveFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将fromPath文件的路径移动到toPath路径")
         { param ->
             val fromPath: String = param.getString("fromPath") ?: "/"
             val toPath: String = param.getString("toPath") ?: "/"
@@ -177,7 +144,7 @@ object McpProxy {
             // 检查源文件是否存在
             if (!sourceFile.exists()) {
                 // 读取文件内容
-                return@register "源文件不存在，请重新查找"
+                return@register "源文件不存在，请先treeFile查看文件列表"
             }
 
             // 如果目标文件已存在，可以选择删除或重命名
@@ -193,7 +160,37 @@ object McpProxy {
             if (sourceFile.renameTo(destinationFile)) "文件移动成功" else "文件移动失败"
         }
 
-        register("openUrl", "openUrl {'url':'xxx'}", "打开/在浏览器打开url对应的页面") {
+        register("copyFile", "copyFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将fromPath文件复制到toPath路径")
+        { param ->
+            val fromPath: String = param.getString("fromPath") ?: "/"
+            val toPath: String = param.getString("toPath") ?: "/"
+
+            val sourceFile = File(fromPath)
+            val destinationFile = File(toPath)
+
+            // 检查源文件是否存在
+            if (!sourceFile.exists()) {
+                return@register "源文件不存在，请先treeFile查看文件列表"
+            }
+
+            // 如果目标文件已存在，可以选择删除或重命名
+            if (destinationFile.exists()) {
+                return@register "目标文件已存在"
+            }
+
+            // 确保目标目录存在
+            destinationFile.parentFile?.mkdirs()
+
+            // 执行复制操作
+            try {
+                sourceFile.copyTo(destinationFile)
+                "文件复制成功"
+            } catch (e: Exception) {
+                "文件复制失败: ${e.message}"
+            }
+        }
+
+        register("openUrl", "openUrl {'url':'xxx'}", "在打开url对应的网页或文件") {
                 param ->
             var url = param.getString("url")
             when {
@@ -207,43 +204,11 @@ object McpProxy {
             "打开成功"
         }
 
-        register("treeFile", "treeFile {'path':'/xxx'}", "以树型结构打印该路径下的所有文件") { param ->
-            val path: String = param.getString("path") ?: "/"
-            val root = File(path)
-            if (!root.exists()) {
-                return@register "路径不存在"
-            }
-            if (!root.isDirectory) {
-                return@register "路径不是文件夹"
-            }
-            val sb = StringBuilder()
-            fun walk(dir: File, prefix: String) {
-                dir.listFiles()?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name })?.forEachIndexed { index, file ->
-                    val isLast = index == dir.listFiles()!!.size - 1
-                    val node = if (isLast) "└──" else "├──"
-                    sb.appendLine("$prefix$node${file.name}")
-                    if (file.isDirectory) {
-                        // 检查是否为隐藏文件夹（以.开头）
-                        if (file.name.startsWith(".")) {
-                            return@forEachIndexed
-                        }
-                        if ((file.listFiles()?.size ?: 0) > 100) {
-                            sb.appendLine(prefix + (if (isLast) "    └──(文件数量过多，已隐藏)" else "│   └──(文件数量过多，已隐藏)"))
-                        } else {
-                            walk(file, prefix + (if (isLast) "    " else "│   "))
-                        }
-                    }
-                }
-            }
-            sb.appendLine(root.name)
-            walk(root, "")
-            sb.toString()
-        }
 
         register("listJavaDependencyPath", "listJavaDependencyPath {'javaFilePath':'/xxx'}", "列出Java文件的所有import类的绝对路径") { param ->
             val javaPath: String = param.getString("javaFilePath") ?: return@register "路径不能为空"
             val javaFile = File(javaPath)
-            if (!javaFile.exists() || !javaFile.isFile) return@register "文件不存在"
+            if (!javaFile.exists() || !javaFile.isFile) return@register "文件不存在，请先treeFile查看文件列表"
 
             val importRegex = Regex("^import\\s+([\\w.\\*]+);?")
             val imports = javaFile.readLines()
@@ -280,6 +245,7 @@ object McpProxy {
     }
 
     private fun loadExtensions() {
+        log.info("load extension path : ${Paths.get(".").absolutePathString()}")
         Files.walk(Paths.get("."))
             .filter { path ->
                 Files.isRegularFile(path) &&
@@ -290,6 +256,60 @@ object McpProxy {
                 McpExtensionEngine.eval(file.readText(Charset.forName("UTF-8")))
                 log.info("finish load extension : ${it.absolutePathString()}")
             }
+    }
+
+    private fun printTree(path: String, depth: Int) : String {
+        val root = File(path)
+        if (!root.exists()) {
+            return "路径不存在"
+        }
+        if (!root.isDirectory) {
+            return "路径不是文件夹"
+        }
+        if (depth < 1) {
+            return "文件路径打印失败"
+        }
+        var currentDepth = 0
+        val sb = StringBuilder()
+        val depthFileCntMap = Maps.newLinkedHashMap<Int, Int>()
+        fun walk(dir: File, prefix: String) {
+            currentDepth ++
+            if (depthFileCntMap[currentDepth] == null) {
+                depthFileCntMap[currentDepth] = 0
+            }
+            depthFileCntMap[currentDepth] = depthFileCntMap[currentDepth]!! + dir.listFiles()!!.size
+            dir.listFiles()?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name })?.forEachIndexed { index, file ->
+                val isLast = index == dir.listFiles()!!.size - 1
+                val node = if (isLast) "└──" else "├──"
+                sb.appendLine("$prefix$node${file.name}")
+                if (file.isDirectory) {
+                    // 检查是否为隐藏文件夹（以.开头）
+                    if (file.name.startsWith(".")) {
+                        return@forEachIndexed
+                    }
+                    if ((file.listFiles()?.size ?: 0) > 100) {
+                        sb.appendLine(prefix + (if (isLast) "    └──(文件数量过多，已隐藏)" else "│   └──(文件数量过多，已隐藏)"))
+                    } else {
+                        if (currentDepth < depth) {
+                            walk(file, prefix + (if (isLast) "    " else "│   "))
+                        }
+                    }
+                }
+            }
+            currentDepth --
+        }
+        sb.appendLine(root.name)
+        walk(root, "")
+
+        var totalFileCount = 0
+        for ((index, i) in depthFileCntMap.values.withIndex()) {
+            totalFileCount += i
+            if (totalFileCount > 500) {
+                return printTree(path, index)
+            }
+        }
+
+        return sb.toString()
     }
 }
 
