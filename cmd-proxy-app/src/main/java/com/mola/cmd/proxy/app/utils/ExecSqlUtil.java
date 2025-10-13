@@ -15,7 +15,8 @@ public class ExecSqlUtil {
             Connection connection = DriverManager.getConnection(url + "?characterEncoding=utf-8&useSSL=false", username, password);
             Statement statement = connection.createStatement();
             
-            if (sql.trim().toLowerCase().startsWith("update") || sql.trim().toLowerCase().startsWith("delete") || sql.trim().toLowerCase().startsWith("insert")) {
+            String lowerSql = sql.trim().toLowerCase();
+            if (lowerSql.startsWith("update") || lowerSql.startsWith("delete") || lowerSql.startsWith("insert") || lowerSql.startsWith("create") || lowerSql.startsWith("alter") || lowerSql.startsWith("drop") || lowerSql.startsWith("truncate") || lowerSql.startsWith("grant") || lowerSql.startsWith("revoke")) {
                 int result = statement.executeUpdate(sql);
                 statement.close();
                 connection.close();

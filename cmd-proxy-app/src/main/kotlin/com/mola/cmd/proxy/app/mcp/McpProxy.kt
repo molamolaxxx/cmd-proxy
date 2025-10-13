@@ -13,6 +13,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import kotlin.io.path.absolutePathString
+import kotlin.streams.toList
 
 object McpProxy {
 
@@ -20,16 +21,23 @@ object McpProxy {
 
     val metaDataList : MutableList<McdMetaData> = mutableListOf()
 
+    var blacklist: List<String> = arrayListOf()
+
     fun start(cmdGroupList: List<String>) {
+        val blacklistFile = File("./cmd-blacklist.txt")
+        if (blacklistFile.exists()) {
+            blacklist = blacklistFile.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+        }
+
         register("treeFile", "treeFile {'path':'/xxx'}", "以树型结构输出path路径下的所有文件")
         { param ->
-            val path: String = param.getString("path") ?: "/"
+            var path: String = parsePath(param.getString("path") ?: "/")
             return@register printTree(path, 20)
         }
 
         register("readFile", "readFile {'path':'/xxx'}", "读取path路径对应的文件内容")
         { param ->
-            val filePath: String = param.getString("path") ?: "/"
+            var filePath: String = parsePath(param.getString("path") ?: "/")
 
             // 检查文件是否存在
             val file = File(filePath)
@@ -53,28 +61,40 @@ object McpProxy {
 
         register("createFile", "createFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "在path路径创建文件，并将content中的内容写入文件")
         { param ->
-            val filePath: String = param.getString("path") ?: "/"
+            var filePath: String = parsePath(param.getString("path") ?: "/")
             val content: String = param.getString("content") ?: ""
 
-            // 检查文件是否存在
-            val file = File(filePath)
-            if (file.exists()) {
-                return@register "文件已存在，不允许写入"
+            var targetFile = File(filePath)
+            // 如果文件已存在，则按规则生成新文件名
+            if (targetFile.exists()) {
+                val parent = targetFile.parentFile
+                val baseName = targetFile.nameWithoutExtension
+                val ext = targetFile.extension.let { if (it.isEmpty()) "" else ".$it" }
+                // 扫描同级目录下已存在的序列号文件
+                val seqList = parent.listFiles { f ->
+                    f.name.matches(Regex("""^\Q$baseName\E\.(\d+)\Q$ext\E$"""))
+                }?.mapNotNull {
+                    Regex("""^\Q$baseName\E\.(\d+)\Q$ext\E$""").matchEntire(it.name)?.groupValues?.get(1)?.toIntOrNull()
+                }?.sortedDescending() ?: emptyList()
+                val nextSeq = (seqList.firstOrNull() ?: 0) + 1
+                targetFile = File(parent, "$baseName.$nextSeq$ext")
             }
 
-            File(filePath).bufferedWriter().use { writer ->
+            // 确保父目录存在（处理多级文件夹的情况）
+            targetFile.parentFile?.mkdirs()
+
+            targetFile.bufferedWriter().use { writer ->
                 writer.write(content)
             }
 
-            // 读取文件内容
-            return@register "文件写入成功"
+            return@register "文件写入成功：${targetFile.name}"
         }
 
         register("modifyFile",
             "modifyFile {\"path\":\"/xxx\", \"originContent\":\"aaa\", \"modifyContent\":\"bbb\"}",
             "修改path路径的文件，将原文件中的所有的originContent文本，替换为modifyContent")
         { param ->
-            val filePath: String = param.getString("path") ?: "/"
+            val filePath: String = parsePath(param.getString("path") ?: "/")
             var originContent: String = param.getString("originContent") ?: ""
             var modifyContent: String = param.getString("modifyContent") ?: ""
 
@@ -99,8 +119,16 @@ object McpProxy {
             }
             val source: Path = Paths.get(filePath)
             val fileName = File(filePath).name
-            val timestamp = System.currentTimeMillis()
-            val target: Path = backupDir.resolve("${fileName}.${timestamp}")
+            // versionNo的获取逻辑如下：取相同文件名、相同processId最大的versionNo+1，如果不存在该文件，则versionNo = 1\
+            val processId = param.getString("processId") ?: "default"
+            val existingVersions = Files.list(backupDir)
+                .filter { it.fileName.toString().startsWith("$fileName.$processId.") }
+                .map { it.fileName.toString().substringAfterLast(".").toIntOrNull() ?: 0 }
+                .sorted(Comparator.naturalOrder<Int?>().reversed())
+                .toList()
+
+            val versionNo = if (existingVersions.isEmpty()) 1 else existingVersions.first() + 1
+            val target: Path = backupDir.resolve("${fileName}.$processId.$versionNo")
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
 
             File(filePath).bufferedWriter().use { writer ->
@@ -113,7 +141,7 @@ object McpProxy {
 
         register("createDir", "createDir {'path':'/xxx'}", "在path路径创建文件夹")
         { param ->
-            val filePath: String = param.getString("path") ?: "/"
+            val filePath: String = parsePath(param.getString("path") ?: "/")
 
             val directory = File(filePath)
 
@@ -135,8 +163,8 @@ object McpProxy {
 
         register("moveFile", "moveFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将fromPath文件的路径移动到toPath路径")
         { param ->
-            val fromPath: String = param.getString("fromPath") ?: "/"
-            val toPath: String = param.getString("toPath") ?: "/"
+            val fromPath: String = parsePath(param.getString("fromPath") ?: "/")
+            val toPath: String = parsePath(param.getString("toPath") ?: "/")
 
             val sourceFile = File(fromPath)
             val destinationFile = File(toPath)
@@ -162,8 +190,8 @@ object McpProxy {
 
         register("copyFile", "copyFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将fromPath文件复制到toPath路径")
         { param ->
-            val fromPath: String = param.getString("fromPath") ?: "/"
-            val toPath: String = param.getString("toPath") ?: "/"
+            var fromPath: String = parsePath(param.getString("fromPath") ?: "/")
+            var toPath: String = parsePath(param.getString("toPath") ?: "/")
 
             val sourceFile = File(fromPath)
             val destinationFile = File(toPath)
@@ -190,9 +218,25 @@ object McpProxy {
             }
         }
 
+
+
+        if (getOS().contains("win")) {
+            // Windows 环境使用 WSL 执行 bash
+            register("executeBash", "executeBash {\"script\":\"ls -l '/mnt/c'\"}", "执行bash脚本，并返回bash的输出内容。Windows路径需要转换为Linux路径（C: → /mnt/c）")
+            { param ->
+                executeBashScript(param)
+            }
+        } else {
+            // Linux/macOS 直接使用 bash
+            register("executeBash", "executeBash {'script':'ls -l'}", "执行bash脚本，并返回bash的输出内容")
+            { param ->
+                executeBashScript(param)
+            }
+        }
+
         register("openUrl", "openUrl {'url':'xxx'}", "在打开url对应的网页或文件") {
                 param ->
-            var url = param.getString("url")
+            var url = parsePath(param.getString("url"))
             when {
                 getOS().contains("win") -> {
                     executeCommand("start $url")
@@ -204,38 +248,13 @@ object McpProxy {
             "打开成功"
         }
 
-
-        register("listJavaDependencyPath", "listJavaDependencyPath {'javaFilePath':'/xxx'}", "列出Java文件的所有import类的绝对路径") { param ->
-            val javaPath: String = param.getString("javaFilePath") ?: return@register "路径不能为空"
-            val javaFile = File(javaPath)
-            if (!javaFile.exists() || !javaFile.isFile) return@register "文件不存在，请先treeFile查看文件列表"
-
-            val importRegex = Regex("^import\\s+([\\w.\\*]+);?")
-            val imports = javaFile.readLines()
-                .mapNotNull { line -> importRegex.matchEntire(line.trim())?.groupValues?.get(1) }
-                .filterNot { it.startsWith("java.") || it.startsWith("javax.") }
-
-            val result = StringBuilder()
-            result.appendLine("| 类名称 | 绝对路径地址 |")
-            result.appendLine("|--------|--------------|")
-
-            imports.forEach { fqcn ->
-                val className = fqcn.substringAfterLast('.')
-                val relativePath = fqcn.replace('.', '/') + ".java"
-                val absolutePath = javaFile.parentFile?.parentFile?.parentFile?.parentFile?.parentFile?.parentFile?.parentFile
-                    ?.resolve("src/main/java/$relativePath")
-                    ?.absolutePath ?: "未找到"
-                result.appendLine("| $className | $absolutePath |")
-            }
-            result.toString()
-        }
-
         loadExtensions()
 
         for (mcdMetaData in metaDataList) {
             CmdReceiver.register(mcdMetaData.cmdName, cmdGroupList,
                 "#mcp:${mcdMetaData.cmdExample}#next#${mcdMetaData.cmdDesc}") { params ->
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
+                param["processId"] = params.cmdArgs[1]
                 val resultMap = mutableMapOf<String, String>()
                 resultMap["result"] = mcdMetaData.executor.invoke(param)
                 resultMap
@@ -314,6 +333,9 @@ object McpProxy {
 }
 
 fun register(cmdName: String, cmdExample: String, cmdDesc: String, executor: (param: JSONObject) -> String) {
+    if (cmdName in McpProxy.blacklist) {
+        return
+    }
     McpProxy.metaDataList.add(McdMetaData(cmdName, cmdExample, cmdDesc, executor))
 }
 
