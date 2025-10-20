@@ -19,7 +19,7 @@ object McpProxy {
 
     private val log: Logger = LoggerFactory.getLogger(McpProxy::class.java)
 
-    val metaDataList : MutableList<McdMetaData> = mutableListOf()
+    val metaDataList : MutableList<CmdMetaData> = mutableListOf()
 
     var blacklist: List<String> = arrayListOf()
 
@@ -28,6 +28,9 @@ object McpProxy {
         if (blacklistFile.exists()) {
             blacklist = blacklistFile.readLines().map { it.trim() }.filter { it.isNotEmpty() }
         }
+
+        // 注册系统指令
+        SystemCommand.register(cmdGroupList)
 
         register("treeFile", "treeFile {'path':'/xxx'}", "以树型结构输出path路径下的所有文件")
         { param ->
@@ -50,9 +53,9 @@ object McpProxy {
             }
 
             // 检查文件大小不超过32KB
-            val maxSize = 32 * 1024
+            val maxSize = 64 * 1024
             if (file.length() > maxSize) {
-                return@register "文件大小超过32KB限制，读取失败，请终止流程"
+                return@register "文件大小超过64KB限制，读取失败，请终止流程"
             }
 
             // 读取文件内容
@@ -61,7 +64,7 @@ object McpProxy {
 
         register("createFile", "createFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "在path路径创建文件，并将content中的内容写入文件")
         { param ->
-            var filePath: String = parsePath(param.getString("path") ?: "/")
+            val filePath: String = parsePath(param.getString("path") ?: "/")
             val content: String = param.getString("content") ?: ""
 
             var targetFile = File(filePath)
@@ -299,6 +302,9 @@ object McpProxy {
             depthFileCntMap[currentDepth] = depthFileCntMap[currentDepth]!! + dir.listFiles()!!.size
             dir.listFiles()?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name })?.forEachIndexed { index, file ->
                 val isLast = index == dir.listFiles()!!.size - 1
+                if (file.name.endsWith(".class")) {
+                    return@forEachIndexed
+                }
                 val node = if (isLast) "└──" else "├──"
                 sb.appendLine("$prefix$node${file.name}")
                 if (file.isDirectory) {
@@ -336,10 +342,10 @@ fun register(cmdName: String, cmdExample: String, cmdDesc: String, executor: (pa
     if (cmdName in McpProxy.blacklist) {
         return
     }
-    McpProxy.metaDataList.add(McdMetaData(cmdName, cmdExample, cmdDesc, executor))
+    McpProxy.metaDataList.add(CmdMetaData(cmdName, cmdExample, cmdDesc, executor))
 }
 
-data class McdMetaData (
+data class CmdMetaData (
     val cmdName: String,
     val cmdExample: String,
     val cmdDesc: String,

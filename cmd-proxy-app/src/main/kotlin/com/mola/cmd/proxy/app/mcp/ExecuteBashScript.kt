@@ -5,6 +5,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.file.Files
 import java.nio.file.Paths
+import kotlin.io.path.absolutePathString
 
 /**
  * 执行bash脚本并返回输出内容
@@ -17,7 +18,7 @@ class ExecuteBashScript {
     fun executeCommand(script: String): String {
         // 危险指令黑名单（防止执行高危操作）
         val dangerousPatterns = listOf(
-            "rm",
+            "rm -r",
             ":(){ :|:& };:",
             "dd if=/dev/zero",
             "mkfs",
@@ -108,12 +109,9 @@ fun parsePath(url: String): String {
         }
         return "$driveLetter:$remainPath"
     }
-    return parsedUrl
-}
 
-fun main() {
-    val parsedUrl = "/mnt/c"
-    val driveLetter = parsedUrl.substring(5, 6).uppercase()
-    val remainPath = parsedUrl.substring(6).replace("/", "\\")
-    println("$driveLetter:$remainPath")
+    if (!url.contains("/") && !url.contains("\\")) {
+        parsedUrl = "./$parsedUrl"
+    }
+    return parsedUrl
 }
