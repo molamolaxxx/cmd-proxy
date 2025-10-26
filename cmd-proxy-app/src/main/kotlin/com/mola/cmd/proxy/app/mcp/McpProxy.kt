@@ -291,6 +291,9 @@ object McpProxy {
         if (depth < 1) {
             return "文件路径打印失败"
         }
+        if (root.listFiles()?.isNotEmpty() == false) {
+            return "无文件"
+        }
         var currentDepth = 0
         val sb = StringBuilder()
         val depthFileCntMap = Maps.newLinkedHashMap<Int, Int>()
