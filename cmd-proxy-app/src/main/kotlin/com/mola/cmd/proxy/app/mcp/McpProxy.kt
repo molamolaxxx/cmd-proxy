@@ -52,10 +52,10 @@ object McpProxy {
                 return@register "此路径为文件夹，无法直接读取"
             }
 
-            // 检查文件大小不超过32KB
-            val maxSize = 64 * 1024
+            // 检查文件大小不超过128KB
+            val maxSize = 128 * 1024
             if (file.length() > maxSize) {
-                return@register "文件大小超过64KB限制，读取失败，请终止流程"
+                return@register "文件大小超过128KB限制，读取失败，请终止流程"
             }
 
             // 读取文件内容
