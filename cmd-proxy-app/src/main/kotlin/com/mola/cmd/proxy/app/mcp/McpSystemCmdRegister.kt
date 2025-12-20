@@ -26,13 +26,18 @@ object SystemCommand {
             val latest = processDir.listFiles { file -> file.isDirectory }
                 ?.maxByOrNull { it.lastModified() } ?: return@register resultMap
             val listFiles = latest.listFiles { file ->
-                file.name.equals("todoList.md") || file.name.equals("resource.md") || file.name.equals("request.txt") }
-            if (listFiles == null || listFiles.size != 3) {
+                file.name.equals("todoList.md") || file.name.equals("resource.md")
+                        || file.name.equals("request.txt") || file.name.equals("question.md")}
+            if (listFiles == null || listFiles.size < 3) {
                 println("queryLastProcessDir fileSize error $listFiles")
                 return@register resultMap
             }
 
+            val existFiles = mutableSetOf<String>()
+            listFiles.forEach { if (it.exists()) existFiles.add(it.name) }
+
             resultMap["result"] = latest.name ?: ""
+            resultMap["existFiles"] = existFiles.joinToString(",")
             resultMap
         }
 
