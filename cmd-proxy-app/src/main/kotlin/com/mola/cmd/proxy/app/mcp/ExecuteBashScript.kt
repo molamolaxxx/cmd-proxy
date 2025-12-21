@@ -3,6 +3,8 @@ package com.mola.cmd.proxy.app.mcp
 import com.alibaba.fastjson.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.io.File
+import java.nio.charset.Charset
 import java.nio.file.Files
 import java.nio.file.Paths
 import kotlin.io.path.absolutePathString
@@ -12,7 +14,25 @@ import kotlin.io.path.absolutePathString
  */
 class ExecuteBashScript {
     companion object {
-        var workingDirectory: String = "."
+        private val PERSIST_FILE = System.getProperty("user.home") + "/.cmd-proxy-wd"
+        var workingDirectory: String = readPersistedWd()
+
+        private fun readPersistedWd(): String {
+            return try {
+                val file = File(PERSIST_FILE)
+                if (!file.exists() || file.length() == 0L) return "."
+                file.readText(Charset.defaultCharset()).trim().takeIf { it.isNotEmpty() } ?: "."
+            } catch (e: Exception) {
+                "."
+            }
+        }
+
+        private fun writePersistedWd(path: String) {
+            try {
+                File(PERSIST_FILE).writeText(path, Charset.defaultCharset())
+            } catch (ignored: Exception) {
+            }
+        }
     }
 
     fun executeCommand(script: String): String {
@@ -72,6 +92,7 @@ class ExecuteBashScript {
             if (script.startsWith("cd ")) {
                 if (lastLine != null && parsePath(lastLine).pathExists()) {
                     workingDirectory = lastLine
+                    writePersistedWd(lastLine)
                     val lines = result.lines()
                     if (lines.isNotEmpty()) {
                         result = lines.dropLast(1).joinToString("\n")
