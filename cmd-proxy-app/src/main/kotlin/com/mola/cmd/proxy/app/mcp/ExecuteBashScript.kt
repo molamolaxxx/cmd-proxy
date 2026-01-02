@@ -108,6 +108,15 @@ class ExecuteBashScript {
 
 fun String.pathExists(): Boolean = Files.exists(Paths.get(this))
 
+fun String.replaceLastOccurrence(oldValue: String, newValue: String): String {
+    val lastIndex = this.lastIndexOf(oldValue)
+    return if (lastIndex == -1) {
+        this // ??? oldValue???????
+    } else {
+        this.substring(0, lastIndex) + newValue + this.substring(lastIndex + oldValue.length)
+    }
+}
+
 fun executeBashScript(param: JSONObject): String {
     val script: String = param.getString("script") ?: return "脚本内容不能为空"
     val session = ExecuteBashScript()
@@ -121,6 +130,11 @@ fun parsePath(url: String): String {
     } else if (url.startsWith("./")) {
         parsedUrl = ExecuteBashScript.workingDirectory + url.substring(1)
     }
+
+    if (!parsedUrl.startsWith("/") && !parsedUrl.contains("\\")) {
+        parsedUrl = "${ExecuteBashScript.workingDirectory}/$parsedUrl"
+    }
+
     // WSL → Windows 路径转换
     if (parsedUrl.startsWith("/mnt/") && getOS().contains("win")) {
         val driveLetter = parsedUrl.substring(5, 6).uppercase()
@@ -131,8 +145,5 @@ fun parsePath(url: String): String {
         return "$driveLetter:$remainPath"
     }
 
-    if (!url.contains("/") && !url.contains("\\")) {
-        parsedUrl = "./$parsedUrl"
-    }
     return parsedUrl
 }

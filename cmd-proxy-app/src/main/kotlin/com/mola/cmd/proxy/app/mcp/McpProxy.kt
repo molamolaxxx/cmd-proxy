@@ -40,7 +40,7 @@ object McpProxy {
 
         register("readFile", "readFile {'path':'/xxx'}", "读取path路径对应的文件内容")
         { param ->
-            var filePath: String = parsePath(param.getString("path") ?: "/")
+            val filePath: String = parsePath(param.getString("path") ?: "/")
 
             // 检查文件是否存在
             val file = File(filePath)
@@ -57,9 +57,18 @@ object McpProxy {
             if (file.length() > maxSize) {
                 return@register "文件大小超过128KB限制，读取失败，请终止流程"
             }
+            val fileContent = file.readText(Charset.forName("UTF-8"))
+            val onlyReturnContent = param.getBoolean("onlyReturnContent")
+            if (onlyReturnContent != null && onlyReturnContent) {
+                return@register fileContent;
+            }
 
             // 读取文件内容
-            file.readText(Charset.forName("UTF-8"))
+            "------------------${file.name}内容开始------------------\n" +
+              fileContent+
+            "\n------------------${file.name}内容结束------------------\n" +
+            getFileAdditionContent(file, fileContent)
+
         }
 
         register("createFile", "createFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "在path路径创建文件，并将content中的内容写入文件")
@@ -112,7 +121,13 @@ object McpProxy {
                 originContent = originContent.replace("\n", "\r\n")
                 modifyContent = modifyContent.replace("\n", "\r\n")
             }
-            val newContent = fileContent.replace(originContent, modifyContent)
+            var newContent: String?
+            if (originContent.length > 5) {
+                newContent = fileContent.replace(originContent, modifyContent)
+            } else{
+                newContent = fileContent.replaceLastOccurrence(originContent, modifyContent)
+            }
+
 
             // 文件备份
             val userHome = System.getProperty("user.home")
@@ -278,6 +293,55 @@ object McpProxy {
                 McpExtensionEngine.eval(file.readText(Charset.forName("UTF-8")))
                 log.info("finish load extension : ${it.absolutePathString()}")
             }
+    }
+
+    private fun getFileAdditionContent(file: File, fileContent: String): String {
+        if (!file.path.endsWith(".java")) {
+            return "";
+        }
+
+        val split = File.separatorChar
+
+        val importRegex = Regex("^import\\s+([\\w.\\*]+);?")
+        val imports = file.readLines()
+            .mapNotNull { line -> importRegex.matchEntire(line.trim())?.groupValues?.get(1) }
+            .filterNot { it.startsWith("java.") || it.startsWith("javax.") }
+
+        val result = StringBuilder()
+        result.appendLine("| 依赖类名称 | 绝对路径地址 |")
+        result.appendLine("|--------|--------------|")
+
+        var hasDependency = false
+
+        // 工作目录
+        val rootPath = parsePath(ExecuteBashScript.workingDirectory)
+        imports.distinct().forEach { import ->
+            val className = import.substringAfterLast('.')
+            val relativePath = "src${split}main${split}java${split}" + import.replace('.', split) + ".java"
+
+            var finalAbsolutePath: String? = null;
+            var current: File? = file.parentFile.canonicalFile
+            while (current != null && finalAbsolutePath == null) {
+                val directories = current.listFiles { f -> f.isDirectory }
+                directories?.forEach { dir ->
+                    val file = File(dir.absolutePath + split + relativePath)
+                    if (file.exists()) {
+                        finalAbsolutePath = file.absolutePath
+                    }
+                }
+                if (finalAbsolutePath == null) {
+                    current = current.parentFile?.canonicalFile
+                }
+            }
+            if (finalAbsolutePath != null && !finalAbsolutePath!!.startsWith(rootPath) && fileContent.windowed(className.length).count { it == className } > 1) {
+                result.appendLine("| $className | $finalAbsolutePath |")
+                hasDependency = true
+            }
+        }
+        if (!hasDependency) {
+            return ""
+        }
+        return "------------------${file.name}其他信息开始------------------\n$result------------------${file.name}其他信息结束------------------"
     }
 
     private fun printTree(path: String, depth: Int) : String {
