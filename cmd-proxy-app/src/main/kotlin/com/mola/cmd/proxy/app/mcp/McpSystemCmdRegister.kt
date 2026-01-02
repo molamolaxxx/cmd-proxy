@@ -28,7 +28,7 @@ object SystemCommand {
             val listFiles = latest.listFiles { file ->
                 file.name.equals("todoList.md") || file.name.equals("resource.md")
                         || file.name.equals("request.txt") || file.name.equals("question.md")}
-            if (listFiles == null || listFiles.size < 3) {
+            if (listFiles == null || listFiles.size < 2) {
                 println("queryLastProcessDir fileSize error $listFiles")
                 return@register resultMap
             }
