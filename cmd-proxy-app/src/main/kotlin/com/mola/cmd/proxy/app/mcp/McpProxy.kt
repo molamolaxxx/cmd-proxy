@@ -53,13 +53,13 @@ object McpProxy {
             }
 
             // 检查文件大小不超过128KB
-            val maxSize = 128 * 1024
+            val maxSize = 256 * 1024
             if (file.length() > maxSize) {
-                return@register "文件大小超过128KB限制，读取失败，请终止流程"
+                return@register "文件大小超过256KB限制，读取失败，请终止流程"
             }
             val fileContent = file.readText(Charset.forName("UTF-8"))
             val onlyReturnContent = param.getBoolean("onlyReturnContent")
-            if (onlyReturnContent != null && onlyReturnContent) {
+            if ((onlyReturnContent != null && onlyReturnContent) || file.name.contains("resource.md")) {
                 return@register fileContent;
             }
 
