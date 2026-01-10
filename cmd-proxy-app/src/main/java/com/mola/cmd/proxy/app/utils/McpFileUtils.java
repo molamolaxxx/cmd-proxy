@@ -25,6 +25,10 @@ public class McpFileUtils {
             Arrays.asList("jpg", "jpeg", "png","bmp","gif", "pdf")
     );
 
+    private static Set<String> binarySuffixSet = new HashSet<>(
+            Arrays.asList("jpg", "jpeg", "png", "bmp", "gif", "pdf", "zip", "rar", "7z", "exe", "bin", "jar", "war", "class", "so", "dll", "dylib", "mp3", "mp4", "avi", "mov", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "ico")
+    );
+
     /**
      * 文件或目录是否存在
      */
@@ -284,6 +288,16 @@ public class McpFileUtils {
     public static boolean isImage(String fileName) {
         String lower = fileName.toLowerCase();
         for (String suffix : imageSuffixSet) {
+            if (lower.endsWith(suffix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isBinaryFile(String fileName) {
+        String lower = fileName.toLowerCase();
+        for (String suffix : binarySuffixSet) {
             if (lower.endsWith(suffix)) {
                 return true;
             }

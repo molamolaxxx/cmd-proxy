@@ -99,6 +99,11 @@ class ExecuteBashScript {
                     }
                 }
             }
+            if (result.isBlank()) {
+                result = "执行完成"
+            } else{
+                result = "执行完成，返回结果: $result"
+            }
             return result
         } catch (e: Exception) {
             return "执行bash脚本时发生错误: ${e.message}"

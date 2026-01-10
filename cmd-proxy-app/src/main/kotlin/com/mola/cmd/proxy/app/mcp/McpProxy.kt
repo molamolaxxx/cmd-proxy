@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.mcp
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
 import com.google.common.collect.Maps
+import com.mola.cmd.proxy.app.utils.McpFileUtils
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -52,11 +53,17 @@ object McpProxy {
                 return@register "此路径为文件夹，无法直接读取"
             }
 
-            // 检查文件大小不超过128KB
+            // 检查文件大小不超过256KB
             val maxSize = 256 * 1024
             if (file.length() > maxSize) {
                 return@register "文件大小超过256KB限制，读取失败，请终止流程"
             }
+            
+            // 检查是否为二进制文件
+            if (McpFileUtils.isBinaryFile(file.name)) {
+                return@register "二进制文件不允许读取，文件类型不支持"
+            }
+            
             val fileContent = file.readText(Charset.forName("UTF-8"))
             val onlyReturnContent = param.getBoolean("onlyReturnContent")
             if ((onlyReturnContent != null && onlyReturnContent) || file.name.contains("resource.md")) {
