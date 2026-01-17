@@ -11,13 +11,13 @@ object SystemCommand {
         CmdReceiver.register("systemSettings", cmdGroupList,
             "系统环境变量获取") { params ->
             val resultMap = mutableMapOf<String, String>()
-            resultMap["result"] = "操作系统:${getOS()}\n当前路径:${parsePath(ExecuteBashScript.workingDirectory)}"
+            resultMap["result"] = "操作系统:${getOS()}\n当前路径:${parsePath(queryWorkingDir())}"
             resultMap
         }
 
         CmdReceiver.register("queryLastProcessDir", cmdGroupList,
             "读取最新的process文件夹信息") { params ->
-            val processDir = File("${parsePath(ExecuteBashScript.workingDirectory)}/.process")
+            val processDir = File("${parsePath(queryWorkingDir())}/.process")
             val resultMap = mutableMapOf<String, String>()
             if (!processDir.exists() || !processDir.isDirectory) {
                 resultMap["result"] = ""

@@ -247,9 +247,9 @@ object McpProxy {
 
         if (getOS().contains("win")) {
             // Windows 环境使用 WSL 执行 bash
-            register("executeBash", "executeBash {\"script\":\"ls -l '/mnt/c'\"}", "执行bash脚本，并返回bash的输出内容。Windows路径需要转换为Linux路径（C: → /mnt/c）")
+            register("executePowerShell", "executePowerShell {\"script\":\"cd C:\\\\Users\"}", "执行powershell脚本，并返回脚本的输出内容")
             { param ->
-                executeBashScript(param)
+                executePowerShellScript(param)
             }
         } else {
             // Linux/macOS 直接使用 bash
@@ -321,7 +321,7 @@ object McpProxy {
         var hasDependency = false
 
         // 工作目录
-        val rootPath = parsePath(ExecuteBashScript.workingDirectory)
+        val rootPath = parsePath(queryWorkingDir())
         imports.distinct().forEach { import ->
             val className = import.substringAfterLast('.')
             val relativePath = "src${split}main${split}java${split}" + import.replace('.', split) + ".java"

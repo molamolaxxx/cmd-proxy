@@ -111,6 +111,19 @@ class ExecuteBashScript {
     }
 }
 
+
+fun queryWorkingDir(): String {
+    when {
+        getOS().contains("win") -> {
+            return ExecutePowerShellScript.workingDirectory
+        }
+        getOS().contains("linux") -> {
+            return ExecuteBashScript.workingDirectory
+        }
+    }
+    return ""
+}
+
 fun String.pathExists(): Boolean = Files.exists(Paths.get(this))
 
 fun String.replaceLastOccurrence(oldValue: String, newValue: String): String {
@@ -129,15 +142,18 @@ fun executeBashScript(param: JSONObject): String {
 }
 
 fun parsePath(url: String): String {
-    var parsedUrl = url
-    if (url == ".") {
-        parsedUrl = ExecuteBashScript.workingDirectory
-    } else if (url.startsWith("./")) {
-        parsedUrl = ExecuteBashScript.workingDirectory + url.substring(1)
+    var parsedUrl = url.replace("\\", "\\\\")
+
+    // 通用相对路径
+    if (parsedUrl == ".") {
+        parsedUrl = queryWorkingDir()
+    } else if (parsedUrl.startsWith("./")) {
+        parsedUrl = queryWorkingDir() + parsedUrl.substring(1)
     }
 
-    if (!parsedUrl.startsWith("/") && !parsedUrl.contains("\\")) {
-        parsedUrl = "${ExecuteBashScript.workingDirectory}/$parsedUrl"
+    // linux相对路径
+    if (!parsedUrl.startsWith("/") && !parsedUrl.contains(":")) {
+        parsedUrl = "${queryWorkingDir()}/$parsedUrl"
     }
 
     // WSL → Windows 路径转换
@@ -151,4 +167,8 @@ fun parsePath(url: String): String {
     }
 
     return parsedUrl
+}
+
+fun main() {
+    println(parsePath("C:\\\\Users\\\\cn-molaxu\\\\Desktop\\\\my-test"))
 }
