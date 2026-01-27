@@ -29,6 +29,22 @@ fun getOS(): String {
 }
 
 
+fun findSkillDirectory(skillName: String, skillsDir: File): File? {
+    if (!skillsDir.exists() || !skillsDir.isDirectory) return null
+    
+    val skillDirs = skillsDir.listFiles { file -> file.isDirectory } ?: arrayOf<File>()
+    for (skillDir in skillDirs) {
+        val skillMd = File(skillDir, "SKILL.md")
+        if (!skillMd.exists()) continue
+        val content = skillMd.readText()
+        val name = Regex("""^name:\s*(.+)""", RegexOption.MULTILINE).find(content)?.groupValues?.get(1)?.trim()
+        if (name == skillName) {
+            return skillDir
+        }
+    }
+    return null
+}
+
 fun printTree(path: String, depth: Int) : String {
     val root = File(path)
     if (!root.exists()) {

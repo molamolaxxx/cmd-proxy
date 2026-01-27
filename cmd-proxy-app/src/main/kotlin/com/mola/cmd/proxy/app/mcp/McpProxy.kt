@@ -39,6 +39,39 @@ object McpProxy {
             return@register printTree(path, 20)
         }
 
+        register("loadSkill", "loadSkill {'skillName':'xxxx'}", "加载并显示指定skill的文件夹信息和SKILL.md内容")
+        { param ->
+            val skillName = param.getString("skillName") ?: return@register "请指定skill名称"
+            
+            val workSkillsDir = File("${parsePath(queryWorkingDir())}/.skills")
+            val userSkillsDir = File("${System.getProperty("user.home")}/.skills")
+            
+            val skillDir = findSkillDirectory(skillName, workSkillsDir) ?: findSkillDirectory(skillName, userSkillsDir) 
+                ?: return@register "未找到名为 $skillName 的skill"
+            
+            val skillInfo = StringBuilder()
+            
+            // 打印文件夹信息
+            skillInfo.appendLine("---------- skill文件夹信息 [start]----------")
+            skillInfo.appendLine("文件夹路径：${skillDir.absolutePath}")
+            skillInfo.appendLine("文件夹结构：\n${printTree(skillDir.absolutePath, 20)}")
+            skillInfo.appendLine("---------- skill文件夹信息 [end]----------")
+            
+            // 读取SKILL.md内容
+            val skillMd = File(skillDir, "SKILL.md")
+            if (skillMd.exists()) {
+                skillInfo.appendLine("---------- SKILL.md内容[start]----------")
+                skillInfo.appendLine(skillMd.readText())
+                skillInfo.appendLine("---------- SKILL.md内容[end]----------")
+            } else {
+                skillInfo.appendLine("---------- SKILL.md内容[start]----------")
+                skillInfo.appendLine("未找到SKILL.md文件")
+                skillInfo.appendLine("---------- SKILL.md内容[end]----------")
+            }
+            
+            return@register skillInfo.toString()
+        }
+
         register("readFile", "readFile {'path':'/xxx'}", "读取path路径对应的文件内容")
         { param ->
             val filePath: String = parsePath(param.getString("path") ?: "/")

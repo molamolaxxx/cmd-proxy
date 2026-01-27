@@ -85,9 +85,9 @@ object SystemCommand {
             "读取并展示 .skills 目录下所有 skill 的元信息及目录结构") { params ->
             val resultMap = mutableMapOf<String, String>()
             val lines = mutableListOf<String>()
-            lines.add("使用skill前，先读取skill名称对应的文件夹结构和SKILL.md")
-            lines.add("|skill名称|描述|文件夹路径|")
-            lines.add("|---|---|---|")
+            lines.add("使用loadSkill指令加载技能")
+            lines.add("|skill名称|描述|")
+            lines.add("|---|---|")
             
             val skillNameSet = mutableSetOf<String>()
             
@@ -119,7 +119,7 @@ object SystemCommand {
             if (!name.isNullOrEmpty() && !desc.isNullOrEmpty()) {
                 if (name !in skillNameSet) {
                     skillNameSet.add(name)
-                    lines.add("|${name}|${desc}|${skillDir.absolutePath}|")
+                    lines.add("|${name}|${desc}|")
                 }
             }
         }
