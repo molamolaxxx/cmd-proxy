@@ -300,6 +300,7 @@ object McpProxy {
                 "#mcp:${mcdMetaData.cmdExample}#next#${mcdMetaData.cmdDesc}") { params ->
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
                 param["processId"] = params.cmdArgs[1]
+                param["sessionId"] = params.cmdArgs[2]
                 val resultMap = mutableMapOf<String, String>()
                 resultMap["result"] = mcdMetaData.executor.invoke(param)
                 resultMap
