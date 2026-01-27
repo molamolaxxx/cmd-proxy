@@ -64,5 +64,64 @@ object SystemCommand {
 
             return@register resultMap
         }
+
+        CmdReceiver.register("openUrl", cmdGroupList, "在打开url对应的网页或文件") {
+                param ->
+            val param: JSONObject = JSON.parse(param.cmdArgs[0]) as JSONObject
+            val url = parsePath(param.getString("url"))
+            when {
+                getOS().contains("win") -> {
+                    executeCommand("start $url")
+                }
+                getOS().contains("linux") -> {
+                    executeCommand("xdg-open $url")
+                }
+            }
+
+            mutableMapOf<String, String>()
+        }
+
+        CmdReceiver.register("listSkills", cmdGroupList,
+            "读取并展示 .skills 目录下所有 skill 的元信息及目录结构") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            val lines = mutableListOf<String>()
+            lines.add("使用skill前，先读取skill名称对应的文件夹结构和SKILL.md")
+            lines.add("|skill名称|描述|文件夹路径|")
+            lines.add("|---|---|---|")
+            
+            val skillNameSet = mutableSetOf<String>()
+            
+            val workSkillsDir = File("${parsePath(queryWorkingDir())}/.skills")
+            val userSkillsDir = File("${System.getProperty("user.home")}/.skills")
+            
+            processSkillsDirectory(workSkillsDir, skillNameSet, lines)
+            processSkillsDirectory(userSkillsDir, skillNameSet, lines)
+            
+            if (lines.size == 3) {
+                resultMap["result"] = "暂无可用Skill"
+            } else{
+                resultMap["result"] = lines.joinToString("\n")
+            }
+            return@register resultMap
+        }
+    }
+    
+    private fun processSkillsDirectory(skillsDir: File, skillNameSet: MutableSet<String>, lines: MutableList<String>) {
+        if (!skillsDir.exists() || !skillsDir.isDirectory) return
+        
+        val skillDirs = skillsDir.listFiles { file -> file.isDirectory } ?: arrayOf<File>()
+        for (skillDir in skillDirs) {
+            val skillMd = File(skillDir, "SKILL.md")
+            if (!skillMd.exists()) continue
+            val content = skillMd.readText()
+            val name = Regex("""^name:\s*(.+)""", RegexOption.MULTILINE).find(content)?.groupValues?.get(1)?.trim()
+            val desc = Regex("""^description:\s*(.+)""", RegexOption.MULTILINE).find(content)?.groupValues?.get(1)?.trim()
+            if (!name.isNullOrEmpty() && !desc.isNullOrEmpty()) {
+                if (name !in skillNameSet) {
+                    skillNameSet.add(name)
+                    lines.add("|${name}|${desc}|${skillDir.absolutePath}|")
+                }
+            }
+        }
     }
 }

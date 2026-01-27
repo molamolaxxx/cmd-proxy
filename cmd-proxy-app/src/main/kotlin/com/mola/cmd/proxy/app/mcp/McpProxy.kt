@@ -46,17 +46,17 @@ object McpProxy {
             // 检查文件是否存在
             val file = File(filePath)
             if (!file.exists()) {
-                return@register "文件不存在，请先treeFile查看文件列表"
+                return@register "文件不存在，请用treeFile查看文件列表"
             }
 
             if (file.isDirectory) {
-                return@register "此路径为文件夹，无法直接读取"
+                return@register "此路径为文件夹，请用treeFile查看文件列表"
             }
 
             // 检查文件大小不超过256KB
             val maxSize = 256 * 1024
             if (file.length() > maxSize) {
-                return@register "文件大小超过256KB限制，读取失败，请终止流程"
+                return@register "文件大小超过256KB限制，读取失败"
             }
             
             // 检查是否为二进制文件
@@ -71,9 +71,9 @@ object McpProxy {
             }
 
             // 读取文件内容
-            "------------------${file.name}内容开始------------------\n" +
+            "------------------${file.name}文件内容[start]------------------\n" +
               fileContent+
-            "\n------------------${file.name}内容结束------------------\n" +
+            "\n------------------${file.name}文件内容[end]------------------\n" +
             getFileAdditionContent(file, fileContent)
 
         }
@@ -120,7 +120,7 @@ object McpProxy {
             // 检查文件是否存在
             val file = File(filePath)
             if (!file.exists()) {
-                return@register "文件不存在，请先treeFile查看文件列表"
+                return@register "文件不存在，请用treeFile查看文件列表"
             }
 
             val fileContent = file.readText(Charsets.UTF_8)
@@ -253,25 +253,12 @@ object McpProxy {
             }
         } else {
             // Linux/macOS 直接使用 bash
-            register("executeBash", "executeBash {'script':'ls -l'}", "执行bash脚本，并返回bash的输出内容")
+            register("executeBash", "executeBash {\"script\":\"ls -l\"}", "执行bash脚本，并返回bash的输出内容")
             { param ->
                 executeBashScript(param)
             }
         }
 
-        register("openUrl", "openUrl {'url':'xxx'}", "在打开url对应的网页或文件") {
-                param ->
-            var url = parsePath(param.getString("url"))
-            when {
-                getOS().contains("win") -> {
-                    executeCommand("start $url")
-                }
-                getOS().contains("linux") -> {
-                    executeCommand("xdg-open $url")
-                }
-            }
-            "打开成功"
-        }
 
         loadExtensions()
 
@@ -348,67 +335,7 @@ object McpProxy {
         if (!hasDependency) {
             return ""
         }
-        return "------------------${file.name}其他信息开始------------------\n$result------------------${file.name}其他信息结束------------------"
-    }
-
-    private fun printTree(path: String, depth: Int) : String {
-        val root = File(path)
-        if (!root.exists()) {
-            return "路径不存在"
-        }
-        if (!root.isDirectory) {
-            return "路径不是文件夹"
-        }
-        if (depth < 1) {
-            return "文件路径打印失败"
-        }
-        if (root.listFiles()?.isNotEmpty() == false) {
-            return "无文件"
-        }
-        var currentDepth = 0
-        val sb = StringBuilder()
-        val depthFileCntMap = Maps.newLinkedHashMap<Int, Int>()
-        fun walk(dir: File, prefix: String) {
-            currentDepth ++
-            if (depthFileCntMap[currentDepth] == null) {
-                depthFileCntMap[currentDepth] = 0
-            }
-            depthFileCntMap[currentDepth] = depthFileCntMap[currentDepth]!! + dir.listFiles()!!.size
-            dir.listFiles()?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name })?.forEachIndexed { index, file ->
-                val isLast = index == dir.listFiles()!!.size - 1
-                if (file.name.endsWith(".class")) {
-                    return@forEachIndexed
-                }
-                val node = if (isLast) "└──" else "├──"
-                sb.appendLine("$prefix$node${file.name}")
-                if (file.isDirectory) {
-                    // 检查是否为隐藏文件夹（以.开头）
-                    if (file.name.startsWith(".")) {
-                        return@forEachIndexed
-                    }
-                    if ((file.listFiles()?.size ?: 0) > 100) {
-                        sb.appendLine(prefix + (if (isLast) "    └──(文件数量过多，已隐藏)" else "│   └──(文件数量过多，已隐藏)"))
-                    } else {
-                        if (currentDepth < depth) {
-                            walk(file, prefix + (if (isLast) "    " else "│   "))
-                        }
-                    }
-                }
-            }
-            currentDepth --
-        }
-        sb.appendLine(root.name)
-        walk(root, "")
-
-        var totalFileCount = 0
-        for ((index, i) in depthFileCntMap.values.withIndex()) {
-            totalFileCount += i
-            if (totalFileCount > 500) {
-                return printTree(path, index)
-            }
-        }
-
-        return sb.toString()
+        return "------------------${file.name}其他信息[start]------------------\n$result------------------${file.name}其他信息[end]------------------"
     }
 }
 
