@@ -11,13 +11,15 @@ object SystemCommand {
         CmdReceiver.register("systemSettings", cmdGroupList,
             "系统环境变量获取") { params ->
             val resultMap = mutableMapOf<String, String>()
-            resultMap["result"] = "操作系统:${getOS()}\n当前路径:${parsePath(queryWorkingDir())}"
+            val sessionId = params.cmdArgs.getOrNull(1) ?: "default"
+            resultMap["result"] = "操作系统:${getOS()}\n当前路径:${parsePath(queryWorkingDir(sessionId), sessionId)}"
             resultMap
         }
 
         CmdReceiver.register("queryLastProcessDir", cmdGroupList,
             "读取最新的process文件夹信息") { params ->
-            val processDir = File("${parsePath(queryWorkingDir())}/.process")
+            val sessionId = params.cmdArgs.getOrNull(1) ?: "default"
+            val processDir = File("${parsePath(queryWorkingDir(sessionId), sessionId)}/.process")
             val resultMap = mutableMapOf<String, String>()
             if (!processDir.exists() || !processDir.isDirectory) {
                 resultMap["result"] = ""
@@ -44,7 +46,8 @@ object SystemCommand {
         CmdReceiver.register("createFile64", cmdGroupList,
             "创建文件base64格式") { params ->
             val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
-            val filePath: String = parsePath(param.getString("path") ?: "/")
+            val sessionId = params.cmdArgs.getOrNull(1) ?: "default"
+            val filePath: String = parsePath(param.getString("path") ?: "/", sessionId)
             val base64: String = param.getString("base64") ?: ""
 
             val targetFile = File(filePath)
@@ -67,8 +70,9 @@ object SystemCommand {
 
         CmdReceiver.register("openUrl", cmdGroupList, "在打开url对应的网页或文件") {
                 param ->
+            val sessionId = param.cmdArgs.getOrNull(1) ?: "default"
             val param: JSONObject = JSON.parse(param.cmdArgs[0]) as JSONObject
-            val url = parsePath(param.getString("url"))
+            val url = parsePath(param.getString("url"), sessionId)
             when {
                 getOS().contains("win") -> {
                     executeCommand("start $url")
@@ -91,7 +95,8 @@ object SystemCommand {
             
             val skillNameSet = mutableSetOf<String>()
             
-            val workSkillsDir = File("${parsePath(queryWorkingDir())}/.skills")
+            val sessionId = params.cmdArgs.getOrNull(0) ?: "default"
+            val workSkillsDir = File("${parsePath(queryWorkingDir(sessionId), sessionId)}/.skills")
             val userSkillsDir = File("${System.getProperty("user.home")}/.skills")
             
             processSkillsDirectory(workSkillsDir, skillNameSet, lines)

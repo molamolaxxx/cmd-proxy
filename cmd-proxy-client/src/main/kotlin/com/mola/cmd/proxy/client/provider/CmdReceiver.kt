@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.client.provider
 
+import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.TypeReference
 import com.mola.cmd.proxy.client.CmdProxyCallbackService
 import com.mola.cmd.proxy.client.CmdProxyInvokeService
@@ -163,6 +164,7 @@ object CmdReceiver {
                 return CmdInvokeResponse.error("not available cmd ${param.cmdName} " +
                         "in group $cmdGroup")
             }
+            log.info("execute cmd : {}, param : {}", param.cmdName, JSON.toJSONString(param))
             val resultMap = receiverFuncMap[funcKey]?.invoke(param)!!
             return CmdInvokeResponse.success(CmdResponseContent(param.cmdId, resultMap))
         }

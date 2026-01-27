@@ -35,15 +35,17 @@ object McpProxy {
 
         register("treeFile", "treeFile {'path':'/xxx'}", "以树型结构输出path路径下的所有文件")
         { param ->
-            var path: String = parsePath(param.getString("path") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            var path: String = parsePath(param.getString("path") ?: "/", sessionId)
             return@register printTree(path, 20)
         }
 
         register("loadSkill", "loadSkill {'skillName':'xxxx'}", "加载并显示指定skill的文件夹信息和SKILL.md内容")
         { param ->
             val skillName = param.getString("skillName") ?: return@register "请指定skill名称"
+            val sessionId = param.getString("sessionId") ?: "default"
             
-            val workSkillsDir = File("${parsePath(queryWorkingDir())}/.skills")
+            val workSkillsDir = File("${parsePath(queryWorkingDir(sessionId), sessionId)}/.skills")
             val userSkillsDir = File("${System.getProperty("user.home")}/.skills")
             
             val skillDir = findSkillDirectory(skillName, workSkillsDir) ?: findSkillDirectory(skillName, userSkillsDir) 
@@ -74,7 +76,8 @@ object McpProxy {
 
         register("readFile", "readFile {'path':'/xxx'}", "读取path路径对应的文件内容")
         { param ->
-            val filePath: String = parsePath(param.getString("path") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            val filePath: String = parsePath(param.getString("path") ?: "/", sessionId)
 
             // 检查文件是否存在
             val file = File(filePath)
@@ -107,13 +110,14 @@ object McpProxy {
             "------------------${file.name}文件内容[start]------------------\n" +
               fileContent+
             "\n------------------${file.name}文件内容[end]------------------\n" +
-            getFileAdditionContent(file, fileContent)
+            getFileAdditionContent(file, fileContent, sessionId)
 
         }
 
         register("createFile", "createFile {\"path\":\"/xxx\", \"content\":\"yyy\"}", "在path路径创建文件，并将content中的内容写入文件")
         { param ->
-            val filePath: String = parsePath(param.getString("path") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            val filePath: String = parsePath(param.getString("path") ?: "/", sessionId)
             val content: String = param.getString("content") ?: ""
 
             var targetFile = File(filePath)
@@ -146,7 +150,8 @@ object McpProxy {
             "modifyFile {\"path\":\"/xxx\", \"originContent\":\"aaa\", \"modifyContent\":\"bbb\"}",
             "修改path路径的文件，将原文件中的所有的originContent文本，替换为modifyContent")
         { param ->
-            val filePath: String = parsePath(param.getString("path") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            val filePath: String = parsePath(param.getString("path") ?: "/", sessionId)
             var originContent: String = param.getString("originContent") ?: ""
             var modifyContent: String = param.getString("modifyContent") ?: ""
 
@@ -199,7 +204,8 @@ object McpProxy {
 
         register("createDir", "createDir {'path':'/xxx'}", "在path路径创建文件夹")
         { param ->
-            val filePath: String = parsePath(param.getString("path") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            val filePath: String = parsePath(param.getString("path") ?: "/", sessionId)
 
             val directory = File(filePath)
 
@@ -221,8 +227,9 @@ object McpProxy {
 
         register("moveFile", "moveFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将fromPath文件的路径移动到toPath路径")
         { param ->
-            val fromPath: String = parsePath(param.getString("fromPath") ?: "/")
-            val toPath: String = parsePath(param.getString("toPath") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            val fromPath: String = parsePath(param.getString("fromPath") ?: "/", sessionId)
+            val toPath: String = parsePath(param.getString("toPath") ?: "/", sessionId)
 
             val sourceFile = File(fromPath)
             val destinationFile = File(toPath)
@@ -248,8 +255,9 @@ object McpProxy {
 
         register("copyFile", "copyFile {'fromPath':'/xxx', 'toPath':'/yyy'}", "将fromPath文件复制到toPath路径")
         { param ->
-            var fromPath: String = parsePath(param.getString("fromPath") ?: "/")
-            var toPath: String = parsePath(param.getString("toPath") ?: "/")
+            val sessionId = param.getString("sessionId") ?: "default"
+            var fromPath: String = parsePath(param.getString("fromPath") ?: "/", sessionId)
+            var toPath: String = parsePath(param.getString("toPath") ?: "/", sessionId)
 
             val sourceFile = File(fromPath)
             val destinationFile = File(toPath)
@@ -323,7 +331,7 @@ object McpProxy {
             }
     }
 
-    private fun getFileAdditionContent(file: File, fileContent: String): String {
+    private fun getFileAdditionContent(file: File, fileContent: String, sessionId: String): String {
         if (!file.path.endsWith(".java")) {
             return "";
         }
@@ -342,7 +350,7 @@ object McpProxy {
         var hasDependency = false
 
         // 工作目录
-        val rootPath = parsePath(queryWorkingDir())
+        val rootPath = parsePath(queryWorkingDir(sessionId), sessionId)
         imports.distinct().forEach { import ->
             val className = import.substringAfterLast('.')
             val relativePath = "src${split}main${split}java${split}" + import.replace('.', split) + ".java"

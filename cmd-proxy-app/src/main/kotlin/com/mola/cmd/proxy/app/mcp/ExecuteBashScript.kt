@@ -7,6 +7,7 @@ import java.io.File
 import java.nio.charset.Charset
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.absolutePathString
 
 /**
@@ -14,12 +15,14 @@ import kotlin.io.path.absolutePathString
  */
 class ExecuteBashScript {
     companion object {
-        private val PERSIST_FILE = System.getProperty("user.home") + "/.cmd-proxy-wd"
-        var workingDirectory: String = readPersistedWd()
 
-        private fun readPersistedWd(): String {
+        val sessionWorkingDirMap = ConcurrentHashMap<String, String>()
+
+        private val PERSIST_FILE_BASE = System.getProperty("user.home") + "/.cmd-proxy-wd"
+
+        fun readPersistedWd(sessionId: String): String {
             return try {
-                val file = File(PERSIST_FILE)
+                val file = File(PERSIST_FILE_BASE + "-" + sessionId)
                 if (!file.exists() || file.length() == 0L) return "."
                 file.readText(Charset.defaultCharset()).trim().takeIf { it.isNotEmpty() } ?: "."
             } catch (e: Exception) {
@@ -27,15 +30,16 @@ class ExecuteBashScript {
             }
         }
 
-        private fun writePersistedWd(path: String) {
+        private fun writePersistedWd(sessionId: String, path: String) {
             try {
-                File(PERSIST_FILE).writeText(path, Charset.defaultCharset())
+                File(PERSIST_FILE_BASE + "-" + sessionId).writeText(path, Charset.defaultCharset())
             } catch (ignored: Exception) {
             }
         }
     }
 
-    fun executeCommand(script: String): String {
+
+    fun executeCommand(script: String, sessionId: String): String {
         // 危险指令黑名单（防止执行高危操作）
         val dangerousPatterns = listOf(
             "rm -r",
@@ -61,6 +65,8 @@ class ExecuteBashScript {
                 return "禁止执行危险指令: $pattern"
             }
         }
+
+        val workingDirectory = sessionWorkingDirMap.getOrPut(sessionId) { readPersistedWd(sessionId) }
 
         try {
             val fullCommand = if (script.startsWith("cd ")) {
@@ -90,9 +96,9 @@ class ExecuteBashScript {
             var result = output.toString().trim()
             // 如果是 cd 命令，则更新当前工作目录
             if (script.startsWith("cd ")) {
-                if (lastLine != null && parsePath(lastLine).pathExists()) {
-                    workingDirectory = lastLine
-                    writePersistedWd(lastLine)
+                if (lastLine != null && parsePath(lastLine, sessionId).pathExists()) {
+                    sessionWorkingDirMap[sessionId] = lastLine
+                    writePersistedWd(sessionId, lastLine)
                     val lines = result.lines()
                     if (lines.isNotEmpty()) {
                         result = lines.dropLast(1).joinToString("\n")
@@ -112,16 +118,20 @@ class ExecuteBashScript {
 }
 
 
-fun queryWorkingDir(): String {
-    when {
+fun queryWorkingDir(sessionId: String): String {
+    return when {
         getOS().contains("win") -> {
-            return ExecutePowerShellScript.workingDirectory
+            ExecutePowerShellScript.getWorkingDir(sessionId)
         }
         getOS().contains("linux") -> {
-            return ExecuteBashScript.workingDirectory
+            ExecuteBashScript.getWorkingDir(sessionId)
         }
+        else -> "."
     }
-    return ""
+}
+
+private fun ExecuteBashScript.Companion.getWorkingDir(sessionId: String): String {
+    return sessionWorkingDirMap.getOrPut(sessionId) { readPersistedWd(sessionId) }
 }
 
 fun String.pathExists(): Boolean = Files.exists(Paths.get(this))
@@ -137,23 +147,24 @@ fun String.replaceLastOccurrence(oldValue: String, newValue: String): String {
 
 fun executeBashScript(param: JSONObject): String {
     val script: String = param.getString("script") ?: return "脚本内容不能为空"
+    val sessionId: String = param.getString("sessionId") ?: "default"
     val session = ExecuteBashScript()
-    return session.executeCommand(script)
+    return session.executeCommand(script, sessionId)
 }
 
-fun parsePath(url: String): String {
+fun parsePath(url: String, sessionId: String): String {
     var parsedUrl = url.replace("\\", "\\\\")
 
     // 通用相对路径
     if (parsedUrl == ".") {
-        parsedUrl = queryWorkingDir()
+        parsedUrl = queryWorkingDir(sessionId)
     } else if (parsedUrl.startsWith("./")) {
-        parsedUrl = queryWorkingDir() + parsedUrl.substring(1)
+        parsedUrl = queryWorkingDir(sessionId) + parsedUrl.substring(1)
     }
 
     // linux相对路径
     if (!parsedUrl.startsWith("/") && !parsedUrl.contains(":")) {
-        parsedUrl = "${queryWorkingDir()}/$parsedUrl"
+        parsedUrl = "${queryWorkingDir(sessionId)}/$parsedUrl"
     }
 
     // WSL → Windows 路径转换
@@ -170,5 +181,5 @@ fun parsePath(url: String): String {
 }
 
 fun main() {
-    println(parsePath("C:\\\\Users\\\\cn-molaxu\\\\Desktop\\\\my-test"))
+    println(parsePath("C:\\\\Users\\\\cn-molaxu\\\\Desktop\\\\my-test", "default"))
 }
