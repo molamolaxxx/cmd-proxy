@@ -6,8 +6,11 @@ import com.mola.cmd.proxy.app.imagegenerate.ImageGenerateProxy
 import com.mola.cmd.proxy.app.mcp.McpProxy
 import com.mola.cmd.proxy.app.utils.LogUtil
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.charset.Charset
+import kotlin.math.log
 
 
 /**
@@ -16,6 +19,8 @@ import java.nio.charset.Charset
  * @author : molamola
  * @date : 2023-08-06 23:19
  **/
+
+private val log: Logger = LoggerFactory.getLogger(McpProxy::class.java)
 fun main(args: Array<String>) {
     LogUtil.debugReject()
     CmdProxyConf.serverPort = 10020
@@ -41,6 +46,8 @@ fun main(args: Array<String>) {
         file.bufferedWriter().use { writer ->
             writer.write(keys)
         }
-        McpProxy.start(keys.split("\n").toList())
+        val keyList = keys.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        log.info("注册的groups: {}", keyList)
+        McpProxy.start(keyList)
     }
 }

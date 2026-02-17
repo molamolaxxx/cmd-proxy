@@ -19,7 +19,7 @@ class ExecutePowerShellScript {
 
         private val PERSIST_FILE_BASE = System.getProperty("user.home") + "/.cmd-proxy-ps-wd"
 
-        private fun readPersistedWd(sessionId: String): String {
+        fun readPersistedWd(sessionId: String): String {
             return try {
                 val file = File(PERSIST_FILE_BASE + "-" + sessionId)
                 if (!file.exists() || file.length() == 0L) return "."
@@ -138,9 +138,5 @@ fun executePowerShellScript(param: JSONObject): String {
 }
 
 fun ExecutePowerShellScript.Companion.getWorkingDir(sessionId: String): String {
-    return ExecuteBashScript.sessionWorkingDirMap.getOrPut(sessionId) {
-        ExecuteBashScript.readPersistedWd(
-            sessionId
-        )
-    }
+    return sessionWorkingDirMap.getOrPut(sessionId) { readPersistedWd(sessionId) }
 }
