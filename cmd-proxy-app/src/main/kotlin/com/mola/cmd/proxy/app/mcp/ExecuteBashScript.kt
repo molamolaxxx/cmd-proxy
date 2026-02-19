@@ -8,6 +8,8 @@ import java.nio.charset.Charset
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
+import javax.swing.JOptionPane
+import javax.swing.UIManager
 import kotlin.io.path.absolutePathString
 
 /**
@@ -63,6 +65,35 @@ class ExecuteBashScript {
         for (pattern in dangerousPatterns) {
             if (script.contains(pattern, ignoreCase = true)) {
                 return "禁止执行危险指令: $pattern"
+            }
+        }
+
+        // 写指令检测，匹配到时弹窗让用户确认
+        val writePatterns = listOf(
+            "mv ", "cp ", "mkdir ", "touch ", "rm ", "rmdir ",
+            "tee ", "sed -i", "chmod ", "chown ",
+            "install ", "uninstall ",
+            ">>", "> ",
+            "ln ", "tar ", "unzip ", "zip ",
+            "apt ", "yum ", "dnf ", "brew ",
+            "pip install", "npm install", "yarn add",
+            "make install","mvn"
+        )
+
+        val isWriteCommand = writePatterns.any { script.contains(it, ignoreCase = true) }
+        if (isWriteCommand) {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
+            } catch (_: Exception) {}
+            val choice = JOptionPane.showConfirmDialog(
+                null,
+                "即将执行以下写指令：\n\n$script\n\n是否允许执行？",
+                "写指令确认",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.WARNING_MESSAGE
+            )
+            if (choice != JOptionPane.OK_OPTION) {
+                return "执行完成，跳过此步骤"
             }
         }
 
