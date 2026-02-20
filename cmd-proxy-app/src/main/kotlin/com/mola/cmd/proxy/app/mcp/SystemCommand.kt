@@ -2,11 +2,15 @@ package com.mola.cmd.proxy.app.mcp
 
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
+import com.mola.cmd.proxy.app.mcpclient.McpClientFactory
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import java.io.File
 
 
 object SystemCommand {
+
+    private val mcpFactory : McpClientFactory = McpClientFactory.getInstance()
+
     fun register(cmdGroupList: List<String>){
         CmdReceiver.register("systemSettings", cmdGroupList,
             "系统环境变量获取") { params ->
@@ -85,6 +89,31 @@ object SystemCommand {
             mutableMapOf<String, String>()
         }
 
+        CmdReceiver.register("loadMcpServers", cmdGroupList,
+            "加载所有MCP Server信息，返回工具列表") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            resultMap["result"] = mcpFactory.loadMcpServers()
+            return@register resultMap
+        }
+
+        CmdReceiver.register("callMcpServer", cmdGroupList,
+            "#mcp:callMcpServer {serverName} {toolName} {input}#next#调用MCP Server工具") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            val rawArg = params.cmdArgs.getOrNull(0) ?: ""
+            val parts = rawArg.split(" ", limit = 3)
+            val serverName = parts.getOrNull(0)
+            val toolName = parts.getOrNull(1)
+            val inputJson = parts.getOrNull(2) ?: "{}"
+
+            if (serverName.isNullOrEmpty() || toolName.isNullOrEmpty()) {
+                resultMap["result"] = "参数错误，用法: callMcpServer {serverName} {toolName} {input}"
+                return@register resultMap
+            }
+
+            resultMap["result"] = mcpFactory.callMcpServer(serverName, toolName, inputJson)
+            return@register resultMap
+        }
+
         CmdReceiver.register("listSkills", cmdGroupList,
             "读取并展示 .skills 目录下所有 skill 的元信息及目录结构") { params ->
             val resultMap = mutableMapOf<String, String>()
@@ -97,7 +126,7 @@ object SystemCommand {
             
             val sessionId = params.cmdArgs.getOrNull(0) ?: "default"
             val workSkillsDir = File("${parsePath(queryWorkingDir(sessionId), sessionId)}/.skills")
-            val userSkillsDir = File("${System.getProperty("user.home")}/.skills")
+            val userSkillsDir = File("${System.getProperty("user.home")}/.cmd-proxy/skills")
             
             processSkillsDirectory(workSkillsDir, skillNameSet, lines)
             processSkillsDirectory(userSkillsDir, skillNameSet, lines)

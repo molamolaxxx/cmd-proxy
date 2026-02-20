@@ -1,16 +1,13 @@
 package com.mola.cmd.proxy.app
 
-import com.mola.cmd.proxy.app.chatgpt.ChatGptProxy
-import com.mola.cmd.proxy.app.constants.CmdProxyConstant
-import com.mola.cmd.proxy.app.imagegenerate.ImageGenerateProxy
 import com.mola.cmd.proxy.app.mcp.McpProxy
 import com.mola.cmd.proxy.app.utils.LogUtil
+import com.mola.cmd.proxy.app.utils.McpFileUtils
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.charset.Charset
-import kotlin.math.log
 
 
 /**
@@ -26,28 +23,20 @@ fun main(args: Array<String>) {
     CmdProxyConf.serverPort = 10020
     CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
 
-    if (args.contains(CmdProxyConstant.CHAT_GPT)) {
-        ChatGptProxy.start()
+    val file = File( System.getProperty("user.home") + "/.cmd-proxy/cmdGroupList.txt")
+    if (!file.exists()) {
+        McpFileUtils.createFileSmart(file.absolutePath)
     }
-    if (args.contains(CmdProxyConstant.IMAGE_GENERATE)) {
-        ImageGenerateProxy.start()
+    var keys = file.readText(Charset.forName("UTF-8"))
+    while (keys.isBlank()) {
+        print("请输入group编码（执行fetch命令获取）：")
+        keys = readln()
     }
-    if (args.contains(CmdProxyConstant.MCP)) {
-        val file = File("./cmdGroupList.txt")
-        if (!file.exists()) {
-            file.createNewFile()
-        }
-        var keys = file.readText(Charset.forName("UTF-8"))
-        while (keys.isBlank()) {
-            print("请输入group编码（在流水线之王界面输入fetch获取）：")
-            keys = readln()
-        }
 
-        file.bufferedWriter().use { writer ->
-            writer.write(keys)
-        }
-        val keyList = keys.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-        log.info("注册的groups: {}", keyList)
-        McpProxy.start(keyList)
+    file.bufferedWriter().use { writer ->
+        writer.write(keys)
     }
+    val keyList = keys.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+    log.info("注册的groups: {}", keyList)
+    McpProxy.start(keyList)
 }
