@@ -28,6 +28,8 @@ public class McpClientFactory implements Closeable {
     private final ConcurrentHashMap<String, McpClient> clients = new ConcurrentHashMap<>();
     /** serverName -> McpClientConfig */
     private final ConcurrentHashMap<String, McpClientConfig> configs = new ConcurrentHashMap<>();
+    /** 全局配置（~/.cmd-proxy/mcp.json）加载的 server 名称 */
+    private final Set<String> globalServerNames = ConcurrentHashMap.newKeySet();
 
     private final Gson gson = new GsonBuilder().create();
 
@@ -50,6 +52,17 @@ public class McpClientFactory implements Closeable {
      */
     public void init() throws IOException {
         Path configPath = Paths.get(System.getProperty("user.home"), CONFIG_DIR, CONFIG_FILE);
+        initFromPath(configPath);
+        // 记录全局配置加载的 server 名称
+        globalServerNames.addAll(clients.keySet());
+    }
+
+    /**
+     * 从指定路径的 mcp.json 读取配置并初始化所有非禁用的 client。
+     * 已存在同名 client 时跳过，不会重复创建。
+     * @param configPath mcp.json 文件路径
+     */
+    public void initFromPath(Path configPath) throws IOException {
         if (!Files.exists(configPath)) {
             logger.warn("MCP config file not found: {}", configPath);
             return;
@@ -59,7 +72,7 @@ public class McpClientFactory implements Closeable {
         JsonObject root = JsonParser.parseString(content).getAsJsonObject();
         JsonObject mcpServers = root.getAsJsonObject("mcpServers");
         if (mcpServers == null) {
-            logger.warn("No mcpServers found in config");
+            logger.warn("No mcpServers found in config: {}", configPath);
             return;
         }
 
@@ -67,9 +80,13 @@ public class McpClientFactory implements Closeable {
             String serverName = entry.getKey();
             JsonObject serverObj = entry.getValue().getAsJsonObject();
 
-            // 跳过禁用的 server
             if (serverObj.has("disabled") && serverObj.get("disabled").getAsBoolean()) {
                 logger.info("Skipping disabled MCP server: {}", serverName);
+                continue;
+            }
+
+            if (clients.containsKey(serverName)) {
+                logger.info("MCP client already exists, skipping: {}", serverName);
                 continue;
             }
 
@@ -80,13 +97,13 @@ public class McpClientFactory implements Closeable {
                 McpClient client = new McpClient(config);
                 client.start();
                 clients.put(serverName, client);
-                logger.info("MCP client initialized: {}", serverName);
+                logger.info("MCP client initialized from {}: {}", configPath, serverName);
             } catch (Exception e) {
                 logger.error("Failed to initialize MCP client: {}", serverName, e);
             }
         }
 
-        logger.info("McpClientFactory initialized with {} client(s): {}", clients.size(), clients.keySet());
+        logger.info("McpClientFactory loaded from {} with {} client(s): {}", configPath, clients.size(), clients.keySet());
     }
 
     private McpClientConfig parseConfig(String name, JsonObject obj) {
@@ -163,71 +180,73 @@ public class McpClientFactory implements Closeable {
     /**
      * 加载所有 MCP Server 信息，返回 markdown 表格。
      * 如果 factory 未初始化则先执行 init()。
-     * 列: serverName | toolName | description | inputSchema
      */
-    
-        /**
-         * 加载所有 MCP Server 信息，返回 markdown 表格。
-         * 如果 factory 未初始化则先执行 init()。
-         * 列: serverName | toolName | description | inputSchema | callExample
-         */
-        public String loadMcpServers() {
-            if (clients.isEmpty()) {
-                try {
-                    init();
-                } catch (IOException e) {
-                    logger.error("Failed to init McpClientFactory", e);
-                    return "McpClientFactory 初始化失败: " + e.getMessage();
-                }
+    public String loadMcpServers() {
+        if (clients.isEmpty()) {
+            try {
+                init();
+            } catch (IOException e) {
+                logger.error("Failed to init McpClientFactory", e);
+                return "McpClientFactory 初始化失败: " + e.getMessage();
             }
+        }
+        return loadMcpServersByNames(globalServerNames);
+    }
 
-            if (clients.isEmpty()) {
-                return "暂无可用的 MCP Server";
+    /**
+     * 加载指定 server 列表的 MCP Server 信息，返回 markdown 表格。
+     * serverNames 为 null 时加载全部已初始化的 server。
+     * 列: serverName | toolName | description | inputSchema | callExample
+     */
+    public String loadMcpServersByNames(Set<String> serverNames) {
+        if (serverNames == null || serverNames.isEmpty()) {
+            return "暂无可用的 MCP Server";
+        }
+
+        Gson prettyGson = new GsonBuilder().setPrettyPrinting().create();
+        StringBuilder sb = new StringBuilder();
+        sb.append("| serverName | toolName | description | inputSchema | callExample |\n");
+        sb.append("|---|---|---|---|---|\n");
+
+        for (String serverName : serverNames) {
+            McpClient client = clients.get(serverName);
+            if (client == null) {
+                sb.append("| ").append(serverName).append(" | - | 未成功加载 | - | - |\n");
+                continue;
             }
-
-            Gson prettyGson = new GsonBuilder().setPrettyPrinting().create();
-            StringBuilder sb = new StringBuilder();
-            sb.append("使用callMcpServer调用工具\n");
-            sb.append("| serverName | toolName | description | inputSchema | callExample |\n");
-            sb.append("|---|---|---|---|---|\n");
-
-            for (Map.Entry<String, McpClient> entry : clients.entrySet()) {
-                String serverName = entry.getKey();
-                McpClient client = entry.getValue();
-                JsonArray tools = client.getTools();
-                if (tools == null || tools.size() == 0) {
-                    sb.append("| ").append(serverName).append(" | - | - | - | - |\n");
-                    continue;
-                }
-                for (int i = 0; i < tools.size(); i++) {
-                    JsonObject tool = tools.get(i).getAsJsonObject();
-                    String toolName = tool.has("name") ? tool.get("name").getAsString() : "-";
-                    String description = tool.has("description") ? tool.get("description").getAsString() : "-";
-                    description = description
+            JsonArray tools = client.getTools();
+            if (tools == null || tools.size() == 0) {
+                sb.append("| ").append(serverName).append(" | - | - | - | - |\n");
+                continue;
+            }
+            for (int i = 0; i < tools.size(); i++) {
+                JsonObject tool = tools.get(i).getAsJsonObject();
+                String toolName = tool.has("name") ? tool.get("name").getAsString() : "-";
+                String description = tool.has("description") ? tool.get("description").getAsString() : "-";
+                description = description
+                        .replace("|", "\\|")
+                        .replace("\n", "<br>");
+                String inputSchema = "-";
+                String callExample = "-";
+                if (tool.has("inputSchema")) {
+                    JsonObject schema = tool.getAsJsonObject("inputSchema");
+                    inputSchema = prettyGson.toJson(schema)
                             .replace("|", "\\|")
                             .replace("\n", "<br>");
-                    String inputSchema = "-";
-                    String callExample = "-";
-                    if (tool.has("inputSchema")) {
-                        JsonObject schema = tool.getAsJsonObject("inputSchema");
-                        inputSchema = prettyGson.toJson(schema)
-                                .replace("|", "\\|")
-                                .replace("\n", "<br>");
-                        // 基于 inputSchema 生成调用样例
-                        JsonObject exampleArgs = buildExampleFromSchema(schema);
-                        callExample = "callMcpServer " + serverName + " " + toolName + " " + gson.toJson(exampleArgs);
-                    }
-                    sb.append("| ").append(serverName)
-                      .append(" | ").append(toolName)
-                      .append(" | ").append(description.replace("|", "\\|"))
-                      .append(" | ").append(inputSchema)
-                      .append(" | ").append(callExample.replace("|", "\\|"))
-                      .append(" |\n");
+                    JsonObject exampleArgs = buildExampleFromSchema(schema);
+                    callExample = "callMcpServer " + serverName + " " + toolName + " " + gson.toJson(exampleArgs);
                 }
+                sb.append("| ").append(serverName)
+                  .append(" | ").append(toolName)
+                  .append(" | ").append(description.replace("|", "\\|"))
+                  .append(" | ").append(inputSchema)
+                  .append(" | ").append(callExample.replace("|", "\\|"))
+                  .append(" |\n");
             }
-
-            return sb.toString();
         }
+
+        return sb.toString();
+    }
 
         /**
          * 根据 JSON Schema 的 properties 生成示例 JSON 对象。
@@ -321,6 +340,7 @@ public class McpClientFactory implements Closeable {
     public void removeClient(String serverName) {
         McpClient client = clients.remove(serverName);
         configs.remove(serverName);
+        globalServerNames.remove(serverName);
         if (client != null) {
             try {
                 client.close();
@@ -347,6 +367,7 @@ public class McpClientFactory implements Closeable {
         }
         clients.clear();
         configs.clear();
+        globalServerNames.clear();
     }
 
 

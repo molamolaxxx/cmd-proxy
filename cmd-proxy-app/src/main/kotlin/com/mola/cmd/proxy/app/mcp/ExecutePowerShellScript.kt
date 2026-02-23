@@ -63,52 +63,6 @@ class ExecutePowerShellScript {
             }
         }
 
-        // 写指令检测，匹配到时弹窗让用户确认
-        val writePatterns = listOf(
-            "Move-Item", "Copy-Item", "New-Item", "Set-Content", "Add-Content",
-            "Out-File", "Rename-Item", "Set-ItemProperty",
-            "mv ", "cp ", "mkdir ", "touch ", "rm ", "rmdir ",
-            "tee ", "sed -i", "chmod ", "chown ",
-            "install ", "uninstall ",
-            ">>", "> ",
-            "ln ", "tar ", "unzip ", "zip ",
-            "choco ", "scoop ", "winget ",
-            "pip install", "npm install", "yarn add",
-            "msiexec", "Start-Process","mvn",
-            // 操作系统级别操作（杀进程、关机、重启等）
-            "Stop-Process", "kill ", "kill -", "taskkill",
-            "Stop-Computer", "Restart-Computer", "shutdown", "logoff",
-            "Stop-Service", "Restart-Service", "Set-Service",
-            "Disable-NetAdapter", "Enable-NetAdapter",
-            "New-NetFirewallRule", "Remove-NetFirewallRule", "netsh ",
-            "Mount-DiskImage", "Dismount-DiskImage",
-            "schtasks ", "Register-ScheduledTask", "Unregister-ScheduledTask",
-            "New-LocalUser", "Remove-LocalUser", "Set-LocalUser",
-            "net user ", "net stop ", "net start ",
-            "bcdedit", "reagentc"
-        )
-
-        val matchedPatterns = writePatterns.filter { script.contains(it, ignoreCase = true) }
-        if (matchedPatterns.isNotEmpty()) {
-            try {
-                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
-            } catch (_: Exception) {}
-            val descriptions = matchedPatterns.mapNotNull { getCommandDescription(it) }.distinct()
-            val descriptionText = if (descriptions.isNotEmpty()) {
-                "命令简介：\n${descriptions.joinToString("\n") { "• $it" }}\n\n"
-            } else ""
-            val choice = JOptionPane.showConfirmDialog(
-                null,
-                "即将执行以下写指令：\n\n$script\n\n${descriptionText}是否允许执行？",
-                "写指令确认",
-                JOptionPane.OK_CANCEL_OPTION,
-                JOptionPane.WARNING_MESSAGE
-            )
-            if (choice != JOptionPane.OK_OPTION) {
-                return "用户禁止此脚本的执行，请勿再次执行"
-            }
-        }
-
         try {
             val workingDirectory = sessionWorkingDirMap.getOrPut(sessionId) { readPersistedWd(sessionId) }
             // 将当前工作目录转换为绝对路径（防止路径转换问题）

@@ -218,7 +218,21 @@ public class McpClient implements Closeable {
             }
             logger.debug("<<< {}", line);
 
-            JsonObject resp = JsonParser.parseString(line).getAsJsonObject();
+            // 跳过非JSON行（如server的stderr混入stdout的日志输出）
+            String trimmedLine = line.trim();
+            if (!trimmedLine.startsWith("{")) {
+                logger.warn("Skipping non-JSON line: {}", line);
+                continue;
+            }
+
+            JsonObject resp;
+            try {
+                resp = JsonParser.parseString(trimmedLine).getAsJsonObject();
+            } catch (com.google.gson.JsonSyntaxException e) {
+                logger.warn("Skipping malformed JSON line: {}", line);
+                continue;
+            }
+
             if (!resp.has("id")) {
                 logger.debug("Skipping notification: {}", resp.get("method"));
                 continue;

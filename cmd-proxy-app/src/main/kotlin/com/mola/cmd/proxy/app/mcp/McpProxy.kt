@@ -71,6 +71,32 @@ object McpProxy {
                 skillInfo.appendLine("---------- SKILL.md内容[end]----------")
             }
             
+            // 检查skill文件夹下是否存在mcp.json，如果存在则加载MCP服务并拼接表格
+            val mcpJsonFile = File(skillDir, "mcp.json")
+            if (mcpJsonFile.exists()) {
+                skillInfo.appendLine("---------- 可使用的MCP服务[start]----------")
+                try {
+                    val factory = com.mola.cmd.proxy.app.mcpclient.McpClientFactory.getInstance()
+                    // 解析mcp.json获取serverName列表
+                    val mcpContent = mcpJsonFile.readText(Charsets.UTF_8)
+                    val root = com.google.gson.JsonParser.parseString(mcpContent).asJsonObject
+                    val mcpServers = root.getAsJsonObject("mcpServers")
+                    if (mcpServers != null) {
+                        val serverNames = mcpServers.keySet()
+                        // 从指定路径加载MCP服务
+                        factory.initFromPath(mcpJsonFile.toPath())
+                        // 生成仅包含该skill的MCP服务表格
+                        skillInfo.appendLine(factory.loadMcpServersByNames(serverNames))
+                    } else {
+                        skillInfo.appendLine("mcp.json中未找到mcpServers配置")
+                    }
+                } catch (e: Exception) {
+                    log.error("加载skill MCP服务失败", e)
+                    skillInfo.appendLine("加载MCP服务失败: ${e.message}")
+                }
+                skillInfo.appendLine("---------- 可使用的MCP服务[end]----------")
+            }
+            
             return@register skillInfo.toString()
         }
 
