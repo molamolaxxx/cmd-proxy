@@ -5,49 +5,42 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 通用 MCP Client — 通过 stdio 与 MCP Server 子进程通信。
+ * 通用 MCP Client 抽象基类。
  * <p>
- * 完整实现 MCP 协议握手流程:
+ * 定义 MCP 协议的完整握手流程:
  * <ol>
- *   <li>启动子进程</li>
  *   <li>initialize（协议版本协商 + 能力声明）</li>
  *   <li>notifications/initialized（通知 Server 初始化完成）</li>
  *   <li>tools/list（获取工具列表）</li>
  *   <li>tools/call（调用具体工具）</li>
  * </ol>
  * <p>
- * 通信协议: JSON-RPC 2.0 over stdio，每条消息以换行符分隔。
+ * 子类需实现具体的通信方式（stdio / http）。
  */
-public class McpClient implements Closeable {
+public abstract class McpClient implements Closeable {
 
     private static final Logger logger = LoggerFactory.getLogger(McpClient.class);
-    private static final String JSONRPC_VERSION = "2.0";
-    private static final String CLIENT_NAME = "mcp-java-client";
-    private static final String CLIENT_VERSION = "1.0.0";
-    private static final String PROTOCOL_VERSION = "2024-11-05";
+    protected static final String JSONRPC_VERSION = "2.0";
+    protected static final String CLIENT_NAME = "mcp-java-client";
+    protected static final String CLIENT_VERSION = "1.0.0";
+    protected static final String PROTOCOL_VERSION = "2024-11-05";
 
-    private final McpClientConfig config;
-    private final Gson gson = new GsonBuilder().create();
-    private final AtomicInteger idCounter = new AtomicInteger(0);
-
-    private Process process;
-    private BufferedWriter writer;
-    private BufferedReader reader;
-    private BufferedReader errorReader;
+    protected final McpClientConfig config;
+    protected final Gson gson = new GsonBuilder().create();
+    protected final AtomicInteger idCounter = new AtomicInteger(0);
 
     /** Server 返回的协商后协议版本 */
-    private String negotiatedProtocolVersion;
+    protected String negotiatedProtocolVersion;
     /** Server 信息 */
-    private JsonObject serverInfo;
+    protected JsonObject serverInfo;
     /** Server 能力 */
-    private JsonObject serverCapabilities;
+    protected JsonObject serverCapabilities;
     /** 可用工具列表 */
-    private JsonArray tools;
+    protected JsonArray tools;
 
     public McpClient(McpClientConfig config) {
         this.config = config;
@@ -56,67 +49,36 @@ public class McpClient implements Closeable {
     // ==================== 生命周期 ====================
 
     /**
-     * 启动 MCP Server 子进程并完成完整的握手流程:
-     * initialize → notifications/initialized → tools/list
+     * 启动 MCP Client 并完成完整的握手流程:
+     * connect → initialize → notifications/initialized → tools/list
      */
     public void start() throws IOException {
-        startProcess();
+        connect();
         initialize();
         sendInitializedNotification();
         listTools();
         logger.info("MCP Client fully connected. Available tools: {}", getToolNames());
     }
 
-    private void startProcess() throws IOException {
-        List<String> command = config.buildCommand();
-        logger.info("Starting MCP Server process: {}", joinStrings(command));
+    /**
+     * 建立底层连接（子类实现：启动子进程 / 建立HTTP会话等）
+     */
+    protected abstract void connect() throws IOException;
 
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(false);
+    /**
+     * 发送 JSON-RPC request 并等待响应（子类实现具体通信方式）
+     */
+    protected abstract JsonObject sendRequest(String method, JsonObject params) throws IOException;
 
-        // 补充用户级 bin 路径到 PATH，解决从 IDE 启动时找不到 uvx 等命令的问题
-        String home = System.getProperty("user.home");
-        String currentPath = pb.environment().getOrDefault("PATH", "");
-        String extraPaths = home + "/.local/bin"
-                + File.pathSeparator + home + "/.cargo/bin"
-                + File.pathSeparator + "/usr/local/bin";
-        if (!currentPath.contains(home + "/.local/bin")) {
-            pb.environment().put("PATH", extraPaths + File.pathSeparator + currentPath);
-        }
-
-        for (Map.Entry<String, String> entry : config.getEnv().entrySet()) {
-            pb.environment().put(entry.getKey(), entry.getValue());
-        }
-
-        process = pb.start();
-        writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-        reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-        errorReader = new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8));
-
-        // stderr 日志转发线程
-        Thread stderrThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    String line;
-                    while ((line = errorReader.readLine()) != null) {
-                        logger.debug("[SERVER STDERR] {}", line);
-                    }
-                } catch (IOException e) {
-                    // 进程关闭时正常退出
-                }
-            }
-        }, "mcp-stderr-reader");
-        stderrThread.setDaemon(true);
-        stderrThread.start();
-
-        logger.info("MCP Server process started");
-    }
+    /**
+     * 发送 JSON-RPC notification（无需响应）
+     */
+    protected abstract void sendNotification(String method) throws IOException;
 
     // ==================== 协议步骤 ====================
 
     /**
-     * 步骤①② initialize — 协议版本协商 + 能力声明
+     * initialize — 协议版本协商 + 能力声明
      */
     private void initialize() throws IOException {
         JsonObject params = new JsonObject();
@@ -142,7 +104,7 @@ public class McpClient implements Closeable {
     }
 
     /**
-     * 步骤③ notifications/initialized — 通知 Server 客户端初始化完成
+     * notifications/initialized — 通知 Server 客户端初始化完成
      */
     private void sendInitializedNotification() throws IOException {
         sendNotification("notifications/initialized");
@@ -150,7 +112,7 @@ public class McpClient implements Closeable {
     }
 
     /**
-     * 步骤④⑤ tools/list — 获取 Server 提供的所有工具
+     * tools/list — 获取 Server 提供的所有工具
      */
     public void listTools() throws IOException {
         JsonObject response = sendRequest("tools/list", new JsonObject());
@@ -160,9 +122,9 @@ public class McpClient implements Closeable {
     }
 
     /**
-     * 步骤⑥⑦ tools/call — 调用指定工具
+     * tools/call — 调用指定工具
      *
-     * @param toolName  工具名称，如 "mysql_list_tables"
+     * @param toolName  工具名称
      * @param arguments 工具参数
      * @return Server 返回的 result 对象
      */
@@ -191,73 +153,6 @@ public class McpClient implements Closeable {
             return content.get(0).getAsJsonObject().get("text").getAsString();
         }
         return null;
-    }
-
-    // ==================== JSON-RPC 通信层 ====================
-
-    private JsonObject sendRequest(String method, JsonObject params) throws IOException {
-        int id = idCounter.getAndIncrement();
-        JsonObject request = new JsonObject();
-        request.addProperty("jsonrpc", JSONRPC_VERSION);
-        request.addProperty("method", method);
-        request.addProperty("id", id);
-        request.add("params", params);
-
-        String json = gson.toJson(request);
-        logger.debug(">>> [id={}] {}", id, json);
-
-        writer.write(json);
-        writer.newLine();
-        writer.flush();
-
-        // 读取响应（跳过通知消息，匹配 id）
-        while (true) {
-            String line = reader.readLine();
-            if (line == null) {
-                throw new IOException("MCP Server process closed unexpectedly");
-            }
-            logger.debug("<<< {}", line);
-
-            // 跳过非JSON行（如server的stderr混入stdout的日志输出）
-            String trimmedLine = line.trim();
-            if (!trimmedLine.startsWith("{")) {
-                logger.warn("Skipping non-JSON line: {}", line);
-                continue;
-            }
-
-            JsonObject resp;
-            try {
-                resp = JsonParser.parseString(trimmedLine).getAsJsonObject();
-            } catch (com.google.gson.JsonSyntaxException e) {
-                logger.warn("Skipping malformed JSON line: {}", line);
-                continue;
-            }
-
-            if (!resp.has("id")) {
-                logger.debug("Skipping notification: {}", resp.get("method"));
-                continue;
-            }
-            if (resp.get("id").getAsInt() == id) {
-                if (resp.has("error")) {
-                    throw new IOException("JSON-RPC error: " + resp.get("error"));
-                }
-                return resp;
-            }
-            logger.warn("Received response with unexpected id={}, expected={}", resp.get("id"), id);
-        }
-    }
-
-    private void sendNotification(String method) throws IOException {
-        JsonObject notification = new JsonObject();
-        notification.addProperty("jsonrpc", JSONRPC_VERSION);
-        notification.addProperty("method", method);
-
-        String json = gson.toJson(notification);
-        logger.debug(">>> (notification) {}", json);
-
-        writer.write(json);
-        writer.newLine();
-        writer.flush();
     }
 
     // ==================== Getter ====================
@@ -289,35 +184,26 @@ public class McpClient implements Closeable {
         return serverCapabilities;
     }
 
-    // ==================== 关闭 ====================
-
-    @Override
-    public void close() throws IOException {
-        logger.info("Closing MCP Client...");
-        try {
-            if (writer != null) writer.close();
-        } catch (IOException e) {
-            logger.warn("Error closing writer", e);
-        }
-        try {
-            if (reader != null) reader.close();
-        } catch (IOException e) {
-            logger.warn("Error closing reader", e);
-        }
-        try {
-            if (errorReader != null) errorReader.close();
-        } catch (IOException e) {
-            logger.warn("Error closing errorReader", e);
-        }
-        if (process != null && process.isAlive()) {
-            process.destroy();
-            logger.info("MCP Server process destroyed");
-        }
-    }
-
     // ==================== 工具方法 ====================
 
-    private static String joinStrings(List<String> list) {
+    protected JsonObject buildJsonRpcRequest(String method, JsonObject params) {
+        int id = idCounter.getAndIncrement();
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", JSONRPC_VERSION);
+        request.addProperty("method", method);
+        request.addProperty("id", id);
+        request.add("params", params);
+        return request;
+    }
+
+    protected JsonObject buildJsonRpcNotification(String method) {
+        JsonObject notification = new JsonObject();
+        notification.addProperty("jsonrpc", JSONRPC_VERSION);
+        notification.addProperty("method", method);
+        return notification;
+    }
+
+    protected static String joinStrings(List<String> list) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < list.size(); i++) {
             if (i > 0) sb.append(" ");

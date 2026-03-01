@@ -94,7 +94,9 @@ public class McpClientFactory implements Closeable {
                 McpClientConfig config = parseConfig(serverName, serverObj);
                 configs.put(serverName, config);
 
-                McpClient client = new McpClient(config);
+                McpClient client = config.isHttpMode()
+                        ? new HttpMcpClient(config)
+                        : new StdioMcpClient(config);
                 client.start();
                 clients.put(serverName, client);
                 logger.info("MCP client initialized from {}: {}", configPath, serverName);
@@ -107,7 +109,8 @@ public class McpClientFactory implements Closeable {
     }
 
     private McpClientConfig parseConfig(String name, JsonObject obj) {
-        String command = obj.get("command").getAsString();
+        // stdio 模式字段
+        String command = obj.has("command") ? obj.get("command").getAsString() : null;
 
         List<String> args = new ArrayList<>();
         if (obj.has("args")) {
@@ -123,6 +126,17 @@ public class McpClientFactory implements Closeable {
             }
         }
 
+        // http 模式字段
+        String url = obj.has("url") ? obj.get("url").getAsString() : null;
+
+        Map<String, String> headers = new HashMap<>();
+        if (obj.has("headers") && obj.get("headers").isJsonObject()) {
+            for (Map.Entry<String, JsonElement> e : obj.getAsJsonObject("headers").entrySet()) {
+                headers.put(e.getKey(), e.getValue().getAsString());
+            }
+        }
+
+        // 通用字段
         List<String> autoApprove = new ArrayList<>();
         if (obj.has("autoApprove")) {
             for (JsonElement e : obj.getAsJsonArray("autoApprove")) {
@@ -130,7 +144,7 @@ public class McpClientFactory implements Closeable {
             }
         }
 
-        return new McpClientConfig(name, command, args, env, autoApprove);
+        return new McpClientConfig(name, command, args, env, url, headers, autoApprove);
     }
 
     /**

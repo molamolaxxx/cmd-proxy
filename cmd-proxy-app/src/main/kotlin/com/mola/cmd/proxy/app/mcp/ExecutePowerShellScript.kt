@@ -48,7 +48,6 @@ class ExecutePowerShellScript {
             "rm -recurse",
             "Stop-Computer",
             "Restart-Computer",
-            "format",
             "del",
             "rmdir",
             "Invoke-Expression",
