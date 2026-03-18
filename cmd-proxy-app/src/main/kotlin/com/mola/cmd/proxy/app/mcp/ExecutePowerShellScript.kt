@@ -119,7 +119,7 @@ class ExecutePowerShellScript {
             }
             
             if (result.isBlank()) {
-                result = "执行完成"
+                result = "执行完成，返回结果为空"
             } else{
                 result = "执行完成，返回结果: $result"
             }

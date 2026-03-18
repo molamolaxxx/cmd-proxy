@@ -20,7 +20,7 @@ fun main(args: Array<String>) {
     LogUtil.debugReject()
     CmdProxyConf.serverPort = 10020
     CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
-    val file = File("/home/mola/my-application/cmd-proxy/cmdGroupList.txt")
+    val file = File(System.getProperty("user.home") + "/my-application/cmd-proxy/cmdGroupList.txt")
     if (!file.exists()) {
         file.createNewFile()
     }

@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app
 
+import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.mcp.McpProxy
 import com.mola.cmd.proxy.app.utils.LogUtil
 import com.mola.cmd.proxy.app.utils.McpFileUtils
@@ -19,11 +20,15 @@ import java.nio.charset.Charset
 
 private val log: Logger = LoggerFactory.getLogger(McpProxy::class.java)
 fun main(args: Array<String>) {
+    val mode = args.getOrNull(0)?.lowercase() ?: "mcp"
+    log.info("启动模式: {}", mode)
+
     LogUtil.debugReject()
     CmdProxyConf.serverPort = 10020
     CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
 
-    val file = File( System.getProperty("user.home") + "/.cmd-proxy/cmdGroupList.txt")
+    val groupFileName = if (mode == "acp") "acpGroupList.txt" else "cmdGroupList.txt"
+    val file = File(System.getProperty("user.home") + "/.cmd-proxy/$groupFileName")
     if (!file.exists()) {
         McpFileUtils.createFileSmart(file.absolutePath)
     }
@@ -38,5 +43,9 @@ fun main(args: Array<String>) {
     }
     val keyList = keys.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
     log.info("注册的groups: {}", keyList)
-    McpProxy.start(keyList)
+
+    when (mode) {
+        "acp" -> AcpProxy.start(keyList)
+        else -> McpProxy.start(keyList)
+    }
 }

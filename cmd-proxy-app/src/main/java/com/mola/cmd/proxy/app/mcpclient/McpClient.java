@@ -25,7 +25,7 @@ public abstract class McpClient implements Closeable {
 
     private static final Logger logger = LoggerFactory.getLogger(McpClient.class);
     protected static final String JSONRPC_VERSION = "2.0";
-    protected static final String CLIENT_NAME = "mcp-java-client";
+    protected static final String CLIENT_NAME = "cmd-proxy";
     protected static final String CLIENT_VERSION = "1.0.0";
     protected static final String PROTOCOL_VERSION = "2024-11-05";
 

@@ -72,7 +72,11 @@ class ExecuteBashScript {
 
         try {
             val fullCommand = if (script.startsWith("cd ")) {
-                "cd $workingDirectory && $script && pwd"
+                if (script.endsWith("&")) {
+                    "cd $workingDirectory && $script"
+                } else{
+                    "cd $workingDirectory && $script && pwd"
+                }
             } else {
                 "cd $workingDirectory && $script"
             }
@@ -108,7 +112,7 @@ class ExecuteBashScript {
                 }
             }
             if (result.isBlank()) {
-                result = "执行完成"
+                result = "执行完成，返回结果为空"
             } else{
                 result = "执行完成，返回结果: $result"
             }
