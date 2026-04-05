@@ -34,8 +34,16 @@ public class AcpClientRegistry {
 
     // ==================== 配置 ====================
 
+    public String getDefaultCommand() {
+        return defaultCommand;
+    }
+
     public void setDefaultCommand(String command) {
         this.defaultCommand = command;
+    }
+
+    public String[] getDefaultArgs() {
+        return defaultArgs;
     }
 
     public void setDefaultArgs(String[] args) {

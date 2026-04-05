@@ -1,0 +1,209 @@
+package com.mola.cmd.proxy.app.acpclient;
+
+import com.google.gson.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+/**
+ * ACP Client 抽象基类，封装子进程管理和 ACP 协议通信层。
+ * <p>
+ * 提供通用能力：
+ * <ul>
+ *   <li>子进程启动与 PATH 配置</li>
+ *   <li>ACP initialize 协议握手</li>
+ *   <li>JSON-RPC 2.0 request/response 收发</li>
+ * </ul>
+ * <p>
+ * 子类通过实现 {@link #createSession()} 来定制 session/new 的参数（如是否加载 MCP）。
+ */
+public abstract class AbstractAcpClient implements Closeable {
+
+    /**
+     * AcpClient 生命周期状态
+     */
+    public enum State {
+        CREATED, STARTING, READY, BUSY, ERROR, CLOSED
+    }
+
+    private static final Logger logger = LoggerFactory.getLogger(AbstractAcpClient.class);
+    protected static final String JSONRPC_VERSION = "2.0";
+    private static final int PROTOCOL_VERSION = 1;
+    private static final String CLIENT_NAME = "cmd-proxy-acp";
+    private static final String CLIENT_VERSION = "1.0.0";
+
+    protected final String command;
+    protected final String[] args;
+    protected final String workspacePath;
+    protected final String groupId;
+    protected final Gson gson = new GsonBuilder().create();
+    protected final AtomicInteger idCounter = new AtomicInteger(0);
+    protected final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
+
+    protected Process process;
+    protected BufferedWriter writer;
+    protected BufferedReader reader;
+    protected String sessionId;
+
+    public AbstractAcpClient(String command, String[] args, String workspacePath, String groupId) {
+        this.command = command;
+        this.args = args;
+        this.workspacePath = workspacePath;
+        this.groupId = groupId;
+    }
+
+    // ==================== 生命周期（模板方法） ====================
+
+    /**
+     * 启动 ACP Client：启动子进程 → initialize → createSession
+     */
+    public void start() throws IOException {
+        state.set(State.STARTING);
+        try {
+            startProcess();
+            initialize();
+            createSession();
+            state.set(State.READY);
+            logger.info("ACP Client 就绪，sessionId={}, groupId={}", sessionId, groupId);
+        } catch (IOException e) {
+            state.set(State.ERROR);
+            throw e;
+        }
+    }
+
+    /**
+     * 子类实现各自的 session/new 逻辑（如是否加载 MCP servers）。
+     */
+    protected abstract void createSession() throws IOException;
+
+    @Override
+    public void close() throws IOException {
+        state.set(State.CLOSED);
+        logger.info("关闭 AbstractAcpClient, groupId={}", groupId);
+        try { if (writer != null) writer.close(); } catch (IOException e) { /* ignore */ }
+        try { if (reader != null) reader.close(); } catch (IOException e) { /* ignore */ }
+        if (process != null && process.isAlive()) {
+            process.destroy();
+        }
+    }
+
+    // ==================== 协议步骤 ====================
+
+    protected void startProcess() throws IOException {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(command);
+        cmd.addAll(Arrays.asList(args));
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(false);
+
+        String home = System.getProperty("user.home");
+        String currentPath = pb.environment().getOrDefault("PATH", "");
+        String extraPaths = home + "/.local/bin"
+                + File.pathSeparator + home + "/.cargo/bin"
+                + File.pathSeparator + "/usr/local/bin";
+        if (!currentPath.contains(home + "/.local/bin")) {
+            pb.environment().put("PATH", extraPaths + File.pathSeparator + currentPath);
+        }
+
+        logger.info("启动 ACP 进程: {}", cmd);
+        process = pb.start();
+        writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
+        reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+
+        // stderr 日志转发
+        Thread stderrThread = new Thread(() -> {
+            try (BufferedReader errReader = new BufferedReader(
+                    new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = errReader.readLine()) != null) {
+                    logger.debug("[ACP STDERR] {}", line);
+                }
+            } catch (IOException e) {
+                // 进程关闭时正常退出
+            }
+        }, "acp-stderr-reader");
+        stderrThread.setDaemon(true);
+        stderrThread.start();
+    }
+
+    protected void initialize() throws IOException {
+        JsonObject params = new JsonObject();
+        params.addProperty("protocolVersion", PROTOCOL_VERSION);
+
+        JsonObject capabilities = new JsonObject();
+        params.add("clientCapabilities", capabilities);
+
+        JsonObject clientInfo = new JsonObject();
+        clientInfo.addProperty("name", CLIENT_NAME);
+        clientInfo.addProperty("version", CLIENT_VERSION);
+        params.add("clientInfo", clientInfo);
+
+        JsonObject response = sendRequest("initialize", params);
+        JsonObject result = response.getAsJsonObject("result");
+        logger.info("ACP initialize 完成: {}", result);
+    }
+
+    // ==================== JSON-RPC 工具方法 ====================
+
+    protected JsonObject sendRequest(String method, JsonObject params) throws IOException {
+        JsonObject request = buildRequest(method, params);
+        String id = request.get("id").getAsString();
+        sendJson(request);
+
+        while (true) {
+            String line = reader.readLine();
+            if (line == null) {
+                throw new IOException("ACP 进程意外关闭");
+            }
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("{")) continue;
+
+            JsonObject resp;
+            try {
+                resp = JsonParser.parseString(trimmed).getAsJsonObject();
+            } catch (JsonSyntaxException e) {
+                continue;
+            }
+
+            if (!resp.has("id")) continue;
+            if (id.equals(resp.get("id").getAsString())) {
+                if (resp.has("error")) {
+                    throw new IOException("ACP JSON-RPC error: " + resp.get("error"));
+                }
+                return resp;
+            }
+        }
+    }
+
+    protected JsonObject buildRequest(String method, JsonObject params) {
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", JSONRPC_VERSION);
+        request.addProperty("id", idCounter.getAndIncrement());
+        request.addProperty("method", method);
+        request.add("params", params);
+        return request;
+    }
+
+    protected void sendJson(JsonObject json) throws IOException {
+        String text = gson.toJson(json);
+        logger.debug("acp输入 {}", text);
+        writer.write(text);
+        writer.newLine();
+        writer.flush();
+    }
+
+    // ==================== Getters ====================
+
+    public String getSessionId() { return sessionId; }
+    public String getGroupId() { return groupId; }
+    public State getState() { return state.get(); }
+    public String getWorkspacePath() { return workspacePath; }
+
+    protected void setSessionId(String sessionId) { this.sessionId = sessionId; }
+}

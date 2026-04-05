@@ -38,6 +38,23 @@ public class ConversationHistoryManager {
     /** turn 计数器 */
     private final AtomicInteger turnCounter = new AtomicInteger(0);
 
+    /** turn 完成回调，用于每 N 轮触发记忆提取等外部逻辑 */
+    private Runnable onTurnFlushed;
+
+    /**
+     * 设置 turn 完成回调。每次 flushTurn 成功落盘后触发。
+     */
+    public void setOnTurnFlushed(Runnable callback) {
+        this.onTurnFlushed = callback;
+    }
+
+    /**
+     * 获取当前已完成的 turn 数。
+     */
+    public int getTurnCount() {
+        return turnCounter.get();
+    }
+
     // ==================== 消息收集 ====================
 
     /** 记录一条用户消息 */
@@ -98,6 +115,15 @@ public class ConversationHistoryManager {
             logger.error("会话上下文落盘失败, sessionId={}", sessionId, e);
         } finally {
             currentTurn.clear();
+        }
+
+        // 通知外部回调（如每 N 轮触发记忆提取）
+        if (onTurnFlushed != null) {
+            try {
+                onTurnFlushed.run();
+            } catch (Exception e) {
+                logger.warn("onTurnFlushed 回调执行失败", e);
+            }
         }
     }
 
