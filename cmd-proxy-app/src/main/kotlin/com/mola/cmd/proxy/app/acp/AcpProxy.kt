@@ -156,7 +156,7 @@ object AcpProxy {
         LogUtil.debugReject()
         CmdProxyConf.serverPort = 10021
         CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.LOCAL_ADDRESS
-        val robotsJson = "[{\"name\":\"kiro_code_1\",\"signature\":\"专注代码质量\",\"workDir\":\"/home/mola/my-test\"}]"
+        val robotsJson = "[{\"name\":\"kiro_code_1\",\"signature\":\"专注代码质量\",\"workDir\":\"/home/mola/my-test\",\"avatar\":\"\"}]"
         val chatterIdsJson = "[\"1740242633231HjpIO\"]"
         val chatterId = "1740242633231HjpIO"
         val robotsArray = JSON.parseArray(robotsJson)

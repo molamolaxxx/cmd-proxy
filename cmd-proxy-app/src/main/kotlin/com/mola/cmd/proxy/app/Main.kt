@@ -123,7 +123,10 @@ private fun interactiveAcpConfig(): String {
         print("  请输入工作目录（workDir，可选，直接回车跳过）：")
         val workDir = readln().trim()
 
-        robots.add(AcpRobotParam(name, signature, workDir))
+        print("  请输入用户头像URL（avatar，可选，直接回车跳过）：")
+        val avatar = readln().trim()
+
+        robots.add(AcpRobotParam(name, signature, workDir, avatar))
         println("  ✓ Robot「$name」已添加")
         robotIndex++
 

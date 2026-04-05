@@ -72,8 +72,8 @@ public class AcpClient implements Closeable {
     /** MCP 配置文件路径列表，按优先级从低到高排列，后加载的同名 server 会跳过 */
     private final List<Path> mcpConfigPaths = new ArrayList<>();
 
-    /** 累积的图片 base64 集合（去重），每次 send 时追加，clearContext 时清空 */
-    private final LinkedHashSet<String> imageBase64History = new LinkedHashSet<>();
+    /** 会话上下文管理器 */
+    private final ConversationHistoryManager historyManager = new ConversationHistoryManager();
 
     private Process process;
     private BufferedWriter writer;
@@ -134,7 +134,7 @@ public class AcpClient implements Closeable {
 
     /**
      * 发送用户消息，可附带图片（base64 编码）。
-     * 新图片会追加到 imageBase64History，每次 prompt 都会带上历史所有图片。
+     * 新图片会追加到 historyManager，每次 prompt 都会带上历史所有图片。
      *
      * @param userInput       用户文本消息
      * @param imageBase64List 本次新增的图片 base64 列表，可为 null
@@ -144,18 +144,12 @@ public class AcpClient implements Closeable {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
-        // 追加新图片到历史
-        if (imageBase64List != null) {
-            for (String img : imageBase64List) {
-                if (img != null && !img.isEmpty()) {
-                    imageBase64History.add(img);
-                }
-            }
-        }
+        // 追加新图片到历史（去重）
+        historyManager.addImages(imageBase64List);
         state.set(State.BUSY);
         executor.submit(() -> {
             try {
-                sendPrompt(userInput, imageBase64History, globalListener);
+                sendPrompt(userInput, historyManager.getImageBase64History(), globalListener);
                 state.set(State.READY);
             } catch (Exception e) {
                 logger.error("ACP send 失败", e);
@@ -163,34 +157,6 @@ public class AcpClient implements Closeable {
                 globalListener.onError(e);
             }
         });
-    }
-
-    /**
-     * 清除会话上下文：关闭当前 session 并创建新 session。
-     * <p>
-     * ACP 协议目前没有专门的 "清除上下文" 方法。
-     * 标准做法是创建一个新的 session 来获得全新的对话上下文。
-     * 如果 Agent 支持 session/close（Draft RFD），会先尝试关闭旧 session 释放资源。
-     *
-     * @see <a href="https://agentclientprotocol.com/rfds/session-stop">session/close RFD</a>
-     */
-    public void clearContext() throws IOException {
-        String oldSessionId = this.sessionId;
-        logger.info("清除会话上下文，旧 sessionId={}", oldSessionId);
-
-        // 清空图片历史
-        imageBase64History.clear();
-
-        // 尝试 session/close 关闭旧 session（Draft RFD，Agent 可能不支持）
-        try {
-            closeSession(oldSessionId);
-        } catch (IOException e) {
-            logger.warn("session/close 不被支持或失败（该方法仍在 Draft 阶段）: {}", e.getMessage());
-        }
-
-        // 创建新 session，获得全新的对话上下文
-        createSession();
-        logger.info("会话上下文已清除，新 sessionId={}", this.sessionId);
     }
 
     /**
@@ -506,6 +472,9 @@ public class AcpClient implements Closeable {
         String requestId = request.get("id").getAsString();
         sendJson(request);
 
+        // 记录用户消息到会话历史
+        historyManager.addUserMessage(userInput);
+
         // 流式读取：notification 为 session/update，response 为 prompt 结束
         StringBuilder fullResponse = new StringBuilder();
         while (true) {
@@ -537,6 +506,10 @@ public class AcpClient implements Closeable {
                     stopReason = msg.getAsJsonObject("result").get("stopReason").getAsString();
                 }
                 logger.info("ACP prompt turn 结束, stopReason={}, msg = {}", stopReason, trimmed);
+                // 记录 agent 回答到会话历史
+                historyManager.addAssistantMessage(fullResponse.toString());
+                // 落盘本轮上下文并清空内存
+                historyManager.flushTurn(sessionId);
                 listener.onComplete(fullResponse.toString());
                 return;
             }
@@ -582,6 +555,12 @@ public class AcpClient implements Closeable {
                     String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
                     String title = update.has("title") ? update.get("title").getAsString() : "";
                     String status = update.has("status") ? update.get("status").getAsString() : "pending";
+                    // 工具调用完成时，记录到会话历史
+                    if ("completed".equals(status)) {
+                        JsonObject rawInput = update.has("rawInput") ? update.getAsJsonObject("rawInput") : null;
+                        JsonObject rawOutput = update.has("rawOutput") ? update.getAsJsonObject("rawOutput") : null;
+                        historyManager.addToolMessage(toolCallId, title, status, rawInput, rawOutput);
+                    }
                     listener.onToolCall(toolCallId, title, status, update);
                 } else {
                     logger.warn("ACP IN session/update 输出未匹配任何处理分支, msg={}", msg);
@@ -680,6 +659,10 @@ public class AcpClient implements Closeable {
     public void close() throws IOException {
         state.set(State.CLOSED);
         logger.info("关闭 AcpClient...");
+
+        // 落盘未保存的上下文
+        historyManager.forceFlush(sessionId);
+
         executor.shutdownNow();
         try { if (writer != null) writer.close(); } catch (IOException e) { /* ignore */ }
         try { if (reader != null) reader.close(); } catch (IOException e) { /* ignore */ }
@@ -690,5 +673,19 @@ public class AcpClient implements Closeable {
 
     public String getWorkspacePath() {
         return workspacePath;
+    }
+
+    /**
+     * 获取会话上下文管理器。
+     */
+    public ConversationHistoryManager getHistoryManager() {
+        return historyManager;
+    }
+
+    /**
+     * 获取当前 session 的完整会话上下文。
+     */
+    public List<ContextMessage> getConversationHistory() {
+        return historyManager.getFullHistory(sessionId);
     }
 }
