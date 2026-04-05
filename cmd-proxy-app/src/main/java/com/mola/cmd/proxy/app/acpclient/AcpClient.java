@@ -6,9 +6,12 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -66,6 +69,12 @@ public class AcpClient implements Closeable {
         return t;
     });
 
+    /** MCP 配置文件路径列表，按优先级从低到高排列，后加载的同名 server 会跳过 */
+    private final List<Path> mcpConfigPaths = new ArrayList<>();
+
+    /** 累积的图片 base64 集合（去重），每次 send 时追加，clearContext 时清空 */
+    private final LinkedHashSet<String> imageBase64History = new LinkedHashSet<>();
+
     private Process process;
     private BufferedWriter writer;
     private BufferedReader reader;
@@ -78,6 +87,25 @@ public class AcpClient implements Closeable {
         this.workspacePath = workspacePath;
         this.groupId = groupId;
         this.globalListener = new DefaultAcpResponseListener(groupId);
+
+        // 默认加载路径：用户级 > 工作目录级
+        mcpConfigPaths.add(Paths.get(System.getProperty("user.home"), ".kiro", "settings", "mcp.json"));
+        mcpConfigPaths.add(Paths.get(workspacePath, ".kiro", "settings", "mcp.json"));
+    }
+
+    /**
+     * 添加额外的 mcp.json 配置路径（后添加的优先级更高）
+     */
+    public void addMcpConfigPath(Path configPath) {
+        mcpConfigPaths.add(configPath);
+    }
+
+    /**
+     * 清空并重新设置 mcp.json 配置路径列表
+     */
+    public void setMcpConfigPaths(List<Path> paths) {
+        mcpConfigPaths.clear();
+        mcpConfigPaths.addAll(paths);
     }
 
     // ==================== 生命周期 ====================
@@ -99,26 +127,35 @@ public class AcpClient implements Closeable {
         }
     }
 
-    /**
-     * 发送用户输入文本给 agent，通过 listener 流式回调输出结果。
-     *
-     * @param userInput 用户输入文本
-     * @param listener  回调监听器
-     */
-    /**
-     * 发送用户输入文本给 agent，通过全局 listener 流式回调输出结果。
-     *
-     * @param userInput 用户输入文本
-     */
+
     public void send(String userInput) {
+        send(userInput, null);
+    }
+
+    /**
+     * 发送用户消息，可附带图片（base64 编码）。
+     * 新图片会追加到 imageBase64History，每次 prompt 都会带上历史所有图片。
+     *
+     * @param userInput       用户文本消息
+     * @param imageBase64List 本次新增的图片 base64 列表，可为 null
+     */
+    public void send(String userInput, List<String> imageBase64List) {
         if (userInput == null || userInput.trim().isEmpty()) {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
+        // 追加新图片到历史
+        if (imageBase64List != null) {
+            for (String img : imageBase64List) {
+                if (img != null && !img.isEmpty()) {
+                    imageBase64History.add(img);
+                }
+            }
+        }
         state.set(State.BUSY);
         executor.submit(() -> {
             try {
-                sendPrompt(userInput, globalListener);
+                sendPrompt(userInput, imageBase64History, globalListener);
                 state.set(State.READY);
             } catch (Exception e) {
                 logger.error("ACP send 失败", e);
@@ -140,6 +177,9 @@ public class AcpClient implements Closeable {
     public void clearContext() throws IOException {
         String oldSessionId = this.sessionId;
         logger.info("清除会话上下文，旧 sessionId={}", oldSessionId);
+
+        // 清空图片历史
+        imageBase64History.clear();
 
         // 尝试 session/close 关闭旧 session（Draft RFD，Agent 可能不支持）
         try {
@@ -259,12 +299,16 @@ public class AcpClient implements Closeable {
     }
 
     /**
-     * session/new — 创建会话
+     * session/new — 创建会话，自动从 mcp.json 配置文件加载 MCP servers 传给 Agent
      */
     private void createSession() throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("cwd", workspacePath);
-        params.add("mcpServers", new JsonArray());
+
+        // 从配置文件加载 MCP servers，转换为 ACP 协议格式传给 Agent
+        JsonArray mcpServers = loadMcpServersFromConfigs();
+        params.add("mcpServers", mcpServers);
+        logger.info("session/new 携带 {} 个 MCP server", mcpServers.size());
 
         JsonObject response = sendRequest("session/new", params);
         JsonObject result = response.getAsJsonObject("result");
@@ -272,17 +316,189 @@ public class AcpClient implements Closeable {
         logger.info("ACP session 创建成功: {}", sessionId);
     }
 
+    // ==================== MCP 配置加载 ====================
+
+    /**
+     * 从所有配置路径加载 MCP servers，合并为 ACP 协议所需的 mcpServers 数组。
+     * <p>
+     * 按 mcpConfigPaths 顺序依次加载，同名 server 以先加载的为准（不覆盖）。
+     */
+    private JsonArray loadMcpServersFromConfigs() {
+        // name -> ACP server JsonObject，用于去重
+        Map<String, JsonObject> serverMap = new LinkedHashMap<>();
+
+        for (Path configPath : mcpConfigPaths) {
+            loadMcpServersFromConfig(configPath, serverMap);
+        }
+
+        JsonArray result = new JsonArray();
+        serverMap.values().forEach(result::add);
+        return result;
+    }
+
+    /**
+     * 从单个 mcp.json 文件解析 MCP server 配置，转换为 ACP session/new 所需格式。
+     * <p>
+     * mcp.json 格式（Kiro 标准）:
+     * <pre>
+     * {
+     *   "mcpServers": {
+     *     "server-name": {
+     *       "command": "uvx",
+     *       "args": ["package@latest"],
+     *       "env": { "KEY": "VALUE" },
+     *       "disabled": false
+     *     }
+     *   }
+     * }
+     * </pre>
+     * <p>
+     * 转换为 ACP 协议格式:
+     * <pre>
+     * { "type": "stdio", "name": "server-name", "command": "uvx", "args": ["package@latest"], "env": { "KEY": "VALUE" } }
+     * </pre>
+     *
+     * @param configPath mcp.json 文件路径
+     * @param serverMap  已加载的 server 集合，同名 server 不会被覆盖
+     */
+    private void loadMcpServersFromConfig(Path configPath, Map<String, JsonObject> serverMap) {
+        if (!Files.exists(configPath)) {
+            logger.debug("MCP config not found, skipping: {}", configPath);
+            return;
+        }
+
+        try {
+            String content = new String(Files.readAllBytes(configPath), StandardCharsets.UTF_8);
+            JsonObject root = JsonParser.parseString(content).getAsJsonObject();
+            JsonObject servers = root.getAsJsonObject("mcpServers");
+            if (servers == null) {
+                logger.debug("No mcpServers in config: {}", configPath);
+                return;
+            }
+
+            int loaded = 0;
+            for (Map.Entry<String, JsonElement> entry : servers.entrySet()) {
+                String name = entry.getKey();
+                JsonObject serverObj = entry.getValue().getAsJsonObject();
+
+                // 跳过 disabled
+                if (serverObj.has("disabled") && serverObj.get("disabled").getAsBoolean()) {
+                    logger.debug("Skipping disabled MCP server: {} from {}", name, configPath);
+                    continue;
+                }
+
+                // 同名 server 不覆盖
+                if (serverMap.containsKey(name)) {
+                    logger.debug("MCP server '{}' already loaded, skipping from {}", name, configPath);
+                    continue;
+                }
+
+                JsonObject acpServer = convertToAcpFormat(name, serverObj);
+                if (acpServer != null) {
+                    serverMap.put(name, acpServer);
+                    loaded++;
+                }
+            }
+
+            logger.info("Loaded {} MCP server(s) from {}", loaded, configPath);
+        } catch (Exception e) {
+            logger.error("Failed to load MCP config from {}", configPath, e);
+        }
+    }
+
+    /**
+     * 将 mcp.json 中的单个 server 配置转换为 ACP 协议的 McpServer 格式。
+     * <p>
+     * ACP 协议使用 untagged enum 区分 transport 类型：
+     * <ul>
+     *   <li>Stdio: 无 type 字段，包含 name/command/args/env</li>
+     *   <li>HTTP:  type="http"，包含 name/url/headers</li>
+     *   <li>SSE:   type="sse"，包含 name/url/headers</li>
+     * </ul>
+     * env 和 headers 在 ACP 中均为数组格式 [{name, value}]，而非 mcp.json 中的对象格式。
+     *
+     * @see <a href="https://agentclientprotocol.com/protocol/session-setup">ACP Session Setup</a>
+     */
+    private JsonObject convertToAcpFormat(String name, JsonObject serverObj) {
+        JsonObject acpServer = new JsonObject();
+        acpServer.addProperty("name", name);
+
+        if (serverObj.has("url")) {
+            // HTTP 模式：需要 type 字段
+            acpServer.addProperty("type", "http");
+            acpServer.addProperty("url", serverObj.get("url").getAsString());
+
+            // headers: mcp.json 中是 {"K":"V"} 对象，ACP 中是 [{"name":"K","value":"V"}] 数组
+            if (serverObj.has("headers") && serverObj.get("headers").isJsonObject()) {
+                JsonArray headerArray = new JsonArray();
+                for (Map.Entry<String, JsonElement> h : serverObj.getAsJsonObject("headers").entrySet()) {
+                    JsonObject header = new JsonObject();
+                    header.addProperty("name", h.getKey());
+                    header.addProperty("value", h.getValue().getAsString());
+                    headerArray.add(header);
+                }
+                acpServer.add("headers", headerArray);
+            }
+        } else if (serverObj.has("command")) {
+            // Stdio 模式：不需要 type 字段（ACP untagged enum 靠字段组合推断）
+            acpServer.addProperty("command", serverObj.get("command").getAsString());
+
+            if (serverObj.has("args") && serverObj.get("args").isJsonArray()) {
+                acpServer.add("args", serverObj.getAsJsonArray("args"));
+            } else {
+                acpServer.add("args", new JsonArray());
+            }
+
+            // env: mcp.json 中是 {"K":"V"} 对象，ACP 中是 [{"name":"K","value":"V"}] 数组
+            if (serverObj.has("env") && serverObj.get("env").isJsonObject()) {
+                JsonArray envArray = new JsonArray();
+                for (Map.Entry<String, JsonElement> e : serverObj.getAsJsonObject("env").entrySet()) {
+                    JsonObject envVar = new JsonObject();
+                    envVar.addProperty("name", e.getKey());
+                    envVar.addProperty("value", e.getValue().getAsString());
+                    envArray.add(envVar);
+                }
+                acpServer.add("env", envArray);
+            } else {
+                acpServer.add("env", new JsonArray());
+            }
+        } else {
+            logger.warn("MCP server '{}' has neither 'url' nor 'command', skipping", name);
+            return null;
+        }
+
+        return acpServer;
+    }
+
     /**
      * session/prompt — 发送用户消息，流式读取 session/update 通知
      */
-    private void sendPrompt(String userInput, AcpResponseListener listener) throws IOException {
+    private void sendPrompt(String userInput, Collection<String> imageBase64List, AcpResponseListener listener) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
+        // 注入当前时间上下文，解决 kiro-cli 无法获取准确时间的问题
+        String timeContext = String.format("[Current Time: %s]\n",
+                ZonedDateTime.now().format(
+                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")));
+
         JsonArray prompt = new JsonArray();
+
+        // 添加图片内容块
+        if (imageBase64List != null) {
+            for (String base64Data : imageBase64List) {
+                if (base64Data == null || base64Data.isEmpty()) continue;
+                JsonObject imageBlock = new JsonObject();
+                imageBlock.addProperty("type", "image");
+                imageBlock.addProperty("mimeType", guessMimeType(base64Data));
+                imageBlock.addProperty("data", base64Data);
+                prompt.add(imageBlock);
+            }
+        }
+
         JsonObject textBlock = new JsonObject();
         textBlock.addProperty("type", "text");
-        textBlock.addProperty("text", userInput);
+        textBlock.addProperty("text", timeContext + userInput);
         prompt.add(textBlock);
         params.add("prompt", prompt);
 
@@ -300,7 +516,7 @@ public class AcpClient implements Closeable {
             }
 
             String trimmed = line.trim();
-            logger.info("acp输出 {}", trimmed);
+            logger.debug("acp输出 {}", trimmed);
             if (!trimmed.startsWith("{")) {
                 continue;
             }
@@ -320,7 +536,7 @@ public class AcpClient implements Closeable {
                 if (msg.has("result") && msg.getAsJsonObject("result").has("stopReason")) {
                     stopReason = msg.getAsJsonObject("result").get("stopReason").getAsString();
                 }
-                logger.info("ACP prompt turn 结束, stopReason={}", stopReason);
+                logger.info("ACP prompt turn 结束, stopReason={}, msg = {}", stopReason, trimmed);
                 listener.onComplete(fullResponse.toString());
                 return;
             }
@@ -376,6 +592,17 @@ public class AcpClient implements Closeable {
         }
     }
 
+    /**
+     * 根据 base64 数据的前几个字节猜测图片 MIME 类型
+     */
+    private String guessMimeType(String base64Data) {
+        if (base64Data.startsWith("iVBOR")) return "image/png";
+        if (base64Data.startsWith("/9j/")) return "image/jpeg";
+        if (base64Data.startsWith("R0lG")) return "image/gif";
+        if (base64Data.startsWith("UklGR")) return "image/webp";
+        return "image/png"; // 默认 png
+    }
+
     // ==================== JSON-RPC 工具方法 ====================
 
     private JsonObject sendRequest(String method, JsonObject params) throws IOException {
@@ -420,7 +647,7 @@ public class AcpClient implements Closeable {
 
     private void sendJson(JsonObject json) throws IOException {
         String text = gson.toJson(json);
-        logger.info("acp输入 {}", text);
+        logger.debug("acp输入 {}", text);
 
         writer.write(text);
         writer.newLine();
@@ -461,41 +688,7 @@ public class AcpClient implements Closeable {
         }
     }
 
-    // ==================== 测试入口 ====================
-
-    public static void main(String[] args) {
-        AcpClient client = new AcpClient(DEFAULT_COMMAND, DEFAULT_ARGS, System.getProperty("user.dir"), "test");
-        try {
-            client.start();
-
-            java.util.Scanner scanner = new java.util.Scanner(System.in);
-            System.out.println("ACP 交互模式已启动，输入 'exit' 退出，输入 'clear' 清除上下文");
-
-            while (true) {
-                System.out.print("\n> ");
-                if (!scanner.hasNextLine()) break;
-                String input = scanner.nextLine().trim();
-                if (input.isEmpty()) continue;
-                if ("exit".equalsIgnoreCase(input)) break;
-                if ("clear".equalsIgnoreCase(input)) {
-                    System.out.println("====== 清除会话上下文 ======");
-                    client.clearContext();
-                    System.out.println("====== 上下文已清除，新 sessionId=" + client.getSessionId() + " ======");
-                    continue;
-                }
-
-                System.out.println("====== 发送: " + input + " ======");
-                client.send(input);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                client.close();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-            System.out.println("====== AcpClient 已关闭 ======");
-        }
+    public String getWorkspacePath() {
+        return workspacePath;
     }
 }

@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -54,8 +55,8 @@ public class AcpClientRegistry {
      * @param groupId 分组标识
      * @throws IOException 启动失败时抛出
      */
-    public void createSession(String groupId) throws IOException {
-        createSession(groupId, defaultCommand, defaultArgs, defaultWorkspacePath);
+    public void createSession(String groupId, String workDir) throws IOException {
+        createSession(groupId, defaultCommand, defaultArgs, workDir);
     }
 
     /**
@@ -77,6 +78,7 @@ public class AcpClientRegistry {
             } catch (IOException e) {
                 logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
             }
+            workspacePath = old.getWorkspacePath();
         }
 
         AcpClient client = new AcpClient(command, args, workspacePath, groupId);
@@ -105,18 +107,19 @@ public class AcpClientRegistry {
     }
 
     /**
-     * 发送消息：向指定 groupId 的 AcpClient 发送用户消息。
+     * 发送消息：向指定 groupId 的 AcpClient 发送用户消息，可附带图片。
      *
-     * @param groupId   分组标识
-     * @param message   用户消息
+     * @param groupId        分组标识
+     * @param message        用户消息
+     * @param imageBase64List 图片 base64 列表，可为 null
      * @throws IllegalStateException 如果 groupId 对应的 client 不存在
      */
-    public void sendMessage(String groupId, String message) {
+    public void sendMessage(String groupId, String message, List<String> imageBase64List) {
         AcpClient client = clients.get(groupId);
         if (client == null) {
             throw new IllegalStateException("groupId=" + groupId + " 的会话不存在，请先调用 createSession");
         }
-        client.send(message);
+        client.send(message, imageBase64List);
     }
 
     /**
