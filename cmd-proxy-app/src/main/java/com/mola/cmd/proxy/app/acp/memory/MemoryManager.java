@@ -24,11 +24,11 @@ public class MemoryManager implements MemoryManagerBridge {
     private final MemoryLoader loader;
     private final MemoryFileStore fileStore;
 
-    public MemoryManager(MemoryConfig config, String command, String[] args) {
+    public MemoryManager(MemoryConfig config) {
         this.config = config;
         this.fileStore = new MemoryFileStore(config.getBaseDir());
         this.loader = new MemoryLoader(fileStore, config);
-        this.extractor = new MemoryExtractor(config, command, args, fileStore);
+        this.extractor = new MemoryExtractor(config, fileStore);
     }
 
     // ==================== MemoryManagerBridge 实现 ====================

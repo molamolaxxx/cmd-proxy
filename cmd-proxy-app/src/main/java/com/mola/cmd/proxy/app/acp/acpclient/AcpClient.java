@@ -4,14 +4,16 @@ import com.google.gson.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -35,7 +37,7 @@ public class AcpClient extends AbstractAcpClient {
     });
 
     /** MCP 配置文件路径列表，按优先级从低到高排列 */
-    private final List<Path> mcpConfigPaths = new ArrayList<>();
+    private final List<Path> mcpConfigPaths;
 
     /** 会话上下文管理器 */
     private final ConversationHistoryManager historyManager = new ConversationHistoryManager();
@@ -45,13 +47,20 @@ public class AcpClient extends AbstractAcpClient {
     /** 记忆管理器，通过 setter 注入，未启用时为 null */
     private MemoryManagerBridge memoryManager;
 
-    public AcpClient(String command, String[] args, String workspacePath, String groupId) {
-        super(command, args, workspacePath, groupId);
+    /**
+     * 使用指定 AgentProvider 创建 AcpClient（包级私有，供未来扩展）。
+     */
+    AcpClient(AgentProvider agentProvider, String workspacePath, String groupId) {
+        super(agentProvider, workspacePath, groupId);
         this.globalListener = new DefaultAcpResponseListener(groupId);
+        this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath);
+    }
 
-        // 默认加载路径：用户级 > 工作目录级
-        mcpConfigPaths.add(Paths.get(System.getProperty("user.home"), ".kiro", "settings", "mcp.json"));
-        mcpConfigPaths.add(Paths.get(workspacePath, ".kiro", "settings", "mcp.json"));
+    /**
+     * 使用默认 AgentProvider 创建 AcpClient。
+     */
+    public AcpClient(String workspacePath, String groupId) {
+        this(new KiroCliAgentProvider(), workspacePath, groupId);
     }
 
     /**

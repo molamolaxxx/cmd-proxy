@@ -37,8 +37,7 @@ public abstract class AbstractAcpClient implements Closeable {
     private static final String CLIENT_NAME = "cmd-proxy-acp";
     private static final String CLIENT_VERSION = "1.0.0";
 
-    protected final String command;
-    protected final String[] args;
+    protected final AgentProvider agentProvider;
     protected final String workspacePath;
     protected final String groupId;
     protected final Gson gson = new GsonBuilder().create();
@@ -50,11 +49,22 @@ public abstract class AbstractAcpClient implements Closeable {
     protected BufferedReader reader;
     protected String sessionId;
 
-    public AbstractAcpClient(String command, String[] args, String workspacePath, String groupId) {
-        this.command = command;
-        this.args = args;
-        this.workspacePath = workspacePath;
+    /**
+     * 使用指定 AgentProvider 创建（包级私有，供 acpclient 包内子类使用）。
+     */
+    AbstractAcpClient(AgentProvider agentProvider, String workspacePath, String groupId) {
+        this.agentProvider = agentProvider;
+        this.workspacePath = (workspacePath == null || workspacePath.trim().isEmpty())
+                ? System.getProperty("user.home")
+                : workspacePath;
         this.groupId = groupId;
+    }
+
+    /**
+     * 使用默认 KiroCliAgentProvider 创建。
+     */
+    public AbstractAcpClient(String workspacePath, String groupId) {
+        this(new KiroCliAgentProvider(), workspacePath, groupId);
     }
 
     // ==================== 生命周期（模板方法） ====================
@@ -96,8 +106,8 @@ public abstract class AbstractAcpClient implements Closeable {
 
     protected void startProcess() throws IOException {
         List<String> cmd = new ArrayList<>();
-        cmd.add(command);
-        cmd.addAll(Arrays.asList(args));
+        cmd.add(agentProvider.getCommand());
+        cmd.addAll(Arrays.asList(agentProvider.getArgs()));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(false);

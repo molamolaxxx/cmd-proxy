@@ -30,8 +30,6 @@ public class MemoryExtractor {
     private static final Logger logger = LoggerFactory.getLogger(MemoryExtractor.class);
 
     private final MemoryConfig config;
-    private final String command;
-    private final String[] args;
     private final MemoryFileStore fileStore;
 
     /** 单线程提取队列，串行执行所有提取任务 */
@@ -49,10 +47,8 @@ public class MemoryExtractor {
     /** 上次提取时的历史消息数量，用于增量提取 */
     private final AtomicInteger lastExtractedSize = new AtomicInteger(0);
 
-    public MemoryExtractor(MemoryConfig config, String command, String[] args, MemoryFileStore fileStore) {
+    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore) {
         this.config = config;
-        this.command = command;
-        this.args = args;
         this.fileStore = fileStore;
     }
 
@@ -111,7 +107,7 @@ public class MemoryExtractor {
         String groupId = "memory_extractor__" + workspacePath.hashCode();
 
         try (MemoryAcpClient client = new MemoryAcpClient(
-                command, args, workspacePath, groupId, config.getSubClientTimeout())) {
+                workspacePath, groupId, config.getSubClientTimeout())) {
             client.start();
             String response = client.sendPromptSync(prompt);
             logger.info("记忆提取子 Client 返回, 长度={}", response.length());

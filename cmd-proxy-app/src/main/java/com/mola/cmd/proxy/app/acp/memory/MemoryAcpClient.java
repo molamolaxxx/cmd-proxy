@@ -30,9 +30,8 @@ public class MemoryAcpClient extends AbstractAcpClient {
         return t;
     });
 
-    public MemoryAcpClient(String command, String[] args,
-                           String workspacePath, String groupId, int timeoutSeconds) {
-        super(command, args, workspacePath, groupId);
+    public MemoryAcpClient(String workspacePath, String groupId, int timeoutSeconds) {
+        super(workspacePath, groupId);
         this.timeoutSeconds = timeoutSeconds;
     }
 

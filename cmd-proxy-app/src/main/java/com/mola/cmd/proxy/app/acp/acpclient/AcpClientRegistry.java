@@ -21,20 +21,11 @@ public class AcpClientRegistry {
 
     private final ConcurrentHashMap<String, AcpClient> clients = new ConcurrentHashMap<>();
 
-    private String defaultCommand = System.getProperty("user.home") + "/.local/bin/kiro-cli";
-    private String[] defaultArgs = {"acp"};
-
     private AcpClientRegistry() {
     }
 
     public static AcpClientRegistry getInstance() {
         return INSTANCE;
-    }
-
-    // ==================== 配置 ====================
-
-    public String getDefaultCommand() {
-        return defaultCommand;
     }
 
     // ==================== 核心接口 ====================
@@ -43,23 +34,11 @@ public class AcpClientRegistry {
      * 创建会话：为指定 groupId 创建并启动一个 AcpClient。
      * 如果该 groupId 已有 client，会先关闭旧的再创建新的。
      *
-     * @param groupId 分组标识
-     * @throws IOException 启动失败时抛出
-     */
-    public void createSession(String groupId, String workDir) throws IOException {
-        createSession(groupId, defaultCommand, defaultArgs, workDir);
-    }
-
-    /**
-     * 创建会话：为指定 groupId 创建并启动一个 AcpClient（自定义参数）。
-     *
      * @param groupId       分组标识
-     * @param command       可执行命令路径
-     * @param args          命令参数
      * @param workspacePath 工作目录
      * @throws IOException 启动失败时抛出
      */
-    public void createSession(String groupId, String command, String[] args, String workspacePath) throws IOException {
+    public void createSession(String groupId, String workspacePath) throws IOException {
         // 如果已存在，先关闭旧 client
         AcpClient old = clients.remove(groupId);
         if (old != null) {
@@ -72,7 +51,7 @@ public class AcpClientRegistry {
             workspacePath = old.getWorkspacePath();
         }
 
-        AcpClient client = new AcpClient(command, args, workspacePath, groupId);
+        AcpClient client = new AcpClient(workspacePath, groupId);
         client.start();
         clients.put(groupId, client);
         logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());
@@ -80,11 +59,6 @@ public class AcpClientRegistry {
 
     /**
      * 发送消息：向指定 groupId 的 AcpClient 发送用户消息，可附带图片。
-     *
-     * @param groupId        分组标识
-     * @param message        用户消息
-     * @param imageBase64List 图片 base64 列表，可为 null
-     * @throws IllegalStateException 如果 groupId 对应的 client 不存在
      */
     public void sendMessage(String groupId, String message, List<String> imageBase64List) {
         AcpClient client = clients.get(groupId);
@@ -96,10 +70,6 @@ public class AcpClientRegistry {
 
     /**
      * 取消指定 groupId 当前正在进行的 prompt turn。
-     * 不影响 session 上下文，后续可继续发送消息。
-     *
-     * @param groupId 分组标识
-     * @throws IOException 发送失败时抛出
      */
     public void cancelPrompt(String groupId) throws IOException {
         AcpClient client = clients.get(groupId);

@@ -35,11 +35,7 @@ object AcpProxy {
 
         // 初始化记忆管理器
         if (memoryConfig.isEnabled) {
-            memoryManager = MemoryManager(
-                memoryConfig,
-                registry.defaultCommand ?: (System.getProperty("user.home") + "/.local/bin/kiro-cli"),
-                arrayOf("acp")
-            )
+            memoryManager = MemoryManager(memoryConfig)
             log.info("记忆系统已启用, baseDir={}", memoryConfig.baseDir)
         }
 
