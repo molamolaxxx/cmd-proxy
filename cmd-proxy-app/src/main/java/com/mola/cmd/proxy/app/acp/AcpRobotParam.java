@@ -1,10 +1,14 @@
 package com.mola.cmd.proxy.app.acp;
 
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
+
 public class AcpRobotParam {
     private String name = "";
     private String signature = "";
     private String workDir = "";
     private String avatar = "";
+    private MemoryConfig memory;
+    private String agentProvider = "KIRO_CLI";
 
     public AcpRobotParam() {
     }
@@ -46,5 +50,28 @@ public class AcpRobotParam {
 
     public void setAvatar(String avatar) {
         this.avatar = avatar;
+    }
+
+    public MemoryConfig getMemory() {
+        return memory;
+    }
+
+    public void setMemory(MemoryConfig memory) {
+        this.memory = memory;
+    }
+
+    /**
+     * 该 robot 是否开启了记忆。
+     */
+    public boolean isMemoryEnabled() {
+        return memory != null && memory.isEnabled();
+    }
+
+    public String getAgentProvider() {
+        return agentProvider;
+    }
+
+    public void setAgentProvider(String agentProvider) {
+        this.agentProvider = agentProvider;
     }
 }

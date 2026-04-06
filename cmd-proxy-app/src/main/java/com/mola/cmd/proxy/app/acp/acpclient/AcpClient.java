@@ -1,6 +1,14 @@
 package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
+import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
+import com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,20 +55,27 @@ public class AcpClient extends AbstractAcpClient {
     /** 记忆管理器，通过 setter 注入，未启用时为 null */
     private MemoryManagerBridge memoryManager;
 
+    /** 绑定的 robot 参数，构造时传入，不可变 */
+    private final AcpRobotParam robotParam;
+
     /**
      * 使用指定 AgentProvider 创建 AcpClient（包级私有，供未来扩展）。
      */
-    AcpClient(AgentProvider agentProvider, String workspacePath, String groupId) {
+    AcpClient(AgentProvider agentProvider, String workspacePath, String groupId, AcpRobotParam robotParam) {
         super(agentProvider, workspacePath, groupId);
+        this.robotParam = robotParam;
         this.globalListener = new DefaultAcpResponseListener(groupId);
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath);
     }
 
     /**
      * 使用默认 AgentProvider 创建 AcpClient。
+     * 如果 robotParam 指定了 agentProvider，通过路由器解析。
      */
-    public AcpClient(String workspacePath, String groupId) {
-        this(new KiroCliAgentProvider(), workspacePath, groupId);
+    public AcpClient(String workspacePath, String groupId, AcpRobotParam robotParam) {
+        this(AgentProviderRouter.getInstance().resolve(
+                robotParam != null ? robotParam.getAgentProvider() : null),
+                workspacePath, groupId, robotParam);
     }
 
     /**
@@ -394,5 +409,9 @@ public class AcpClient extends AbstractAcpClient {
 
     public List<ContextMessage> getConversationHistory() {
         return historyManager.getFullHistory(sessionId);
+    }
+
+    public AcpRobotParam getRobotParam() {
+        return robotParam;
     }
 }

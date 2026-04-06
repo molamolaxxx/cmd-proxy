@@ -12,6 +12,7 @@ import com.mola.cmd.proxy.client.resp.CmdResponseContent
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 object AcpProxy {
@@ -20,25 +21,16 @@ object AcpProxy {
 
     private val registry: AcpClientRegistry = AcpClientRegistry.getInstance()
 
-    private var memoryManager: MemoryManager? = null
-    private var memoryConfig: MemoryConfig =
-        MemoryConfig()
+    /** groupId -> MemoryManager，只有开启记忆的 robot 对应的 groupId 才有值 */
+    private val memoryManagers = ConcurrentHashMap<String, MemoryManager>()
 
     fun start(
         cmdGroupList: List<String>,
         robotsJson: String? = null,
         chatterIdsJson: String? = null,
         groupWorkDirMap: Map<String, String> = emptyMap(),
-        memoryConfig: MemoryConfig = MemoryConfig()
+        groupRobotMap: Map<String, AcpRobotParam> = emptyMap()
     ) {
-        this.memoryConfig = memoryConfig
-
-        // 初始化记忆管理器
-        if (memoryConfig.isEnabled) {
-            memoryManager = MemoryManager(memoryConfig)
-            log.info("记忆系统已启用, baseDir={}", memoryConfig.baseDir)
-        }
-
         // 注册命令
         CmdReceiver.register("acp", "acp") { param ->
             mutableMapOf<String, String>()
@@ -52,16 +44,16 @@ object AcpProxy {
         for (groupId in cmdGroupList) {
             try {
                 val workDir = groupWorkDirMap[groupId]
-                registry.createSession(groupId, workDir)
+                val robot = groupRobotMap[groupId]
+                registry.createSession(groupId, workDir, robot)
 
-                // 注入记忆管理器 + 注册每 N 轮回调
-                val client = registry.getClient(groupId)
-                if (client != null && memoryManager != null) {
-                    client.setMemoryManager(memoryManager)
-                    setupTurnCallback(client, memoryConfig)
-                }
+                val client = registry.getClient(groupId) ?: continue
 
-                log.info("ACP client 冷加载完成, groupId={}, workDir={}", groupId, workDir ?: "default")
+                // 按 robot 维度初始化记忆
+                initMemoryForClient(groupId, client, robot)
+
+                log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}",
+                    groupId, robot?.name ?: "unknown", workDir ?: "default", robot?.isMemoryEnabled ?: false)
             } catch (e: Exception) {
                 log.error("ACP client 冷加载失败, groupId={}", groupId, e)
             }
@@ -73,12 +65,11 @@ object AcpProxy {
                 val resultMap = mutableMapOf<String, String?>()
                 resultMap["robots"] = robotsJson
                 resultMap["visibleChatterIds"] = chatterIdsJson
-                val firstGroupId = cmdGroupList[0]
                 CmdReceiver.callback(
                     "acpSyncRobots", "acpSyncRobots",
                     CmdResponseContent(UUID.randomUUID().toString(), resultMap)
                 )
-                log.info("acpSyncRobots 回调已发送, groupId={}", firstGroupId)
+                log.info("acpSyncRobots 回调已发送")
             } catch (e: Exception) {
                 log.error("acpSyncRobots 回调发送失败", e)
             }
@@ -116,14 +107,14 @@ object AcpProxy {
                     resultMap["result"] = "当前client状态不为READY，不允许清除上下文"
                     return@register resultMap
                 }
-                // close() 内部会自动触发记忆提取
-                registry.createSession(groupId, null)
 
-                // 重新注入记忆管理器
+                // close() 内部会自动触发记忆提取
+                registry.createSession(groupId, null, null)
+
+                // 重新初始化记忆管理器
                 val newClient = registry.getClient(groupId)
-                if (newClient != null && memoryManager != null) {
-                    newClient.setMemoryManager(memoryManager)
-                    setupTurnCallback(newClient, memoryConfig)
+                if (newClient != null) {
+                    initMemoryForClient(groupId, newClient, newClient.robotParam)
                 }
 
                 resultMap["result"] = "会话上下文已清除"
@@ -191,9 +182,9 @@ object AcpProxy {
                     resultMap["result"] = "groupId不能为空"
                     return@register resultMap
                 }
-                val mgr = memoryManager
+                val mgr = memoryManagers[groupId]
                 if (mgr == null) {
-                    resultMap["result"] = "记忆系统未启用"
+                    resultMap["result"] = "该 robot 未启用记忆系统"
                     return@register resultMap
                 }
                 val client = registry.getClient(groupId)
@@ -232,9 +223,9 @@ object AcpProxy {
                     resultMap["result"] = "memoryId不能为空"
                     return@register resultMap
                 }
-                val mgr = memoryManager
+                val mgr = memoryManagers[groupId]
                 if (mgr == null) {
-                    resultMap["result"] = "记忆系统未启用"
+                    resultMap["result"] = "该 robot 未启用记忆系统"
                     return@register resultMap
                 }
                 val client = registry.getClient(groupId)
@@ -260,9 +251,9 @@ object AcpProxy {
                     resultMap["result"] = "groupId不能为空"
                     return@register resultMap
                 }
-                val mgr = memoryManager
+                val mgr = memoryManagers[groupId]
                 if (mgr == null) {
-                    resultMap["result"] = "记忆系统未启用"
+                    resultMap["result"] = "该 robot 未启用记忆系统"
                     return@register resultMap
                 }
                 val client = registry.getClient(groupId)
@@ -283,17 +274,29 @@ object AcpProxy {
     }
 
     /**
+     * 为 client 初始化记忆系统（如果该 robot 开启了记忆）。
+     */
+    private fun initMemoryForClient(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
+        if (robot == null || !robot.isMemoryEnabled) return
+
+        val memCfg = robot.memory
+        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg) }
+        client.setMemoryManager(mgr)
+        setupTurnCallback(client, memCfg, mgr)
+    }
+
+    /**
      * 为 AcpClient 注册每 N 轮触发记忆提取的回调。
      */
-    private fun setupTurnCallback(client: AcpClient, memoryConfig: MemoryConfig) {
+    private fun setupTurnCallback(client: AcpClient, memoryConfig: MemoryConfig, memoryManager: MemoryManager) {
         val interval = memoryConfig.extractIntervalTurns
-        if (interval <= 0 || memoryManager == null) return
+        if (interval <= 0) return
 
         val turnCount = AtomicInteger(0)
         client.historyManager.setOnTurnFlushed {
             if (turnCount.incrementAndGet() % interval == 0) {
                 log.info("每 {} 轮触发记忆提取, groupId={}", interval, client.groupId)
-                memoryManager?.submitExtract(
+                memoryManager.submitExtract(
                     client.workspacePath,
                     client.conversationHistory
                 )

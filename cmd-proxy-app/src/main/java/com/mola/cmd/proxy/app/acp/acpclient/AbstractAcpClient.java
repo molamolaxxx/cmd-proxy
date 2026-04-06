@@ -1,6 +1,8 @@
 package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,9 +52,9 @@ public abstract class AbstractAcpClient implements Closeable {
     protected String sessionId;
 
     /**
-     * 使用指定 AgentProvider 创建（包级私有，供 acpclient 包内子类使用）。
+     * 使用指定 AgentProvider 创建（protected，供子类使用）。
      */
-    AbstractAcpClient(AgentProvider agentProvider, String workspacePath, String groupId) {
+    protected AbstractAcpClient(AgentProvider agentProvider, String workspacePath, String groupId) {
         this.agentProvider = agentProvider;
         this.workspacePath = (workspacePath == null || workspacePath.trim().isEmpty())
                 ? System.getProperty("user.home")

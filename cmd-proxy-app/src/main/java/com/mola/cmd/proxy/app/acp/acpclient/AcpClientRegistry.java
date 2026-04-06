@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.acpclient;
 
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,9 +37,10 @@ public class AcpClientRegistry {
      *
      * @param groupId       分组标识
      * @param workspacePath 工作目录
+     * @param robotParam    绑定的 robot 参数
      * @throws IOException 启动失败时抛出
      */
-    public void createSession(String groupId, String workspacePath) throws IOException {
+    public void createSession(String groupId, String workspacePath, AcpRobotParam robotParam) throws IOException {
         // 如果已存在，先关闭旧 client
         AcpClient old = clients.remove(groupId);
         if (old != null) {
@@ -48,10 +50,15 @@ public class AcpClientRegistry {
             } catch (IOException e) {
                 logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
             }
-            workspacePath = old.getWorkspacePath();
+            if (workspacePath == null || workspacePath.trim().isEmpty()) {
+                workspacePath = old.getWorkspacePath();
+            }
+            if (robotParam == null) {
+                robotParam = old.getRobotParam();
+            }
         }
 
-        AcpClient client = new AcpClient(workspacePath, groupId);
+        AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
         client.start();
         clients.put(groupId, client);
         logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());

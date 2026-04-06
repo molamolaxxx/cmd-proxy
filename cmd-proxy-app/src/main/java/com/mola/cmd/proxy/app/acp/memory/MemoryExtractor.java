@@ -1,7 +1,7 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
-import com.mola.cmd.proxy.app.acp.acpclient.ContextMessage;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 import com.mola.cmd.proxy.app.acp.memory.prompt.MemoryPromptTemplate;
@@ -107,7 +107,7 @@ public class MemoryExtractor {
         String groupId = "memory_extractor__" + workspacePath.hashCode();
 
         try (MemoryAcpClient client = new MemoryAcpClient(
-                workspacePath, groupId, config.getSubClientTimeout())) {
+                workspacePath, groupId, config.getSubClientTimeout(), config.getAgentProvider())) {
             client.start();
             String response = client.sendPromptSync(prompt);
             logger.info("记忆提取子 Client 返回, 长度={}", response.length());

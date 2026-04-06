@@ -1,8 +1,8 @@
 package com.mola.cmd.proxy.app.acp.memory.model;
 
 /**
- * 记忆系统配置，对应 acpConfig.json 中的 "memory" 字段。
- * 所有字段均有默认值，未配置时向后兼容。
+ * 记忆系统配置，对应 robot 级别的 "memory" 字段。
+ * 每个 robot 可独立配置，未配置时 enabled=false。
  */
 public class MemoryConfig {
 
@@ -14,6 +14,7 @@ public class MemoryConfig {
     private int maxEntriesGlobal = 20;
     private int projectExpireDays = 30;
     private int subClientTimeout = 30;
+    private String agentProvider = "KIRO_CLI";
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -38,4 +39,7 @@ public class MemoryConfig {
 
     public int getSubClientTimeout() { return subClientTimeout; }
     public void setSubClientTimeout(int subClientTimeout) { this.subClientTimeout = subClientTimeout; }
+
+    public String getAgentProvider() { return agentProvider; }
+    public void setAgentProvider(String agentProvider) { this.agentProvider = agentProvider; }
 }

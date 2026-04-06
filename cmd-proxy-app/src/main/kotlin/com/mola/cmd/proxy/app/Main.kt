@@ -5,7 +5,6 @@ import com.alibaba.fastjson.JSONObject
 import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.acp.AcpRobotParam
 import com.mola.cmd.proxy.app.mcp.McpProxy
-import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
 import com.mola.cmd.proxy.app.utils.LogUtil
 import com.mola.cmd.proxy.app.utils.McpFileUtils
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
@@ -94,24 +93,17 @@ private fun startAcp() {
 
     log.info("ACP 注册的groups: {}", groupIdList)
 
-    // 解析 memory 配置
-    val memoryConfig = if (config.containsKey("memory")) {
-        val memObj = config.getJSONObject("memory")
-        MemoryConfig().apply {
-            if (memObj.containsKey("enabled")) isEnabled = memObj.getBooleanValue("enabled")
-            if (memObj.containsKey("baseDir")) baseDir = memObj.getString("baseDir")
-            if (memObj.containsKey("extractIntervalTurns")) extractIntervalTurns = memObj.getIntValue("extractIntervalTurns")
-            if (memObj.containsKey("indexMaxLines")) indexMaxLines = memObj.getIntValue("indexMaxLines")
-            if (memObj.containsKey("maxEntriesPerProject")) maxEntriesPerProject = memObj.getIntValue("maxEntriesPerProject")
-            if (memObj.containsKey("maxEntriesGlobal")) maxEntriesGlobal = memObj.getIntValue("maxEntriesGlobal")
-            if (memObj.containsKey("projectExpireDays")) projectExpireDays = memObj.getIntValue("projectExpireDays")
-            if (memObj.containsKey("subClientTimeout")) subClientTimeout = memObj.getIntValue("subClientTimeout")
+    // 构建 groupId -> AcpRobotParam 映射
+    val groupRobotMap = chatterIds.flatMap { chatterId ->
+        robots.map { robot ->
+            val acpId = "acp-" + robot.name.replace(" ", "_")
+                .replace("\u3000", "_")
+            val groupId = listOf(chatterId, acpId).sorted().joinToString("")
+            groupId to robot
         }
-    } else {
-        MemoryConfig()  // 默认值，enabled=false
-    }
+    }.toMap()
 
-    AcpProxy.start(groupIdList, robotsJsonStr, chatterIdsJsonStr, groupWorkDirMap, memoryConfig)
+    AcpProxy.start(groupIdList, robotsJsonStr, chatterIdsJsonStr, groupWorkDirMap, groupRobotMap)
 }
 
 /**

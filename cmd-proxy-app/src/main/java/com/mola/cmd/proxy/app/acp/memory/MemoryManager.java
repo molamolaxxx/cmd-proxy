@@ -1,6 +1,6 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
-import com.mola.cmd.proxy.app.acp.acpclient.ContextMessage;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.MemoryManagerBridge;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
