@@ -16,6 +16,11 @@ public class MemoryConfig {
     private int subClientTimeout = 30;
     private String agentProvider = "KIRO_CLI";
 
+    // Dream（记忆整理）相关配置
+    private boolean dreamEnabled = true;
+    private int dreamMinHours = 24;
+    private int dreamMinSessions = 5;
+
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
@@ -42,4 +47,13 @@ public class MemoryConfig {
 
     public String getAgentProvider() { return agentProvider; }
     public void setAgentProvider(String agentProvider) { this.agentProvider = agentProvider; }
+
+    public boolean isDreamEnabled() { return dreamEnabled; }
+    public void setDreamEnabled(boolean dreamEnabled) { this.dreamEnabled = dreamEnabled; }
+
+    public int getDreamMinHours() { return dreamMinHours; }
+    public void setDreamMinHours(int dreamMinHours) { this.dreamMinHours = dreamMinHours; }
+
+    public int getDreamMinSessions() { return dreamMinSessions; }
+    public void setDreamMinSessions(int dreamMinSessions) { this.dreamMinSessions = dreamMinSessions; }
 }

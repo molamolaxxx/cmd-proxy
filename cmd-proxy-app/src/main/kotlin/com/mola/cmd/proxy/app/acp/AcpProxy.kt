@@ -270,6 +270,34 @@ object AcpProxy {
             resultMap
         }
 
+        CmdReceiver.register("acpMemoryDream", cmdGroupList, "手动触发记忆整理（Memory Dream），groupId必填") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            try {
+                val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
+                val groupId = param.getString("groupId")
+                if (groupId.isNullOrBlank()) {
+                    resultMap["result"] = "groupId不能为空"
+                    return@register resultMap
+                }
+                val mgr = memoryManagers[groupId]
+                if (mgr == null) {
+                    resultMap["result"] = "该 robot 未启用记忆系统"
+                    return@register resultMap
+                }
+                val client = registry.getClient(groupId)
+                if (client == null) {
+                    resultMap["result"] = "会话不存在"
+                    return@register resultMap
+                }
+                mgr.triggerDream(client.workspacePath)
+                resultMap["result"] = "记忆整理已触发，将在后台执行"
+            } catch (e: Exception) {
+                log.error("acpMemoryDream 失败", e)
+                resultMap["result"] = "触发记忆整理失败: ${e.message}"
+            }
+            resultMap
+        }
+
         log.info("AcpProxy 命令注册完成")
     }
 

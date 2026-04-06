@@ -26,4 +26,10 @@ public interface MemoryManagerBridge {
      * 分析完整对话历史。session 结束时使用，确保不遗漏。
      */
     void submitExtractFull(String workspacePath, List<ContextMessage> history);
+
+    /**
+     * 递增 session 计数，用于 Dream（记忆整理）触发条件判断。
+     * 在 AcpClient.close() 中调用。
+     */
+    void incrementSessionCount(String workspacePath);
 }

@@ -4,7 +4,6 @@ import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
-import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
@@ -146,6 +145,7 @@ public class AcpClient extends AbstractAcpClient {
         if (memoryManager != null && sessionId != null) {
             try {
                 memoryManager.submitExtractFull(workspacePath, historyManager.getFullHistory(sessionId));
+                memoryManager.incrementSessionCount(workspacePath);
             } catch (Exception e) {
                 logger.warn("关闭时提交记忆提取失败", e);
             }

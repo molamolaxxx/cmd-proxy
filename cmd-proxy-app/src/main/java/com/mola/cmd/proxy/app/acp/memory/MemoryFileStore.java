@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
+import com.mola.cmd.proxy.app.acp.memory.model.DreamState;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 import org.slf4j.Logger;
@@ -52,6 +53,7 @@ public class MemoryFileStore {
             })
             .create();
     private static final String INDEX_FILE = "MEMORY_INDEX.json";
+    private static final String DREAM_STATE_FILE = "DREAM_STATE.json";
     private static final String MEMORIES_DIR = "memories";
     private static final String ARCHIVE_DIR = "archive";
     private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
@@ -250,7 +252,7 @@ public class MemoryFileStore {
      *
      * @return true 如果找到并移除了该条目
      */
-    private boolean removeAndArchive(String workspacePath, MemoryIndex index, String memoryId) {
+    public boolean removeAndArchive(String workspacePath, MemoryIndex index, String memoryId) {
         MemoryEntry target = null;
         Iterator<MemoryEntry> it = index.getMemories().iterator();
         while (it.hasNext()) {
@@ -309,6 +311,109 @@ public class MemoryFileStore {
             logger.info("清理过期记忆 {} 条, workspacePath={}", toDelete.size(), workspacePath);
         }
         return toDelete.size();
+    }
+
+    // ==================== Dream 状态操作 ====================
+
+    /**
+     * 加载整理状态，不存在时返回默认状态。
+     */
+    public DreamState loadDreamState(String workspacePath) {
+        Path path = getProjectDir(workspacePath).resolve(DREAM_STATE_FILE);
+        if (!Files.exists(path)) {
+            return new DreamState();
+        }
+        try {
+            String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+            return PRETTY_GSON.fromJson(content, DreamState.class);
+        } catch (Exception e) {
+            logger.error("加载整理状态失败: {}", path, e);
+            return new DreamState();
+        }
+    }
+
+    /**
+     * 保存整理状态。
+     */
+    public void saveDreamState(String workspacePath, DreamState state) {
+        Path path = getProjectDir(workspacePath).resolve(DREAM_STATE_FILE);
+        try {
+            Files.createDirectories(path.getParent());
+            Files.write(path, PRETTY_GSON.toJson(state).getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            logger.error("保存整理状态失败: {}", path, e);
+        }
+    }
+
+    /**
+     * 递增 session 计数（用于 Dream 触发条件判断）。
+     */
+    public void incrementDreamSessionCount(String workspacePath) {
+        DreamState state = loadDreamState(workspacePath);
+        state.setSessionsSinceLastDream(state.getSessionsSinceLastDream() + 1);
+        saveDreamState(workspacePath, state);
+    }
+
+    /**
+     * 读取所有明细文件内容。
+     *
+     * @return key=memoryId, value=明细文件的原始文本内容
+     */
+    public Map<String, String> loadAllDetails(String workspacePath, MemoryIndex index) {
+        Map<String, String> details = new HashMap<>();
+        for (MemoryEntry entry : index.getMemories()) {
+            if (entry.getFile() != null) {
+                try {
+                    Path filePath = Paths.get(entry.getFile());
+                    if (Files.exists(filePath)) {
+                        String content = new String(Files.readAllBytes(filePath), StandardCharsets.UTF_8);
+                        details.put(entry.getId(), content);
+                    }
+                } catch (IOException e) {
+                    logger.warn("读取明细文件失败: {}", entry.getFile());
+                }
+            }
+        }
+        return details;
+    }
+
+    // ==================== 孤立文件清理 ====================
+
+    /**
+     * 将 memories/ 目录下未被索引引用的明细文件移到 archive/ 目录。
+     *
+     * @return 归档的孤立文件数量
+     */
+    public int archiveOrphanedDetails(String workspacePath, MemoryIndex index) {
+        Path memoriesDir = getProjectDir(workspacePath).resolve(MEMORIES_DIR);
+        if (!Files.exists(memoriesDir) || !Files.isDirectory(memoriesDir)) {
+            return 0;
+        }
+
+        // 收集索引中所有明细文件的绝对路径
+        Set<String> indexedPaths = new HashSet<>();
+        for (MemoryEntry entry : index.getMemories()) {
+            if (entry.getFile() != null) {
+                indexedPaths.add(Paths.get(entry.getFile()).toAbsolutePath().toString());
+            }
+        }
+
+        int archived = 0;
+        try {
+            Path archiveDir = getProjectDir(workspacePath).resolve(ARCHIVE_DIR);
+            for (Path file : Files.list(memoriesDir).collect(Collectors.toList())) {
+                if (!Files.isRegularFile(file)) continue;
+                if (!indexedPaths.contains(file.toAbsolutePath().toString())) {
+                    Files.createDirectories(archiveDir);
+                    Files.move(file, archiveDir.resolve(file.getFileName()));
+                    archived++;
+                    logger.info("归档孤立明细文件: {}", file.getFileName());
+                }
+            }
+        } catch (IOException e) {
+            logger.error("清理孤立明细文件失败, workspacePath={}", workspacePath, e);
+        }
+        return archived;
     }
 
     // ==================== 查询 ====================
