@@ -5,7 +5,7 @@ import com.alibaba.fastjson.JSONObject
 import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.acp.AcpRobotParam
 import com.mola.cmd.proxy.app.mcp.McpProxy
-import com.mola.cmd.proxy.app.memory.model.MemoryConfig
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
 import com.mola.cmd.proxy.app.utils.LogUtil
 import com.mola.cmd.proxy.app.utils.McpFileUtils
 import com.mola.cmd.proxy.client.conf.CmdProxyConf

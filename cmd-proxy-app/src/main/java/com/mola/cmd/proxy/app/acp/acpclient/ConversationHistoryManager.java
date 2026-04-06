@@ -1,4 +1,4 @@
-package com.mola.cmd.proxy.app.acpclient;
+package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.*;
 import org.slf4j.Logger;

@@ -1,4 +1,4 @@
-package com.mola.cmd.proxy.app.acpclient;
+package com.mola.cmd.proxy.app.acp.acpclient;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,7 +23,6 @@ public class AcpClientRegistry {
 
     private String defaultCommand = System.getProperty("user.home") + "/.local/bin/kiro-cli";
     private String[] defaultArgs = {"acp"};
-    private String defaultWorkspacePath = System.getProperty("user.dir");
 
     private AcpClientRegistry() {
     }
@@ -36,22 +35,6 @@ public class AcpClientRegistry {
 
     public String getDefaultCommand() {
         return defaultCommand;
-    }
-
-    public void setDefaultCommand(String command) {
-        this.defaultCommand = command;
-    }
-
-    public String[] getDefaultArgs() {
-        return defaultArgs;
-    }
-
-    public void setDefaultArgs(String[] args) {
-        this.defaultArgs = args;
-    }
-
-    public void setDefaultWorkspacePath(String workspacePath) {
-        this.defaultWorkspacePath = workspacePath;
     }
 
     // ==================== 核心接口 ====================
@@ -96,25 +79,6 @@ public class AcpClientRegistry {
     }
 
     /**
-     * 清除会话：关闭并移除指定 groupId 的 AcpClient。
-     *
-     * @param groupId 分组标识
-     */
-    public void clearSession(String groupId) {
-        AcpClient client = clients.remove(groupId);
-        if (client == null) {
-            logger.warn("groupId={} 不存在，无需清除", groupId);
-            return;
-        }
-        try {
-            client.close();
-        } catch (IOException e) {
-            logger.warn("关闭 AcpClient 失败, groupId={}", groupId, e);
-        }
-        logger.info("groupId={} 会话已清除", groupId);
-    }
-
-    /**
      * 发送消息：向指定 groupId 的 AcpClient 发送用户消息，可附带图片。
      *
      * @param groupId        分组标识
@@ -145,35 +109,10 @@ public class AcpClientRegistry {
         client.cancel();
     }
 
-
-    // ==================== 辅助方法 ====================
-
-    /**
-     * 判断指定 groupId 是否已有活跃会话
-     */
-    public boolean hasSession(String groupId) {
-        return clients.containsKey(groupId);
-    }
-
     /**
      * 获取指定 groupId 的 AcpClient（可能为 null）
      */
     public AcpClient getClient(String groupId) {
         return clients.get(groupId);
-    }
-
-    /**
-     * 关闭所有会话并清空注册表
-     */
-    public void shutdown() {
-        logger.info("关闭所有 AcpClient，共 {} 个", clients.size());
-        clients.forEach((groupId, client) -> {
-            try {
-                client.close();
-            } catch (IOException e) {
-                logger.warn("关闭 AcpClient 失败, groupId={}", groupId, e);
-            }
-        });
-        clients.clear();
     }
 }

@@ -1,9 +1,9 @@
-package com.mola.cmd.proxy.app.memory;
+package com.mola.cmd.proxy.app.acp.memory;
 
-import com.mola.cmd.proxy.app.acpclient.ContextMessage;
-import com.mola.cmd.proxy.app.acpclient.MemoryManagerBridge;
-import com.mola.cmd.proxy.app.memory.model.MemoryConfig;
-import com.mola.cmd.proxy.app.memory.model.MemoryEntry;
+import com.mola.cmd.proxy.app.acp.acpclient.ContextMessage;
+import com.mola.cmd.proxy.app.acp.acpclient.MemoryManagerBridge;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

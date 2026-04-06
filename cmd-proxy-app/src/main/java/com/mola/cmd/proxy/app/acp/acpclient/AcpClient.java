@@ -1,4 +1,4 @@
-package com.mola.cmd.proxy.app.acpclient;
+package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.*;
 import org.slf4j.Logger;
@@ -54,15 +54,6 @@ public class AcpClient extends AbstractAcpClient {
         mcpConfigPaths.add(Paths.get(workspacePath, ".kiro", "settings", "mcp.json"));
     }
 
-    public void addMcpConfigPath(Path configPath) {
-        mcpConfigPaths.add(configPath);
-    }
-
-    public void setMcpConfigPaths(List<Path> paths) {
-        mcpConfigPaths.clear();
-        mcpConfigPaths.addAll(paths);
-    }
-
     /**
      * 注入记忆管理器。通过桥接接口解耦，避免 acpclient 包直接依赖 memory 包。
      */
@@ -85,10 +76,6 @@ public class AcpClient extends AbstractAcpClient {
         JsonObject result = response.getAsJsonObject("result");
         setSessionId(result.get("sessionId").getAsString());
         logger.info("ACP session 创建成功: {}", getSessionId());
-    }
-
-    public void send(String userInput) {
-        send(userInput, null);
     }
 
     public void send(String userInput, List<String> imageBase64List) {
@@ -124,13 +111,6 @@ public class AcpClient extends AbstractAcpClient {
         notification.add("params", params);
         sendJson(notification);
         logger.info("已发送 session/cancel, sessionId={}", sessionId);
-    }
-
-    public void closeSession(String targetSessionId) throws IOException {
-        JsonObject params = new JsonObject();
-        params.addProperty("sessionId", targetSessionId);
-        sendRequest("session/close", params);
-        logger.info("session/close 成功, sessionId={}", targetSessionId);
     }
 
     @Override
@@ -186,9 +166,9 @@ public class AcpClient extends AbstractAcpClient {
                 if (serverMap.containsKey(name)) {
                     continue;
                 }
-                JsonObject acpServer = convertToAcpFormat(name, serverObj);
-                if (acpServer != null) {
-                    serverMap.put(name, acpServer);
+                JsonObject mcpServer = convertToAcpFormat(name, serverObj);
+                if (mcpServer != null) {
+                    serverMap.put(name, mcpServer);
                     loaded++;
                 }
             }

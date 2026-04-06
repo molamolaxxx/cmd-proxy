@@ -1,4 +1,4 @@
-package com.mola.cmd.proxy.app.memory.model;
+package com.mola.cmd.proxy.app.acp.memory.model;
 
 /**
  * 记忆系统配置，对应 acpConfig.json 中的 "memory" 字段。

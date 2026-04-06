@@ -2,13 +2,11 @@ package com.mola.cmd.proxy.app.acp
 
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
-import com.mola.cmd.proxy.app.acpclient.AbstractAcpClient
-import com.mola.cmd.proxy.app.acpclient.AcpClient
-import com.mola.cmd.proxy.app.acpclient.AcpClientRegistry
-import com.mola.cmd.proxy.app.memory.MemoryManager
-import com.mola.cmd.proxy.app.memory.model.MemoryConfig
-import com.mola.cmd.proxy.app.utils.LogUtil
-import com.mola.cmd.proxy.client.conf.CmdProxyConf
+import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClient
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry
+import com.mola.cmd.proxy.app.acp.memory.MemoryManager
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
 import org.slf4j.Logger
@@ -23,7 +21,8 @@ object AcpProxy {
     private val registry: AcpClientRegistry = AcpClientRegistry.getInstance()
 
     private var memoryManager: MemoryManager? = null
-    private var memoryConfig: MemoryConfig = MemoryConfig()
+    private var memoryConfig: MemoryConfig =
+        MemoryConfig()
 
     fun start(
         cmdGroupList: List<String>,
@@ -304,19 +303,5 @@ object AcpProxy {
                 )
             }
         }
-    }
-
-    @JvmStatic
-    fun main(args: Array<String>) {
-        LogUtil.debugReject()
-        CmdProxyConf.serverPort = 10021
-        CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.LOCAL_ADDRESS
-        val robotsJson = "[{\"name\":\"kiro_code_1\",\"signature\":\"专注代码质量\",\"workDir\":\"/home/mola/my-test\",\"avatar\":\"\"}]"
-        val chatterIdsJson = "[\"1740242633231HjpIO\"]"
-        val chatterId = "1740242633231HjpIO"
-        val robotsArray = JSON.parseArray(robotsJson)
-        val groupIdList = robotsArray.map { val obj = it as JSONObject; "acp-${obj.getString("name")}${chatterId}" }
-        val groupWorkDirMap = robotsArray.mapNotNull { val obj = it as JSONObject; val wd = obj.getString("workDir"); if (!wd.isNullOrBlank()) "acp-${obj.getString("name")}${chatterId}" to wd else null }.toMap()
-        start(groupIdList, robotsJson, chatterIdsJson, groupWorkDirMap)
     }
 }

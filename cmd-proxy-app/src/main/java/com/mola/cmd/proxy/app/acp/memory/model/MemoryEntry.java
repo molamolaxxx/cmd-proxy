@@ -1,4 +1,4 @@
-package com.mola.cmd.proxy.app.memory.model;
+package com.mola.cmd.proxy.app.acp.memory.model;
 
 import java.util.ArrayList;
 import java.util.List;

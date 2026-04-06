@@ -1,11 +1,11 @@
-package com.mola.cmd.proxy.app.memory;
+package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
-import com.mola.cmd.proxy.app.acpclient.ContextMessage;
-import com.mola.cmd.proxy.app.memory.model.MemoryAction;
-import com.mola.cmd.proxy.app.memory.model.MemoryConfig;
-import com.mola.cmd.proxy.app.memory.model.MemoryIndex;
-import com.mola.cmd.proxy.app.memory.prompt.MemoryPromptTemplate;
+import com.mola.cmd.proxy.app.acp.acpclient.ContextMessage;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
+import com.mola.cmd.proxy.app.acp.memory.prompt.MemoryPromptTemplate;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

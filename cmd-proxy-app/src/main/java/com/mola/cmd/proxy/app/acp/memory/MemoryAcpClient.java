@@ -1,7 +1,7 @@
-package com.mola.cmd.proxy.app.memory;
+package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
-import com.mola.cmd.proxy.app.acpclient.AbstractAcpClient;
+import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

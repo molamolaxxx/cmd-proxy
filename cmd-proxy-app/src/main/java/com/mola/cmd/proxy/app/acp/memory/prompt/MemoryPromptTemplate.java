@@ -1,7 +1,7 @@
-package com.mola.cmd.proxy.app.memory.prompt;
+package com.mola.cmd.proxy.app.acp.memory.prompt;
 
-import com.mola.cmd.proxy.app.memory.model.MemoryEntry;
-import com.mola.cmd.proxy.app.memory.model.MemoryIndex;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 
 /**
  * 记忆提取 prompt 模板，构建发送给子 Client 的指令文本。

@@ -1,4 +1,4 @@
-package com.mola.cmd.proxy.app.acpclient;
+package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -29,8 +29,6 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         sendContent(text, false);
     }
 
-    
-        
     @Override
     public void onToolCall(String toolCallId, String title, String status, JsonObject update) {
         if ("completed".equals(status)) {
@@ -65,10 +63,6 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
             sendContent(sb.toString(), false);
         }
     }
-
-
-
-
 
     @Override
     public void onComplete(String fullResponse) {

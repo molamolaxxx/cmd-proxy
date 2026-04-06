@@ -1,8 +1,8 @@
-package com.mola.cmd.proxy.app.memory;
+package com.mola.cmd.proxy.app.acp.memory;
 
-import com.mola.cmd.proxy.app.memory.model.MemoryConfig;
-import com.mola.cmd.proxy.app.memory.model.MemoryEntry;
-import com.mola.cmd.proxy.app.memory.model.MemoryIndex;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
