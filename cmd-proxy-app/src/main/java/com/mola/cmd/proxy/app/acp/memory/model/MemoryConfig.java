@@ -13,7 +13,7 @@ public class MemoryConfig {
     private int maxEntriesPerProject = 50;
     private int maxEntriesGlobal = 20;
     private int projectExpireDays = 30;
-    private int subClientTimeout = 30;
+    private int subClientTimeout = 120;
     private String agentProvider = "KIRO_CLI";
 
     // Dream（记忆整理）相关配置
@@ -56,4 +56,5 @@ public class MemoryConfig {
 
     public int getDreamMinSessions() { return dreamMinSessions; }
     public void setDreamMinSessions(int dreamMinSessions) { this.dreamMinSessions = dreamMinSessions; }
+
 }

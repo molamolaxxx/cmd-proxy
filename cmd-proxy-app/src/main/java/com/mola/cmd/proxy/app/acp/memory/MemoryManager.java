@@ -111,6 +111,30 @@ public class MemoryManager implements MemoryManagerBridge {
     }
 
     /**
+     * 获取上次 auto dream 的时间。
+     * 供能力反思服务判断记忆是否发生过整理。
+     *
+     * @return ISO 格式时间字符串，从未整理过时返回 null
+     */
+    public String getLastDreamTime(String workspacePath) {
+        return fileStore.loadDreamState(workspacePath).getLastDreamTime();
+    }
+
+    /**
+     * 构建纯记忆条目概要，不含主 agent 专用的警告和操作提示。
+     * 供能力反思等子系统使用。
+     */
+    public String buildMemorySummary(String workspacePath) {
+        if (!config.isEnabled()) return "";
+        try {
+            return loader.buildMemorySummary(workspacePath);
+        } catch (Exception e) {
+            logger.error("构建记忆概要失败", e);
+            return "";
+        }
+    }
+
+    /**
      * 手动触发记忆整理（供 acpMemoryDream 命令调用）。
      */
     public void triggerDream(String workspacePath) {

@@ -59,9 +59,12 @@ public class MemoryLoader {
         for (MemoryEntry entry : sorted) {
             if (lineCount + 3 > maxLines) break;
             shown++;
-            sb.append(String.format("%d. [%s] %s：%s\n   \uD83D\uDCC4 %s\n\n",
+            String tagStr = (entry.getTags() != null && !entry.getTags().isEmpty())
+                    ? " #" + String.join(" #", entry.getTags())
+                    : "";
+            sb.append(String.format("%d. [%s] %s：%s%s\n   \uD83D\uDCC4 %s\n\n",
                     shown, entry.getType(), entry.getTitle(),
-                    entry.getSummary(), entry.getFile()));
+                    entry.getSummary(), tagStr, entry.getFile()));
             lineCount += 3;
         }
 
@@ -69,6 +72,44 @@ public class MemoryLoader {
             sb.append(String.format("... 还有 %d 条较早的记忆未列出。如需查看完整列表，请读取索引文件：\n\uD83D\uDCC4 %s\n",
                     sorted.size() - shown,
                     fileStore.getIndexPath(workspacePath)));
+        }
+
+        return sb.toString();
+    }
+    /**
+     * 构建纯记忆条目概要，不含主 agent 专用的警告和操作提示。
+     * 供能力反思等子系统使用。
+     *
+     * @param workspacePath 当前工作目录
+     * @return 概要文本，无记忆时返回空字符串
+     */
+    public String buildMemorySummary(String workspacePath) {
+        MemoryIndex index = fileStore.loadIndex(workspacePath);
+        if (index == null || index.getMemories().isEmpty()) {
+            return "";
+        }
+
+        List<MemoryEntry> sorted = index.getMemories().stream()
+                .sorted(Comparator.comparing(
+                        (MemoryEntry e) -> e.getUpdatedAt() != null ? e.getUpdatedAt() : "")
+                        .reversed())
+                .collect(Collectors.toList());
+
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (MemoryEntry entry : sorted) {
+            if (shown >= config.getIndexMaxLines() / 3) break;
+            shown++;
+            String tagStr = (entry.getTags() != null && !entry.getTags().isEmpty())
+                    ? " #" + String.join(" #", entry.getTags())
+                    : "";
+            sb.append(String.format("%d. [%s] %s：%s%s\n",
+                    shown, entry.getType(), entry.getTitle(),
+                    entry.getSummary(), tagStr));
+        }
+
+        if (shown < sorted.size()) {
+            sb.append(String.format("... 还有 %d 条较早的记忆未列出。\n", sorted.size() - shown));
         }
 
         return sb.toString();

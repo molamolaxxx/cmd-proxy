@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp
 
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
+import com.mola.cmd.proxy.app.acp.ability.AbilityReflectionService
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry
@@ -23,6 +24,9 @@ object AcpProxy {
 
     /** groupId -> MemoryManager，只有开启记忆的 robot 对应的 groupId 才有值 */
     private val memoryManagers = ConcurrentHashMap<String, MemoryManager>()
+
+    /** groupId -> AbilityReflectionService */
+    private val abilityServices = ConcurrentHashMap<String, AbilityReflectionService>()
 
     fun start(
         cmdGroupList: List<String>,
@@ -51,6 +55,9 @@ object AcpProxy {
 
                 // 按 robot 维度初始化记忆
                 initMemoryForClient(groupId, client, robot)
+
+                // 初始化能力反思
+                initAbilityReflection(groupId, client, robot)
 
                 log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}",
                     groupId, robot?.name ?: "unknown", workDir ?: "default", robot?.isMemoryEnabled ?: false)
@@ -115,6 +122,7 @@ object AcpProxy {
                 val newClient = registry.getClient(groupId)
                 if (newClient != null) {
                     initMemoryForClient(groupId, newClient, newClient.robotParam)
+                    initAbilityReflection(groupId, newClient, newClient.robotParam)
                 }
 
                 resultMap["result"] = "会话上下文已清除"
@@ -330,5 +338,29 @@ object AcpProxy {
                 )
             }
         }
+    }
+
+    /**
+     * 初始化能力反思服务。
+     * 触发时机：AcpClient 初始化后发现 ability.md 不存在时立即触发。
+     * dream 完成后也会触发（通过 MemoryManager 的回调）。
+     */
+    private fun initAbilityReflection(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
+        if (robot == null || robot.name.isBlank()) return
+
+        val agentProvider = robot.agentProvider ?: "KIRO_CLI"
+        val timeoutSeconds = if (robot.isMemoryEnabled) robot.memory.subClientTimeout else 120
+        val mcpConfigPaths = client.mcpConfigPaths
+        val memoryManager: MemoryManager? = if (robot.isMemoryEnabled) memoryManagers[groupId] else null
+
+        val service = abilityServices.getOrPut(groupId) {
+            AbilityReflectionService(
+                robot.name, client.workspacePath, agentProvider,
+                timeoutSeconds, mcpConfigPaths, memoryManager
+            )
+        }
+
+        // 统一由 submitReflection 内部判断是否需要执行
+        service.submitReflection()
     }
 }
