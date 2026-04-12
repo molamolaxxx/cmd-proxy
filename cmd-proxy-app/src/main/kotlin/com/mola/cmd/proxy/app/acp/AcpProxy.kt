@@ -8,6 +8,8 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
+import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector
+import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
 import org.slf4j.Logger
@@ -28,6 +30,9 @@ object AcpProxy {
     /** groupId -> AbilityReflectionService */
     private val abilityServices = ConcurrentHashMap<String, AbilityReflectionService>()
 
+    /** 全局 robot 注册表，name -> AcpRobotParam */
+    private val globalRobotRegistry = ConcurrentHashMap<String, AcpRobotParam>()
+
     fun start(
         cmdGroupList: List<String>,
         robotsJson: String? = null,
@@ -42,6 +47,13 @@ object AcpProxy {
 
         CmdReceiver.register("acpSyncRobots", "acpSyncRobots") { param ->
             mutableMapOf<String, String>()
+        }
+
+        // 构建全局 robot 注册表（在冷加载之前，供子 Agent 派发使用）
+        for ((_, robot) in groupRobotMap) {
+            if (robot != null && robot.name.isNotBlank()) {
+                globalRobotRegistry[robot.name] = robot
+            }
         }
 
         // 冷加载：启动时为每个groupId预创建client
@@ -59,8 +71,13 @@ object AcpProxy {
                 // 初始化能力反思
                 initAbilityReflection(groupId, client, robot)
 
-                log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}",
-                    groupId, robot?.name ?: "unknown", workDir ?: "default", robot?.isMemoryEnabled ?: false)
+                // 初始化子 Agent 派发
+                initSubAgentDispatcher(groupId, client, robot)
+
+                log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
+                    groupId, robot?.name ?: "unknown", workDir ?: "default",
+                    robot?.isMemoryEnabled ?: false,
+                    robot?.subAgents?.map { it.name } ?: emptyList<String>())
             } catch (e: Exception) {
                 log.error("ACP client 冷加载失败, groupId={}", groupId, e)
             }
@@ -123,6 +140,7 @@ object AcpProxy {
                 if (newClient != null) {
                     initMemoryForClient(groupId, newClient, newClient.robotParam)
                     initAbilityReflection(groupId, newClient, newClient.robotParam)
+                    initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
                 }
 
                 resultMap["result"] = "会话上下文已清除"
@@ -362,5 +380,54 @@ object AcpProxy {
 
         // 统一由 submitReflection 内部判断是否需要执行
         service.submitReflection()
+    }
+
+    /**
+     * 初始化子 Agent 派发器（如果该 robot 配置了 subAgents）。
+     */
+    private fun initSubAgentDispatcher(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
+        if (robot == null || !robot.hasSubAgents()) return
+
+        // 校验子 Agent 引用的有效性
+        val allowedNames = mutableSetOf<String>()
+        for (ref in robot.subAgents) {
+            if (!globalRobotRegistry.containsKey(ref.name)) {
+                log.warn("robot '{}' 引用了不存在的子 Agent '{}'，跳过", robot.name, ref.name)
+            } else {
+                allowedNames.add(ref.name)
+            }
+        }
+
+        if (allowedNames.isEmpty()) {
+            log.warn("robot '{}' 的所有子 Agent 引用均无效，跳过派发器初始化", robot.name)
+            return
+        }
+
+        val dispatcher = SubAgentDispatcher(
+            globalRobotRegistry,
+            allowedNames,
+            1080
+        )
+
+        // 构建子 Agent 的记忆管理器映射（robot name -> MemoryManager）
+        val subAgentMemoryMap = mutableMapOf<String, com.mola.cmd.proxy.app.acp.acpclient.MemoryManagerBridge>()
+        for (name in allowedNames) {
+            val targetRobot = globalRobotRegistry[name] ?: continue
+            if (targetRobot.isMemoryEnabled) {
+                val memMgr = MemoryManager(targetRobot.memory)
+                subAgentMemoryMap[name] = memMgr
+            }
+        }
+        if (subAgentMemoryMap.isNotEmpty()) {
+            dispatcher.setMemoryManagers(subAgentMemoryMap)
+            log.info("子 Agent 记忆管理器注入完成, agents={}", subAgentMemoryMap.keys)
+        }
+
+        val injector = SubAgentContextInjector()
+
+        client.setSubAgentSupport(dispatcher, injector, globalRobotRegistry)
+
+        log.info("子 Agent 派发器初始化完成, groupId={}, subAgents={}",
+            groupId, allowedNames)
     }
 }

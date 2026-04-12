@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.acpclient.listener;
 
+
 /**
  * ACP 回调监听器，用于接收 agent 的回答输出。
  */
@@ -21,6 +22,20 @@ public interface AcpResponseListener {
      * @param update     完整的 update JSON 对象，可从中提取 kind、rawInput、content 等
      */
     void onToolCall(String toolCallId, String title, String status, com.google.gson.JsonObject update);
+
+    /**
+     * 子 Agent 派发事件回调。
+     * <p>
+     * 与 onMessage 分离，让客户端可以用不同的 UI 展示子 Agent 状态。
+     * 默认空实现，向后兼容已有的 Listener 实现。
+     *
+     * @param eventType  事件类型：DISPATCH_START / AGENT_START / AGENT_COMPLETE / AGENT_ERROR / DISPATCH_COMPLETE
+     * @param agentName  子 Agent 名称，DISPATCH_START/DISPATCH_COMPLETE 时为 null
+     * @param detail     事件详情（如耗时、错误信息、结果摘要）
+     */
+    default void onSubAgentEvent(String eventType, String agentName, String detail) {
+        // 默认空实现，向后兼容
+    }
 
     /**
      * agent 回答完成时回调

@@ -1,6 +1,9 @@
 package com.mola.cmd.proxy.app.acp;
 
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
+import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentRef;
+
+import java.util.List;
 
 public class AcpRobotParam {
     private String name = "";
@@ -9,6 +12,7 @@ public class AcpRobotParam {
     private String avatar = "";
     private MemoryConfig memory;
     private String agentProvider = "KIRO_CLI";
+    private List<SubAgentRef> subAgents;
 
     public AcpRobotParam() {
     }
@@ -73,5 +77,20 @@ public class AcpRobotParam {
 
     public void setAgentProvider(String agentProvider) {
         this.agentProvider = agentProvider;
+    }
+
+    public List<SubAgentRef> getSubAgents() {
+        return subAgents;
+    }
+
+    public void setSubAgents(List<SubAgentRef> subAgents) {
+        this.subAgents = subAgents;
+    }
+
+    /**
+     * 该 robot 是否配置了子 Agent。
+     */
+    public boolean hasSubAgents() {
+        return subAgents != null && !subAgents.isEmpty();
     }
 }

@@ -210,6 +210,112 @@ public abstract class AbstractAcpClient implements Closeable {
         writer.flush();
     }
 
+    /**
+     * 同步发送 prompt 并阻塞等待完整响应文本。
+     * <p>
+     * 提取自 MemoryAcpClient / AbilityReflectionAcpClient 的公共逻辑，
+     * 供所有"同步阻塞式子 Client"复用。自动处理 permission 请求。
+     *
+     * @param promptText 发送给 agent 的完整 prompt
+     * @param clientName 客户端名称，用于异常消息（如 "Memory ACP"、"SubAgent"）
+     * @return agent 的完整回答文本
+     * @throws IOException 通信失败
+     */
+    protected String doSendPromptSync(String promptText, String clientName) throws IOException {
+        JsonObject params = new JsonObject();
+        params.addProperty("sessionId", sessionId);
+
+        JsonArray prompt = new JsonArray();
+        JsonObject textBlock = new JsonObject();
+        textBlock.addProperty("type", "text");
+        textBlock.addProperty("text", promptText);
+        prompt.add(textBlock);
+        params.add("prompt", prompt);
+
+        JsonObject request = buildRequest("session/prompt", params);
+        String requestId = request.get("id").getAsString();
+        sendJson(request);
+
+        StringBuilder fullResponse = new StringBuilder();
+        while (true) {
+            String line = reader.readLine();
+            if (line == null) {
+                throw new IOException(clientName + " 进程意外关闭");
+            }
+
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("{")) continue;
+
+            JsonObject msg;
+            try {
+                msg = JsonParser.parseString(trimmed).getAsJsonObject();
+            } catch (JsonSyntaxException e) {
+                continue;
+            }
+
+            // prompt response — turn 结束
+            if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+                return fullResponse.toString();
+            }
+
+            // session/request_permission — 自动 allow
+            if (msg.has("method") && "session/request_permission".equals(msg.get("method").getAsString())) {
+                autoAllowPermission(msg);
+                continue;
+            }
+
+            // session/update — 拼接文本
+            if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
+                String text = extractAgentMessageText(msg);
+                if (text != null) {
+                    fullResponse.append(text);
+                }
+            }
+        }
+    }
+
+    /**
+     * 自动回复 permission 请求为 allow_always。
+     */
+    protected void autoAllowPermission(JsonObject msg) throws IOException {
+        String permId = msg.has("id") ? msg.get("id").getAsString() : null;
+        if (permId == null) return;
+
+        JsonObject outcomeObj = new JsonObject();
+        outcomeObj.addProperty("outcome", "selected");
+        outcomeObj.addProperty("optionId", "allow_always");
+        JsonObject permResult = new JsonObject();
+        permResult.add("outcome", outcomeObj);
+        JsonObject permResp = new JsonObject();
+        permResp.addProperty("jsonrpc", JSONRPC_VERSION);
+        permResp.addProperty("id", permId);
+        permResp.add("result", permResult);
+        sendJson(permResp);
+    }
+
+    /**
+     * 从 session/update 消息中提取 agent_message_chunk 的文本。
+     *
+     * @return 文本内容，非 agent_message_chunk 时返回 null
+     */
+    protected String extractAgentMessageText(JsonObject msg) {
+        JsonObject updateParams = msg.getAsJsonObject("params");
+        if (updateParams == null) return null;
+        JsonObject update = updateParams.getAsJsonObject("update");
+        if (update == null) return null;
+
+        String updateType = update.has("sessionUpdate")
+                ? update.get("sessionUpdate").getAsString() : "";
+        if (!"agent_message_chunk".equals(updateType)) return null;
+
+        JsonObject content = update.getAsJsonObject("content");
+        if (content != null && content.has("text")) {
+            return content.get("text").getAsString();
+        }
+        return null;
+    }
+
+
     // ==================== Getters ====================
 
     public String getSessionId() { return sessionId; }

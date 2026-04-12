@@ -8,18 +8,20 @@ import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener;
+import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector;
+import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher;
+import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
+import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentResult;
+import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +57,15 @@ public class AcpClient extends AbstractAcpClient {
     /** 记忆管理器，通过 setter 注入，未启用时为 null */
     private MemoryManagerBridge memoryManager;
 
+    /** 子 Agent 派发器，通过 setter 注入，未配置子 Agent 时为 null */
+    private SubAgentDispatcher subAgentDispatcher;
+
+    /** 子 Agent 上下文注入器，通过 setter 注入 */
+    private SubAgentContextInjector subAgentContextInjector;
+
+    /** 全局 robot 注册表引用，用于子 Agent 上下文构建 */
+    private Map<String, AcpRobotParam> globalRobotRegistry;
+
     /** 绑定的 robot 参数，构造时传入，不可变 */
     private final AcpRobotParam robotParam;
 
@@ -83,6 +94,21 @@ public class AcpClient extends AbstractAcpClient {
      */
     public void setMemoryManager(MemoryManagerBridge memoryManager) {
         this.memoryManager = memoryManager;
+    }
+
+    /**
+     * 注入子 Agent 派发器和上下文注入器。
+     *
+     * @param dispatcher      子 Agent 派发器
+     * @param injector        上下文注入器
+     * @param robotRegistry   全局 robot 注册表
+     */
+    public void setSubAgentSupport(SubAgentDispatcher dispatcher,
+                                   SubAgentContextInjector injector,
+                                   Map<String, AcpRobotParam> robotRegistry) {
+        this.subAgentDispatcher = dispatcher;
+        this.subAgentContextInjector = injector;
+        this.globalRobotRegistry = robotRegistry;
     }
 
     // ==================== 生命周期 ====================
@@ -152,6 +178,11 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
+        // 关闭子 Agent 派发器
+        if (subAgentDispatcher != null) {
+            subAgentDispatcher.close();
+        }
+
         executor.shutdownNow();
         super.close();
     }
@@ -159,95 +190,12 @@ public class AcpClient extends AbstractAcpClient {
     // ==================== MCP 配置加载 ====================
 
     private JsonArray loadMcpServersFromConfigs() {
-        Map<String, JsonObject> serverMap = new LinkedHashMap<>();
-        for (Path configPath : mcpConfigPaths) {
-            loadMcpServersFromConfig(configPath, serverMap);
-        }
-        JsonArray result = new JsonArray();
-        serverMap.values().forEach(result::add);
-        return result;
-    }
-
-    private void loadMcpServersFromConfig(Path configPath, Map<String, JsonObject> serverMap) {
-        if (!Files.exists(configPath)) {
-            logger.debug("MCP config not found, skipping: {}", configPath);
-            return;
-        }
-        try {
-            String content = new String(Files.readAllBytes(configPath), StandardCharsets.UTF_8);
-            JsonObject root = JsonParser.parseString(content).getAsJsonObject();
-            JsonObject servers = root.getAsJsonObject("mcpServers");
-            if (servers == null) {
-                logger.debug("No mcpServers in config: {}", configPath);
-                return;
-            }
-            int loaded = 0;
-            for (Map.Entry<String, JsonElement> entry : servers.entrySet()) {
-                String name = entry.getKey();
-                JsonObject serverObj = entry.getValue().getAsJsonObject();
-                if (serverObj.has("disabled") && serverObj.get("disabled").getAsBoolean()) {
-                    continue;
-                }
-                if (serverMap.containsKey(name)) {
-                    continue;
-                }
-                JsonObject mcpServer = convertToAcpFormat(name, serverObj);
-                if (mcpServer != null) {
-                    serverMap.put(name, mcpServer);
-                    loaded++;
-                }
-            }
-            logger.info("Loaded {} MCP server(s) from {}", loaded, configPath);
-        } catch (Exception e) {
-            logger.error("Failed to load MCP config from {}", configPath, e);
-        }
-    }
-
-    private JsonObject convertToAcpFormat(String name, JsonObject serverObj) {
-        JsonObject acpServer = new JsonObject();
-        acpServer.addProperty("name", name);
-
-        if (serverObj.has("url")) {
-            acpServer.addProperty("type", "http");
-            acpServer.addProperty("url", serverObj.get("url").getAsString());
-            if (serverObj.has("headers") && serverObj.get("headers").isJsonObject()) {
-                JsonArray headerArray = new JsonArray();
-                for (Map.Entry<String, JsonElement> h : serverObj.getAsJsonObject("headers").entrySet()) {
-                    JsonObject header = new JsonObject();
-                    header.addProperty("name", h.getKey());
-                    header.addProperty("value", h.getValue().getAsString());
-                    headerArray.add(header);
-                }
-                acpServer.add("headers", headerArray);
-            }
-        } else if (serverObj.has("command")) {
-            acpServer.addProperty("command", serverObj.get("command").getAsString());
-            if (serverObj.has("args") && serverObj.get("args").isJsonArray()) {
-                acpServer.add("args", serverObj.getAsJsonArray("args"));
-            } else {
-                acpServer.add("args", new JsonArray());
-            }
-            if (serverObj.has("env") && serverObj.get("env").isJsonObject()) {
-                JsonArray envArray = new JsonArray();
-                for (Map.Entry<String, JsonElement> e : serverObj.getAsJsonObject("env").entrySet()) {
-                    JsonObject envVar = new JsonObject();
-                    envVar.addProperty("name", e.getKey());
-                    envVar.addProperty("value", e.getValue().getAsString());
-                    envArray.add(envVar);
-                }
-                acpServer.add("env", envArray);
-            } else {
-                acpServer.add("env", new JsonArray());
-            }
-        } else {
-            logger.warn("MCP server '{}' has neither 'url' nor 'command', skipping", name);
-            return null;
-        }
-        return acpServer;
+        return McpConfigLoader.loadFromPaths(mcpConfigPaths);
     }
 
     // ==================== Prompt ====================
 
+    
     private void sendPrompt(String userInput, Collection<String> imageBase64List, AcpResponseListener listener) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
@@ -267,6 +215,18 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
+        // 注入子 Agent 上下文
+        String subAgentContext = "";
+        if (subAgentContextInjector != null && robotParam != null
+                && robotParam.hasSubAgents() && globalRobotRegistry != null) {
+            try {
+                subAgentContext = subAgentContextInjector.buildContext(
+                        robotParam.getSubAgents(), globalRobotRegistry);
+            } catch (Exception e) {
+                logger.warn("构建子 Agent 上下文失败，跳过", e);
+            }
+        }
+
         JsonArray prompt = new JsonArray();
 
         // 添加图片内容块
@@ -283,10 +243,12 @@ public class AcpClient extends AbstractAcpClient {
 
         JsonObject textBlock = new JsonObject();
         textBlock.addProperty("type", "text");
-        String fullText = memoryContext.isEmpty()
-                ? timeContext + userInput
-                : memoryContext + "\n" + timeContext + userInput;
-        textBlock.addProperty("text", fullText);
+        // 拼接顺序：子Agent上下文 → 记忆 → 时间 → 用户输入
+        StringBuilder fullTextBuilder = new StringBuilder();
+        if (!subAgentContext.isEmpty()) fullTextBuilder.append(subAgentContext).append("\n");
+        if (!memoryContext.isEmpty()) fullTextBuilder.append(memoryContext).append("\n");
+        fullTextBuilder.append(timeContext).append(userInput);
+        textBlock.addProperty("text", fullTextBuilder.toString());
         prompt.add(textBlock);
         params.add("prompt", prompt);
 
@@ -298,6 +260,9 @@ public class AcpClient extends AbstractAcpClient {
 
         // 流式读取
         StringBuilder fullResponse = new StringBuilder();
+        // 缓冲过滤器：拦截 dispatch_subagent JSON，避免推送给用户
+        DispatchBufferFilter bufferFilter = new DispatchBufferFilter(
+                listener, subAgentDispatcher != null);
         while (true) {
             String line = reader.readLine();
             if (line == null) {
@@ -326,25 +291,22 @@ public class AcpClient extends AbstractAcpClient {
                 logger.info("ACP prompt turn 结束, stopReason={}, msg = {}", stopReason, trimmed);
                 historyManager.addAssistantMessage(fullResponse.toString());
                 historyManager.flushTurn(sessionId);
+
+                // flush 缓冲区（如果有未推送的非 dispatch 内容）
+                bufferFilter.flush();
+
+                // 检测子 Agent 派发指令并处理
+                if (handleSubAgentDispatch(fullResponse.toString(), listener)) {
+                    return;
+                }
+
                 listener.onComplete(fullResponse.toString());
                 return;
             }
 
             // session/request_permission — 自动回复 allow_always
             if (msg.has("method") && "session/request_permission".equals(msg.get("method").getAsString())) {
-                String permId = msg.has("id") ? msg.get("id").getAsString() : null;
-                if (permId != null) {
-                    JsonObject outcomeObj = new JsonObject();
-                    outcomeObj.addProperty("outcome", "selected");
-                    outcomeObj.addProperty("optionId", "allow_always");
-                    JsonObject permResult = new JsonObject();
-                    permResult.add("outcome", outcomeObj);
-                    JsonObject permResp = new JsonObject();
-                    permResp.addProperty("jsonrpc", JSONRPC_VERSION);
-                    permResp.addProperty("id", permId);
-                    permResp.add("result", permResult);
-                    sendJson(permResp);
-                }
+                autoAllowPermission(msg);
                 continue;
             }
 
@@ -363,7 +325,8 @@ public class AcpClient extends AbstractAcpClient {
                     if (content != null && content.has("text")) {
                         String text = content.get("text").getAsString();
                         fullResponse.append(text);
-                        listener.onMessage(text);
+                        // 通过缓冲过滤器推送，dispatch JSON 会被拦截
+                        bufferFilter.accept(text);
                     }
                 } else if ("tool_call".equals(updateType) || "tool_call_update".equals(updateType)) {
                     String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
@@ -383,6 +346,46 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
     }
+
+    /**
+     * 检测并处理子 Agent 派发指令。
+     * <p>
+     * 在主 Agent turn 结束后调用。如果检测到 dispatch_subagent 指令：
+     * 1. 并行执行子 Agent 任务
+     * 2. 将结果格式化为 follow-up prompt
+     * 3. 自动发送第二轮 prompt 让主 Agent 汇总
+     *
+     * @return true 如果检测到并处理了派发指令
+     */
+    private boolean handleSubAgentDispatch(String fullResponse, AcpResponseListener listener) {
+        if (subAgentDispatcher == null) return false;
+
+        List<SubAgentTask> tasks = subAgentDispatcher.detectDispatch(fullResponse);
+        if (tasks == null || tasks.isEmpty()) return false;
+
+        logger.info("检测到子 Agent 派发指令，任务数={}", tasks.size());
+
+        try {
+            List<SubAgentResult> results = subAgentDispatcher.dispatch(
+                    tasks, listener, workspacePath);
+
+            String resultContext = SubAgentDispatcher.formatResults(results);
+
+            listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
+                    "正在汇总子 Agent 结果...");
+            sendPrompt(resultContext, null, listener);
+            return true;
+
+        } catch (Exception e) {
+            logger.error("子 Agent 派发处理失败", e);
+            listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
+                    "子 Agent 派发失败: " + e.getMessage());
+            listener.onComplete(fullResponse);
+            return true;
+        }
+    }
+
+
 
     private String guessMimeType(String base64Data) {
         if (base64Data.startsWith("iVBOR")) return "image/png";
