@@ -40,10 +40,12 @@ public class SubAgentContextInjector {
      *
      * @param subAgentRefs  当前 robot 配置的 subAgents 列表
      * @param robotRegistry 全局 robot 注册表 (name -> AcpRobotParam)
+     * @param selfName      主 Agent 自身的 robot name，用于检测 self-fork
      * @return 格式化的能力描述文本，无可用子 Agent 时返回 ""
      */
     public String buildContext(List<SubAgentRef> subAgentRefs,
-                               Map<String, AcpRobotParam> robotRegistry) {
+                               Map<String, AcpRobotParam> robotRegistry,
+                               String selfName) {
         if (subAgentRefs == null || subAgentRefs.isEmpty()) return "";
 
         StringBuilder sb = new StringBuilder();
@@ -57,9 +59,16 @@ public class SubAgentContextInjector {
                 continue;
             }
 
-            String desc = resolveDescription(ref, targetRobot);
-            sb.append("- 名称（name）: `").append(ref.getName()).append("`\n");
-            sb.append("  能力: ").append(desc).append("\n\n");
+            boolean isSelf = ref.getName().equals(selfName);
+
+            sb.append("- 名称（name）: `").append(ref.getName()).append("`");
+            if (isSelf) {
+                sb.append(" ⚡ (self-fork: 你自己的并行分身，拥有相同的能力，适合并行处理独立子任务)");
+            } else {
+                String desc = resolveDescription(ref, targetRobot);
+                sb.append("\n  能力: ").append(desc);
+            }
+            sb.append("\n\n");
             validNames.add(ref.getName());
             validCount++;
         }

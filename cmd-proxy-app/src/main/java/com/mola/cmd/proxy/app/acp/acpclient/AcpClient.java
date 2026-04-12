@@ -228,7 +228,7 @@ public class AcpClient extends AbstractAcpClient {
                 && robotParam.hasSubAgents() && globalRobotRegistry != null) {
             try {
                 subAgentContext = subAgentContextInjector.buildContext(
-                        robotParam.getSubAgents(), globalRobotRegistry);
+                        robotParam.getSubAgents(), globalRobotRegistry, robotParam.getName());
             } catch (Exception e) {
                 logger.warn("构建子 Agent 上下文失败，跳过", e);
             }
