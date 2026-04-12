@@ -152,6 +152,12 @@ public class AcpClient extends AbstractAcpClient {
             logger.warn("cancel 调用时 sessionId 为空，忽略");
             return;
         }
+
+        // 先取消所有子 Agent
+        if (subAgentDispatcher != null) {
+            subAgentDispatcher.cancelAll();
+        }
+
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
@@ -201,9 +207,10 @@ public class AcpClient extends AbstractAcpClient {
         params.addProperty("sessionId", sessionId);
 
         // 注入当前时间上下文
-        String timeContext = String.format("[Current Time: %s]\n",
+        String timeContext = String.format("[Current Time: %s]\n[Workspace: %s]\n",
                 ZonedDateTime.now().format(
-                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")));
+                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")),
+                workspacePath);
 
         // 注入记忆上下文
         String memoryContext = "";

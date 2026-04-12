@@ -37,6 +37,13 @@ public class SubAgentDispatcher implements Closeable {
     private final int defaultTimeoutSeconds;
     private final ExecutorService dispatchPool;
 
+    /** 正在运行的子 Agent Client，用于 cancelAll 时逐个关闭 */
+    private final java.util.concurrent.ConcurrentLinkedQueue<SubAgentAcpClient> activeClients =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    /** 取消标志，cancelAll 后置为 true，阻止后续 follow-up prompt */
+    private volatile boolean cancelled = false;
+
     /** robot name -> MemoryManagerBridge，由 AcpProxy 注入，未启用记忆的 robot 不在此 map 中 */
     private Map<String, MemoryManagerBridge> memoryManagers = Collections.emptyMap();
 
@@ -114,6 +121,9 @@ public class SubAgentDispatcher implements Closeable {
     public List<SubAgentResult> dispatch(List<SubAgentTask> tasks,
                                          AcpResponseListener listener,
                                          String callerWorkspace) {
+        // 重置取消标志
+        cancelled = false;
+
         // 1. 校验白名单
         for (SubAgentTask task : tasks) {
             if (!allowedAgentNames.contains(task.getAgent())) {
@@ -172,6 +182,13 @@ public class SubAgentDispatcher implements Closeable {
 
         long totalSuccess = results.stream()
                 .filter(r -> r.getStatus() == SubAgentResult.Status.SUCCESS).count();
+
+        // 如果已被取消，不返回结果，抛异常阻止 follow-up prompt
+        if (cancelled) {
+            logger.info("子 Agent 派发已被取消，不返回结果");
+            throw new java.util.concurrent.CancellationException("子 Agent 派发已取消");
+        }
+
         listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
                 "所有子 Agent 已完成，成功 " + totalSuccess + "/" + results.size());
         return results;
@@ -210,6 +227,8 @@ public class SubAgentDispatcher implements Closeable {
                 workDir, groupId, defaultTimeoutSeconds,
                 targetRobot.getAgentProvider())) {
 
+            activeClients.add(client);
+
             // 设置进度快照回调，每 30s 推送一次执行进度
             client.setProgressCallback(
                     snapshot -> listener.onSubAgentEvent("AGENT_PROGRESS", displayName, snapshot),
@@ -237,6 +256,9 @@ public class SubAgentDispatcher implements Closeable {
             listener.onSubAgentEvent("AGENT_ERROR", displayName,
                     e.getMessage());
             logger.error("子 Agent '{}' 执行失败", displayName, e);
+        } finally {
+            // try-with-resources 已关闭 client，从追踪列表移除
+            activeClients.removeIf(c -> c.getGroupId().equals(groupId));
         }
         return result;
     }
@@ -265,10 +287,11 @@ public class SubAgentDispatcher implements Closeable {
             }
         }
 
-        // 注入当前时间
-        sb.append(String.format("[Current Time: %s]\n",
+        // 注入当前时间和工作路径
+        sb.append(String.format("[Current Time: %s]\n[Workspace: %s]\n",
                 java.time.ZonedDateTime.now().format(
-                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)"))));
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")),
+                workDir));
 
         sb.append(task.getPrompt());
         return sb.toString();
@@ -302,6 +325,23 @@ public class SubAgentDispatcher implements Closeable {
 
     @Override
     public void close() {
-        dispatchPool.shutdownNow();
+        cancelAll();
+    }
+
+    /**
+     * 取消所有正在运行的子 Agent。
+     * 关闭线程池 + 逐个关闭活跃的子 Agent 子进程。
+     */
+    public void cancelAll() {
+        logger.info("取消所有子 Agent，活跃数={}", activeClients.size());
+        cancelled = true;
+        for (SubAgentAcpClient client : activeClients) {
+            try {
+                client.close();
+            } catch (Exception e) {
+                logger.warn("关闭子 Agent Client 失败: {}", e.getMessage());
+            }
+        }
+        activeClients.clear();
     }
 }

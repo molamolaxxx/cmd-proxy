@@ -77,20 +77,21 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
 
     @Override
     public void onSubAgentEvent(String eventType, String agentName, String detail) {
+        String safeDetail = sanitizeCodeFences(detail);
         String content;
         switch (eventType) {
             case "DISPATCH_START":
                 content = "<details class=\"tool-call\" open>"
                         + "<summary>📋 子 Agent 派发</summary>"
                         + "<div class=\"tool-call-body\">\n\n```\n"
-                        + detail + "\n```\n\n</div></details>\n";
+                        + safeDetail + "\n```\n\n</div></details>\n";
                 break;
             case "AGENT_START":
                 content = "<details class=\"tool-call\">"
                         + "<summary>🚀 [" + agentName + "] 执行中...</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📥 任务</summary>\n\n```\n"
-                        + detail + "\n```\n\n</details>"
+                        + safeDetail + "\n```\n\n</details>"
                         + "\n\n</div></details>\n";
                 break;
             case "AGENT_PROGRESS":
@@ -98,11 +99,11 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                         + "<summary>⏳ [" + agentName + "] 执行中...</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📋 当前进度</summary>\n\n```\n"
-                        + detail + "\n```\n\n</details>"
+                        + safeDetail + "\n```\n\n</details>"
                         + "\n\n</div></details>\n";
                 break;
             case "AGENT_COMPLETE": {
-                String preview = detail;
+                String preview = safeDetail;
                 if (preview != null && preview.length() > MAX_SUBAGENT_RESULT_LENGTH) {
                     preview = preview.substring(0, MAX_SUBAGENT_RESULT_LENGTH) + "\n...";
                 }
@@ -119,17 +120,17 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                         + "<summary>🤖 ❌ [" + agentName + "] 失败</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📤 错误信息</summary>\n\n```\n"
-                        + detail + "\n```\n\n</details>"
+                        + safeDetail + "\n```\n\n</details>"
                         + "\n\n</div></details>\n";
                 break;
             case "DISPATCH_COMPLETE":
                 content = "<details class=\"tool-call\">"
-                        + "<summary>📊 " + detail + "</summary>"
+                        + "<summary>📊 " + safeDetail + "</summary>"
                         + "</details>\n";
                 break;
             default:
                 content = "<details class=\"tool-call\">"
-                        + "<summary>ℹ️ " + detail + "</summary>"
+                        + "<summary>ℹ️ " + safeDetail + "</summary>"
                         + "</details>\n";
         }
         sendContent(content, false);
@@ -138,6 +139,15 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     private static String escapeHtml(String text) {
         if (text == null) return "";
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /**
+     * 移除文本中的 markdown 代码块标记（```），避免和外层包裹的代码块冲突。
+     * 仅用于给用户展示的 detail 内容，不影响传给主 Agent 的原始结果。
+     */
+    private static String sanitizeCodeFences(String text) {
+        if (text == null) return "";
+        return text.replaceAll("```[a-zA-Z]*", "").replace("```", "");
     }
 
     private void sendContent(String content, boolean end) {
