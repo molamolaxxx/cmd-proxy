@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -45,7 +46,13 @@ public class KiroCliAgentProvider implements AgentProvider {
         paths.add(Paths.get(HOME, ".kiro", "settings", "mcp.json"));
         // 工作目录级配置（高优先级）
         if (workspacePath != null && !workspacePath.trim().isEmpty()) {
-            paths.add(Paths.get(workspacePath, ".kiro", "settings", "mcp.json"));
+            // 项目级自定义目录 .cmd-proxy/mcp.json 优先
+            Path cmdProxyConfig = Paths.get(workspacePath, ".kiro", "settings", "mcp-cmd-proxy.json");
+            if (Files.exists(cmdProxyConfig)) {
+                paths.add(cmdProxyConfig);
+            } else {
+                paths.add(Paths.get(workspacePath, ".kiro", "settings", "mcp.json"));
+            }
         }
         return paths;
     }
