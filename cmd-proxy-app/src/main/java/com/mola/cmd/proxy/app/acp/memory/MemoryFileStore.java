@@ -13,7 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.MessageDigest;
+import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -436,22 +436,7 @@ public class MemoryFileStore {
     }
 
     private Path getProjectDir(String workspacePath) {
-        return Paths.get(baseDir, hashWorkspacePath(workspacePath));
-    }
-
-    private String hashWorkspacePath(String workspacePath) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(workspacePath.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) {
-                sb.append(String.format("%02x", digest[i]));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            // fallback: 简单替换
-            return workspacePath.replaceAll("[^a-zA-Z0-9]", "_");
-        }
+        return Paths.get(baseDir, PathUtils.sanitizePath(workspacePath));
     }
 
     /**

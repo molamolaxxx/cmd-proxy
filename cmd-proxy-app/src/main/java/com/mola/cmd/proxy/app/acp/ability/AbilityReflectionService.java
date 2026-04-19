@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.ability;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -299,21 +300,7 @@ public class AbilityReflectionService {
     }
 
     private Path getProjectDir() {
-        return Paths.get(BASE_DIR, hashName(robotName));
-    }
-
-    private String hashName(String name) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(name.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) {
-                sb.append(String.format("%02x", digest[i]));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return name.replaceAll("[^a-zA-Z0-9]", "_");
-        }
+        return Paths.get(BASE_DIR, PathUtils.sanitizePath(workspacePath));
     }
 
     private String computeHash(String input) {

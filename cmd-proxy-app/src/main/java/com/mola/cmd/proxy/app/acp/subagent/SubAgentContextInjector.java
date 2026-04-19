@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.subagent;
 
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentRef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,7 +11,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
 
@@ -113,7 +113,7 @@ public class SubAgentContextInjector {
         }
 
         // 2. ability.md
-        String abilityContent = loadAbilityMd(targetRobot.getName());
+        String abilityContent = loadAbilityMd(targetRobot.getWorkDir());
         if (abilityContent != null && !abilityContent.isEmpty()) {
             return abilityContent;
         }
@@ -125,35 +125,19 @@ public class SubAgentContextInjector {
 
     /**
      * 读取目标 robot 的 ability.md 文件。
-     * 路径: ~/.cmd-proxy/ability/{robot-name-hash}/ability.md
+     * 路径: ~/.cmd-proxy/ability/{sanitized-workDir}/ability.md
      * <p>
      * 路径计算逻辑与 AbilityReflectionService 保持一致。
      */
-    private String loadAbilityMd(String robotName) {
+    private String loadAbilityMd(String workDir) {
+        if (workDir == null || workDir.isEmpty()) return null;
         try {
-            Path abilityFile = Paths.get(ABILITY_BASE_DIR, hashName(robotName), ABILITY_FILE);
+            Path abilityFile = Paths.get(ABILITY_BASE_DIR, PathUtils.sanitizePath(workDir), ABILITY_FILE);
             if (!Files.exists(abilityFile)) return null;
             return new String(Files.readAllBytes(abilityFile), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            logger.warn("读取 ability.md 失败, robotName={}", robotName, e);
+            logger.warn("读取 ability.md 失败, workDir={}", workDir, e);
             return null;
-        }
-    }
-
-    /**
-     * 与 AbilityReflectionService.hashName() 保持一致的哈希算法。
-     */
-    private static String hashName(String name) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(name.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) {
-                sb.append(String.format("%02x", digest[i]));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return name.replaceAll("[^a-zA-Z0-9]", "_");
         }
     }
 }
