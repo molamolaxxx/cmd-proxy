@@ -349,7 +349,12 @@ public class AcpClient extends AbstractAcpClient {
                     logger.warn("ACP IN session/update 输出未匹配任何处理分支, msg={}", msg);
                 }
             } else {
-                logger.warn("ACP 输出未匹配任何处理分支, msg={}", msg);
+                double usage = agentProvider.extractContextUsage(msg);
+                if (usage >= 0) {
+                    contextUsagePercentage = usage;
+                } else {
+                    logger.warn("ACP 输出未匹配任何处理分支, msg={}", msg);
+                }
             }
         }
     }

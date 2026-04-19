@@ -118,8 +118,6 @@ public class SubAgentAcpClient extends AbstractAcpClient {
         sendJson(request);
 
         StringBuilder fullResponse = new StringBuilder();
-        // 工具调用摘要，用于进度快照
-        StringBuilder toolSummary = new StringBuilder();
         long lastProgressTime = System.currentTimeMillis();
         int lastProgressLength = 0;
 
@@ -161,33 +159,25 @@ public class SubAgentAcpClient extends AbstractAcpClient {
                         ? update.get("sessionUpdate").getAsString() : "";
 
                 if ("agent_message_chunk".equals(updateType)) {
-                    // 收集文本
                     String text = extractAgentMessageText(msg);
                     if (text != null) {
                         fullResponse.append(text);
                     }
                 } else if ("tool_call".equals(updateType) || "tool_call_update".equals(updateType)) {
-                    // 收集工具调用摘要
-                    String title = update.has("title") ? update.get("title").getAsString() : "";
                     String status = update.has("status") ? update.get("status").getAsString() : "";
                     if ("completed".equals(status)) {
-                        toolSummary.append("🛠️ ").append(title).append(" ✅\n");
-                    } else if ("in_progress".equals(status) || "pending".equals(status)) {
-                        // 工具开始执行时也记录，但不重复
-                        if (toolSummary.indexOf(title) < 0) {
-                            toolSummary.append("🛠️ ").append(title).append(" ⏳\n");
-                        }
+                        String title = update.has("title") ? update.get("title").getAsString() : "";
+                        fullResponse.append("\n🛠️ ").append(title).append(" ✅\n");
                     }
                 }
 
                 // 定期推送进度快照
                 long now = System.currentTimeMillis();
-                int currentLength = fullResponse.length() + toolSummary.length();
+                int currentLength = fullResponse.length();
                 if (progressCallback != null
                         && (now - lastProgressTime >= progressIntervalMs)
                         && currentLength > lastProgressLength) {
-                    String snapshot = buildProgressSnapshot(fullResponse, toolSummary);
-                    progressCallback.accept(snapshot);
+                    progressCallback.accept(buildProgressSnapshot(fullResponse));
                     lastProgressTime = now;
                     lastProgressLength = currentLength;
                 }
@@ -196,22 +186,14 @@ public class SubAgentAcpClient extends AbstractAcpClient {
     }
 
     /**
-     * 构建进度快照文本。
+     * 构建进度快照文本，取最后 500 字符作为预览。
      */
-    private String buildProgressSnapshot(StringBuilder response, StringBuilder tools) {
-        StringBuilder snapshot = new StringBuilder();
-        if (tools.length() > 0) {
-            snapshot.append("工具调用:\n").append(tools);
+    private String buildProgressSnapshot(StringBuilder response) {
+        String text = response.toString();
+        if (text.length() > 500) {
+            text = "..." + text.substring(text.length() - 500);
         }
-        if (response.length() > 0) {
-            String text = response.toString();
-            // 只取最后 300 字符作为预览
-            if (text.length() > 300) {
-                text = "..." + text.substring(text.length() - 300);
-            }
-            snapshot.append("最新输出:\n").append(text);
-        }
-        return snapshot.toString();
+        return text;
     }
 
     @Override

@@ -16,7 +16,6 @@ import java.util.UUID;
 public class DefaultAcpResponseListener implements AcpResponseListener {
 
     private static final int MAX_JSON_LENGTH = 1000;
-    private static final int MAX_SUBAGENT_RESULT_LENGTH = 500;
     private static final Gson PRETTY_GSON = new GsonBuilder().setPrettyPrinting().create();
 
     private final String groupId;
@@ -103,15 +102,11 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                         + "\n\n</div></details>\n";
                 break;
             case "AGENT_COMPLETE": {
-                String preview = safeDetail;
-                if (preview != null && preview.length() > MAX_SUBAGENT_RESULT_LENGTH) {
-                    preview = preview.substring(0, MAX_SUBAGENT_RESULT_LENGTH) + "\n...";
-                }
                 content = "<details class=\"tool-call\">"
                         + "<summary>🤖 ✅ [" + agentName + "] 完成</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📤 执行结果</summary>\n\n```\n"
-                        + preview + "\n```\n\n</details>"
+                        + safeDetail + "\n```\n\n</details>"
                         + "\n\n</div></details>\n";
                 break;
             }

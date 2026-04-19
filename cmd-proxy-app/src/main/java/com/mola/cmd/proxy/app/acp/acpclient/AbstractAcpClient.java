@@ -50,6 +50,7 @@ public abstract class AbstractAcpClient implements Closeable {
     protected BufferedWriter writer;
     protected BufferedReader reader;
     protected String sessionId;
+    protected volatile double contextUsagePercentage = -1;
 
     /**
      * 使用指定 AgentProvider 创建（protected，供子类使用）。
@@ -322,6 +323,6 @@ public abstract class AbstractAcpClient implements Closeable {
     public String getGroupId() { return groupId; }
     public State getState() { return state.get(); }
     public String getWorkspacePath() { return workspacePath; }
-
+    public double getContextUsagePercentage() { return contextUsagePercentage; }
     protected void setSessionId(String sessionId) { this.sessionId = sessionId; }
 }

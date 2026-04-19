@@ -138,7 +138,7 @@ public class SubAgentDispatcher implements Closeable {
 
         // 2. 通知用户：派发开始
         String taskSummary = tasks.stream()
-                .map(t -> "[" + t.getDisplayName() + "] " + truncate(t.getPrompt(), 60))
+                .map(t -> "[" + t.getDisplayName() + "] " + truncate(t.getPrompt(), 100))
                 .collect(Collectors.joining("\n"));
         listener.onSubAgentEvent("DISPATCH_START", null,
                 "正在派发 " + tasks.size() + " 个子 Agent 任务：\n" + taskSummary);
@@ -218,7 +218,7 @@ public class SubAgentDispatcher implements Closeable {
                 ? targetRobot.getWorkDir() : callerWorkspace;
 
         listener.onSubAgentEvent("AGENT_START", displayName,
-                truncate(task.getPrompt(), 80));
+                truncate(task.getPrompt(), 400));
 
         String groupId = "subagent__" + task.getAgent().hashCode()
                 + "__" + System.currentTimeMillis();

@@ -218,16 +218,22 @@ public class AbilityReflectionService {
             return "empty";
         }
         try {
-            TreeSet<String> skillNames = new TreeSet<>();
+            TreeSet<String> parts = new TreeSet<>();
             try (DirectoryStream<Path> stream = Files.newDirectoryStream(skillsDir)) {
                 for (Path entry : stream) {
                     if (Files.isDirectory(entry)) {
-                        skillNames.add(entry.getFileName().toString());
+                        Path skillFile = entry.resolve("SKILL.md");
+                        if (Files.exists(skillFile)) {
+                            String content = new String(Files.readAllBytes(skillFile), StandardCharsets.UTF_8);
+                            parts.add(entry.getFileName().toString() + ":" + computeHash(content));
+                        } else {
+                            parts.add(entry.getFileName().toString());
+                        }
                     }
                 }
             }
-            if (skillNames.isEmpty()) return "empty";
-            return computeHash(skillNames.toString());
+            if (parts.isEmpty()) return "empty";
+            return computeHash(parts.toString());
         } catch (IOException e) {
             logger.warn("计算 skills 哈希失败", e);
             return "error";

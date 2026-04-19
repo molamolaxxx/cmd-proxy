@@ -197,6 +197,22 @@ object AcpProxy {
             resultMap
         }
 
+        CmdReceiver.register("acpGetContextUsage", cmdGroupList, "获取ACP会话上下文使用占比，groupId必填") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            try {
+                val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
+                val groupId = param.getString("groupId")
+                val client = registry.getClient(groupId)
+                if (client != null) {
+                    resultMap["result"] = client.contextUsagePercentage.toString()
+                }
+            } catch (e: Exception) {
+                log.error("acpGetContextUsage 失败", e)
+                resultMap["result"] = "-1"
+            }
+            resultMap
+        }
+
         // ==================== 记忆管理命令 ====================
 
         CmdReceiver.register("acpMemoryList", cmdGroupList, "列出当前项目的所有记忆，groupId必填") { params ->

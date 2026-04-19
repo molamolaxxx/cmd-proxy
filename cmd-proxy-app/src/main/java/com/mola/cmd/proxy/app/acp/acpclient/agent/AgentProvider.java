@@ -1,5 +1,7 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
+import com.google.gson.JsonObject;
+
 import java.nio.file.Path;
 import java.util.List;
 
@@ -35,4 +37,15 @@ public interface AgentProvider {
      * agent 的显示名称，用于日志和调试。
      */
     String getName();
+
+    /**
+     * 从 JSON-RPC 消息中提取 context usage 百分比。
+     * 不同 agent 实现有各自的上下文使用量推送格式，由子类覆写解析逻辑。
+     *
+     * @param msg 完整的 JSON-RPC 消息
+     * @return context usage 百分比（0~100），无法提取时返回 -1
+     */
+    default double extractContextUsage(JsonObject msg) {
+        return -1;
+    }
 }

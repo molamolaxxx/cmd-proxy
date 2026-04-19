@@ -62,6 +62,8 @@ public class AbilityReflectionPromptTemplate {
         sb.append("4. **局限性**：你做不到什么，需要注意什么\n\n");
         sb.append("直接输出 Markdown 内容，不要包裹在代码块中。\n");
         sb.append("内容应简洁实用，避免空泛描述，侧重于具体的、可操作的能力点。\n");
+        sb.append("在「局限性」部分，必须明确说明你的代码查阅范围仅限于当前工作空间，");
+        sb.append("无法访问其他项目的代码库。如果记忆中涉及多个项目，需注明哪些能力依赖外部项目、无法在当前工作空间内独立完成。\n");
 
         return sb.toString();
     }

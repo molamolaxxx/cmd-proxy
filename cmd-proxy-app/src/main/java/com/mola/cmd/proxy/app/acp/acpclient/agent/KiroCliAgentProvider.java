@@ -1,5 +1,7 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
+import com.google.gson.JsonObject;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -60,5 +62,17 @@ public class KiroCliAgentProvider implements AgentProvider {
     @Override
     public String getName() {
         return "kiro-cli";
+    }
+
+    @Override
+    public double extractContextUsage(JsonObject msg) {
+        if (!msg.has("method") || !"_kiro.dev/metadata".equals(msg.get("method").getAsString())) {
+            return -1;
+        }
+        JsonObject params = msg.getAsJsonObject("params");
+        if (params != null && params.has("contextUsagePercentage")) {
+            return params.get("contextUsagePercentage").getAsDouble();
+        }
+        return -1;
     }
 }

@@ -77,7 +77,7 @@ public class MemoryPromptTemplate {
         sb.append("    \"action\": \"ADD\",\n");
         sb.append("    \"type\": \"feedback\",\n");
         sb.append("    \"title\": \"简短标题（10 字以内）\",\n");
-        sb.append("    \"summary\": \"一句话概要，用于索引检索（30 字以内）\",\n");
+        sb.append("    \"summary\": \"仅标注主题和类型的关键词式概要，不含具体结论或做法（20 字以内）\",\n");
         sb.append("    \"detail\": \"What: 具体内容。Why: 为什么重要。Apply: 未来如何应用。（200 字以内）\",\n");
         sb.append("    \"tags\": [\"标签1\", \"标签2\"]\n");
         sb.append("  },\n");
