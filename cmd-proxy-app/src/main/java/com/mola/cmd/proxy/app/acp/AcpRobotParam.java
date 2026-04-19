@@ -13,6 +13,7 @@ public class AcpRobotParam {
     private MemoryConfig memory;
     private String agentProvider = "KIRO_CLI";
     private List<SubAgentRef> subAgents;
+    private boolean onlySubAgent;
 
     public AcpRobotParam() {
     }
@@ -92,5 +93,13 @@ public class AcpRobotParam {
      */
     public boolean hasSubAgents() {
         return subAgents != null && !subAgents.isEmpty();
+    }
+
+    public boolean isOnlySubAgent() {
+        return onlySubAgent;
+    }
+
+    public void setOnlySubAgent(boolean onlySubAgent) {
+        this.onlySubAgent = onlySubAgent;
     }
 }

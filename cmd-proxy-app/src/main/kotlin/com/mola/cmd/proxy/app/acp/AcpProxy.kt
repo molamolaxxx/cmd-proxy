@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.ability.AbilityReflectionService
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter
 import com.mola.cmd.proxy.app.acp.common.PathUtils
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
@@ -65,6 +66,14 @@ object AcpProxy {
             try {
                 val workDir = groupWorkDirMap[groupId]
                 val robot = groupRobotMap[groupId]
+
+                // onlySubAgent 的 robot 不启动 AcpClient，只做 ability 反思
+                if (robot != null && robot.isOnlySubAgent) {
+                    initAbilityReflectionStandalone(groupId, robot)
+                    log.info("onlySubAgent robot 跳过 client 创建, groupId={}, robot={}", groupId, robot.name)
+                    continue
+                }
+
                 registry.createSession(groupId, workDir, robot)
 
                 val client = registry.getClient(groupId) ?: continue
@@ -399,6 +408,27 @@ object AcpProxy {
         }
 
         // 统一由 submitReflection 内部判断是否需要执行
+        service.submitReflection()
+    }
+
+    /**
+     * 为 onlySubAgent 的 robot 初始化能力反思（不依赖 AcpClient）。
+     */
+    private fun initAbilityReflectionStandalone(groupId: String, robot: AcpRobotParam) {
+        if (robot.name.isBlank()) return
+
+        val agentProvider = robot.agentProvider ?: "KIRO_CLI"
+        val workDir = robot.workDir ?: return
+        val mcpConfigPaths = AgentProviderRouter.getInstance().resolve(agentProvider)
+            .getMcpConfigPaths(workDir)
+        val timeoutSeconds = if (robot.isMemoryEnabled) robot.memory.subClientTimeout else 120
+
+        val service = abilityServices.getOrPut(groupId) {
+            AbilityReflectionService(
+                robot.name, workDir, agentProvider,
+                timeoutSeconds, mcpConfigPaths, null
+            )
+        }
         service.submitReflection()
     }
 

@@ -67,9 +67,9 @@ private fun startAcp() {
     val config: JSONObject = JSON.parseObject(content)
     val robotsArray = config.getJSONArray("robots")
     val chatterIdsArray = config.getJSONArray("chatterIds")
-    val robotsJsonStr = robotsArray.toJSONString()
     val chatterIdsJsonStr = chatterIdsArray.toJSONString()
     val robots = robotsArray.toJavaList(AcpRobotParam::class.java)
+    val robotsJsonStr = JSON.toJSONString(robots.filter { !it.isOnlySubAgent })
     val chatterIds = chatterIdsArray.toJavaList(String::class.java)
 
     // 笛卡尔积生成 groupId 列表: chatterId 和 acpId 字典序排序后拼接
