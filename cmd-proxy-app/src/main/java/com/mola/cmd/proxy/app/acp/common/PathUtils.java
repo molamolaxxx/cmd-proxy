@@ -46,6 +46,29 @@ public class PathUtils {
         }
     }
 
+    /** 已知的索引文件名列表，迁移后需要修正其中的路径引用 */
+    private static final String[] INDEX_FILES = {"MEMORY_INDEX.json"};
+
+    /**
+     * 修正迁移后索引文件中的旧路径引用。
+     */
+    private static void fixIndexFilePaths(Path newDir, String oldPrefix, String newPrefix) {
+        for (String indexFile : INDEX_FILES) {
+            Path path = newDir.resolve(indexFile);
+            if (!Files.exists(path)) continue;
+            try {
+                String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+                String fixed = content.replace(oldPrefix, newPrefix);
+                if (!fixed.equals(content)) {
+                    Files.write(path, fixed.getBytes(StandardCharsets.UTF_8));
+                    logger.info("索引文件路径已修正: {}", path);
+                }
+            } catch (IOException e) {
+                logger.warn("修正索引文件路径失败: {}", path, e);
+            }
+        }
+    }
+
     /**
      * 迁移指定 baseDir 下的旧 hash 目录到新路径命名目录。
      * <p>
@@ -74,6 +97,7 @@ public class PathUtils {
             try {
                 Files.move(oldDir, newDir);
                 logger.info("数据迁移完成: {} -> {}", oldDir, newDir);
+                fixIndexFilePaths(newDir, oldDir.toString(), newDir.toString());
             } catch (IOException e) {
                 logger.error("数据迁移失败: {} -> {}", oldDir, newDir, e);
             }

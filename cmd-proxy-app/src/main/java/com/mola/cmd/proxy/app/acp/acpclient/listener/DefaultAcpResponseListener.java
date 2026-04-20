@@ -54,7 +54,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
             }
 
             sb.append("<details class=\"tool-call\">");
-            sb.append("<summary>🛠️ ✅ ").append(title).append("</summary>");
+            sb.append("<summary>🛠️ ✅ ").append(escapeMarkdown(title)).append("</summary>");
             sb.append("<div class=\"tool-call-body\">\n\n");
             sb.append(inputBlock);
             sb.append(outputBlock);
@@ -77,6 +77,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     @Override
     public void onSubAgentEvent(String eventType, String agentName, String detail) {
         String safeDetail = sanitizeCodeFences(detail);
+        String safeName = escapeMarkdown(agentName);
         String content;
         switch (eventType) {
             case "DISPATCH_START":
@@ -87,7 +88,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                 break;
             case "AGENT_START":
                 content = "<details class=\"tool-call\">"
-                        + "<summary>🚀 [" + agentName + "] 执行中...</summary>"
+                        + "<summary>🚀 [" + safeName + "] 执行中...</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📥 任务</summary>\n\n```\n"
                         + safeDetail + "\n```\n\n</details>"
@@ -95,7 +96,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                 break;
             case "AGENT_PROGRESS":
                 content = "<details class=\"tool-call\">"
-                        + "<summary>⏳ [" + agentName + "] 执行中...</summary>"
+                        + "<summary>⏳ [" + safeName + "] 执行中...</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📋 当前进度</summary>\n\n```\n"
                         + safeDetail + "\n```\n\n</details>"
@@ -103,7 +104,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                 break;
             case "AGENT_COMPLETE": {
                 content = "<details class=\"tool-call\">"
-                        + "<summary>🤖 ✅ [" + agentName + "] 完成</summary>"
+                        + "<summary>🤖 ✅ [" + safeName + "] 完成</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📤 执行结果</summary>\n\n```\n"
                         + safeDetail + "\n```\n\n</details>"
@@ -112,7 +113,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
             }
             case "AGENT_ERROR":
                 content = "<details class=\"tool-call\">"
-                        + "<summary>🤖 ❌ [" + agentName + "] 失败</summary>"
+                        + "<summary>🤖 ❌ [" + safeName + "] 失败</summary>"
                         + "<div class=\"tool-call-body\">\n\n"
                         + "<details class=\"tool-detail\" open><summary>📤 错误信息</summary>\n\n```\n"
                         + safeDetail + "\n```\n\n</details>"
@@ -120,12 +121,12 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                 break;
             case "DISPATCH_COMPLETE":
                 content = "<details class=\"tool-call\">"
-                        + "<summary>📊 " + safeDetail + "</summary>"
+                        + "<summary>📊 " + escapeMarkdown(safeDetail) + "</summary>"
                         + "</details>\n";
                 break;
             default:
                 content = "<details class=\"tool-call\">"
-                        + "<summary>ℹ️ " + safeDetail + "</summary>"
+                        + "<summary>ℹ️ " + escapeMarkdown(safeDetail) + "</summary>"
                         + "</details>\n";
         }
         sendContent(content, false);
@@ -134,6 +135,15 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     private static String escapeHtml(String text) {
         if (text == null) return "";
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /**
+     * 转义 markdown 特殊字符，防止在前端 markdown 渲染器中被解析为格式语法。
+     * 用于 summary 等 HTML 标签内的纯文本内容。
+     */
+    private static String escapeMarkdown(String text) {
+        if (text == null) return "";
+        return text.replaceAll("([#*])", "\\\\$1");
     }
 
     /**
