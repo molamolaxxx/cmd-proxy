@@ -18,6 +18,8 @@ public class MemoryEntry {
     private String createdAt;
     private String updatedAt;
     private String sourceSession;
+    private String lastAccessedAt;
+    private int accessCount;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -48,4 +50,10 @@ public class MemoryEntry {
 
     public String getSourceSession() { return sourceSession; }
     public void setSourceSession(String sourceSession) { this.sourceSession = sourceSession; }
+
+    public String getLastAccessedAt() { return lastAccessedAt; }
+    public void setLastAccessedAt(String lastAccessedAt) { this.lastAccessedAt = lastAccessedAt; }
+
+    public int getAccessCount() { return accessCount; }
+    public void setAccessCount(int accessCount) { this.accessCount = accessCount; }
 }

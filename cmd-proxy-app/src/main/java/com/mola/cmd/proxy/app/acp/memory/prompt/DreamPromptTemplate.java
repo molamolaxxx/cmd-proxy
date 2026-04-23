@@ -50,6 +50,12 @@ public class DreamPromptTemplate {
             sb.append("- tags: [").append(String.join(", ", entry.getTags())).append("]\n");
             sb.append("- createdAt: ").append(entry.getCreatedAt()).append("\n");
             sb.append("- updatedAt: ").append(entry.getUpdatedAt()).append("\n");
+            if (entry.getLastAccessedAt() != null) {
+                sb.append("- lastAccessedAt: ").append(entry.getLastAccessedAt()).append("\n");
+            }
+            if (entry.getAccessCount() > 0) {
+                sb.append("- accessCount: ").append(entry.getAccessCount()).append("\n");
+            }
 
             // 明细内容
             String detail = details.get(entry.getId());

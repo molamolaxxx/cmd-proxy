@@ -32,4 +32,13 @@ public interface MemoryManagerBridge {
      * 在 AcpClient.close() 中调用。
      */
     void incrementSessionCount(String workspacePath);
+
+    /**
+     * 记录一次记忆访问（访问强化）。
+     * 当 Agent 读取了 memories/ 目录下的明细文件时调用。
+     *
+     * @param workspacePath 当前工作目录
+     * @param filePath      被读取的文件路径
+     */
+    void onMemoryAccessed(String workspacePath, String filePath);
 }

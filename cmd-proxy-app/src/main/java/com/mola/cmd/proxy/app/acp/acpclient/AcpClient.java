@@ -343,6 +343,8 @@ public class AcpClient extends AbstractAcpClient {
                         JsonObject rawInput = update.has("rawInput") ? update.getAsJsonObject("rawInput") : null;
                         JsonObject rawOutput = update.has("rawOutput") ? update.getAsJsonObject("rawOutput") : null;
                         historyManager.addToolMessage(toolCallId, title, status, rawInput, rawOutput);
+                        // 访问强化：检测 Agent 是否读取了记忆明细文件
+                        detectMemoryAccess(rawInput);
                     }
                     listener.onToolCall(toolCallId, title, status, update);
                 } else {
@@ -398,6 +400,33 @@ public class AcpClient extends AbstractAcpClient {
     }
 
 
+
+    /**
+     * 检测工具调用是否读取了记忆明细文件，触发访问强化。
+     */
+    private void detectMemoryAccess(JsonObject rawInput) {
+        if (memoryManager == null || rawInput == null) return;
+        try {
+            // 兼容多种工具输入格式：ops[].path 或直接 path
+            if (rawInput.has("ops") && rawInput.get("ops").isJsonArray()) {
+                for (JsonElement op : rawInput.getAsJsonArray("ops")) {
+                    if (op.isJsonObject() && op.getAsJsonObject().has("path")) {
+                        String path = op.getAsJsonObject().get("path").getAsString();
+                        if (path.contains("/memories/")) {
+                            memoryManager.onMemoryAccessed(workspacePath, path);
+                        }
+                    }
+                }
+            } else if (rawInput.has("path")) {
+                String path = rawInput.get("path").getAsString();
+                if (path.contains("/memories/")) {
+                    memoryManager.onMemoryAccessed(workspacePath, path);
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("检测记忆访问失败", e);
+        }
+    }
 
     private String guessMimeType(String base64Data) {
         if (base64Data.startsWith("iVBOR")) return "image/png";

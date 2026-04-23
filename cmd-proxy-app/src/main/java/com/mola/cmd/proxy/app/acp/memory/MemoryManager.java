@@ -70,6 +70,16 @@ public class MemoryManager implements MemoryManagerBridge {
         }
     }
 
+    @Override
+    public void onMemoryAccessed(String workspacePath, String filePath) {
+        if (!config.isEnabled() || filePath == null) return;
+        try {
+            fileStore.touchMemory(workspacePath, filePath);
+        } catch (Exception e) {
+            logger.warn("记忆访问强化失败: {}", filePath, e);
+        }
+    }
+
     // ==================== 记忆管理 ====================
 
     /**

@@ -1,8 +1,12 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
-import com.google.gson.*;
-import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
+import com.google.gson.ExclusionStrategy;
+import com.google.gson.FieldAttributes;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.memory.model.DreamState;
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 import org.slf4j.Logger;
@@ -13,7 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import com.mola.cmd.proxy.app.acp.common.PathUtils;
+import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -121,6 +125,12 @@ public class MemoryFileStore {
             if (entry.getSourceSession() != null) {
                 sb.append("sourceSession: ").append(entry.getSourceSession()).append("\n");
             }
+            if (entry.getLastAccessedAt() != null) {
+                sb.append("lastAccessedAt: ").append(entry.getLastAccessedAt()).append("\n");
+            }
+            if (entry.getAccessCount() > 0) {
+                sb.append("accessCount: ").append(entry.getAccessCount()).append("\n");
+            }
             sb.append("---\n\n");
             sb.append(entry.getDetail() != null ? entry.getDetail() : entry.getSummary());
             sb.append("\n");
@@ -153,6 +163,30 @@ public class MemoryFileStore {
             saveIndex(workspacePath, index);
         }
         return removed;
+    }
+
+    /**
+     * 记录一次记忆访问：更新 lastAccessedAt 和 accessCount。
+     *
+     * @param workspacePath 当前工作目录
+     * @param filePath      被读取的明细文件路径
+     */
+    public void touchMemory(String workspacePath, String filePath) {
+        MemoryIndex index = loadIndex(workspacePath);
+        String now = ZonedDateTime.now().format(ISO_FORMATTER);
+        boolean changed = false;
+        for (MemoryEntry entry : index.getMemories()) {
+            if (filePath.equals(entry.getFile())) {
+                entry.setLastAccessedAt(now);
+                entry.setAccessCount(entry.getAccessCount() + 1);
+                changed = true;
+                logger.info("记忆访问强化: id={}, accessCount={}", entry.getId(), entry.getAccessCount());
+                break;
+            }
+        }
+        if (changed) {
+            saveIndex(workspacePath, index);
+        }
     }
 
     // ==================== 批量操作 ====================
@@ -233,17 +267,37 @@ public class MemoryFileStore {
     }
 
     /**
-     * 归档最不活跃的记忆（按 updatedAt 升序，归档最早的一条）。
+     * 归档最不活跃的记忆（按复合分数升序，归档分数最低的一条）。
+     * 分数 = recency(lastAccessedAt 或 updatedAt) + 0.3 * log(1 + accessCount)
      */
     private void archiveOldest(String workspacePath, MemoryIndex index) {
         if (index.getMemories().isEmpty()) return;
-        MemoryEntry oldest = index.getMemories().stream()
-                .min(Comparator.comparing(e -> e.getUpdatedAt() != null ? e.getUpdatedAt() : ""))
+        MemoryEntry lowest = index.getMemories().stream()
+                .min(Comparator.comparingDouble(this::calcActivityScore))
                 .orElse(null);
-        if (oldest != null) {
-            logger.info("容量超限，归档最不活跃记忆: {} - {}", oldest.getId(), oldest.getTitle());
-            removeAndArchive(workspacePath, index, oldest.getId());
+        if (lowest != null) {
+            logger.info("容量超限，归档最不活跃记忆: {} - {} (score={})",
+                    lowest.getId(), lowest.getTitle(), calcActivityScore(lowest));
+            removeAndArchive(workspacePath, index, lowest.getId());
         }
+    }
+
+    /**
+     * 计算记忆的活跃度分数。越高越活跃，越不容易被淘汰。
+     */
+    private double calcActivityScore(MemoryEntry entry) {
+        String timeStr = entry.getLastAccessedAt() != null
+                ? entry.getLastAccessedAt()
+                : (entry.getUpdatedAt() != null ? entry.getUpdatedAt() : "");
+        double recency = 0;
+        if (!timeStr.isEmpty()) {
+            try {
+                long hours = Duration.between(
+                        ZonedDateTime.parse(timeStr), ZonedDateTime.now()).toHours();
+                recency = Math.exp(-0.01 * hours); // 指数衰减，约3天半衰期
+            } catch (Exception ignored) {}
+        }
+        return recency + 0.3 * Math.log1p(entry.getAccessCount());
     }
 
     /**

@@ -8,9 +8,9 @@ public class MemoryConfig {
 
     private boolean enabled = false;
     private String baseDir = System.getProperty("user.home") + "/.cmd-proxy/memory";
-    private int extractIntervalTurns = 3;
+    private int extractIntervalTurns = 5;
     private int indexMaxLines = 200;
-    private int maxEntriesPerProject = 50;
+    private int maxEntriesPerProject = 30;
     private int maxEntriesGlobal = 20;
     private int projectExpireDays = 30;
     private int subClientTimeout = 120;
