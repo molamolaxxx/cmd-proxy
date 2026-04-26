@@ -17,11 +17,12 @@ public class AbilityReflectionPromptTemplate {
     /**
      * 构建能力反思 prompt。
      *
+     * @param description    robot 配置中的描述文本，可为空
      * @param mcpServerNames MCP 工具服务名称列表
      * @param memorySummary  记忆概要文本（由 MemoryLoader 构建），可为空
      * @return 完整 prompt 文本
      */
-    public static String build(List<String> mcpServerNames, String memorySummary) {
+    public static String build(String description, List<String> mcpServerNames, String memorySummary) {
         StringBuilder sb = new StringBuilder();
 
         sb.append("你是能力反思子系统（Ability Reflection）。\n");
@@ -29,10 +30,20 @@ public class AbilityReflectionPromptTemplate {
 
         sb.append("## 能力描述优先级\n");
         sb.append("在分析和总结能力时，请严格按照以下优先级排列：\n");
-        sb.append("1. Skills（技能定义）— 最高优先级，这是你的核心能力定义，");
+        sb.append("1. Robot 描述 — 最高优先级，这是用户对该 robot 定位和职责的直接定义\n");
+        sb.append("2. Skills（技能定义）— 高优先级，这是你的核心能力定义，");
         sb.append("你的上下文中已自动加载了 skills 信息，请以此为主要依据\n");
-        sb.append("2. 记忆（历史经验）— 中等优先级，从历史交互中积累的领域知识和经验\n");
-        sb.append("3. 工具（MCP Servers）— 最低优先级，外部工具扩展的能力\n\n");
+        sb.append("3. 记忆（历史经验）— 中等优先级，从历史交互中积累的领域知识和经验\n");
+        sb.append("4. 工具（MCP Servers）— 最低优先级，外部工具扩展的能力\n\n");
+
+        // Robot 描述部分
+        sb.append("## Robot 描述\n");
+        if (description != null && !description.isEmpty()) {
+            sb.append(description);
+        } else {
+            sb.append("（未配置 robot 描述）\n");
+        }
+        sb.append("\n\n");
         // 记忆部分
         sb.append("## 历史记忆\n");
         if (memorySummary != null && !memorySummary.isEmpty()) {

@@ -21,7 +21,7 @@ import java.util.concurrent.*;
  * 能力反思服务，独立于记忆系统。
  * <p>
  * 结合 skills（kiro-cli 自动注入）、记忆概要和 MCP 工具列表，
- * 让 LLM 反思自身能力，将结果持久化到 .cmd-proxy/ability/{robot-name-hash}/ability.md。
+ * 让 LLM 反思自身能力，将结果持久化到 .cmd-proxy/ability/{sanitized-robotName}/ability.md。
  * <p>
  * 触发时机：AcpClient 初始化时调用 {@link #submitReflection()}，内部判断是否需要执行：
  * <ul>
@@ -43,6 +43,7 @@ public class AbilityReflectionService {
     private final String robotName;
     private final String workspacePath;
     private final String agentProvider;
+    private final String description;
     private final int timeoutSeconds;
     private final List<Path> mcpConfigPaths;
     /** 记忆管理器，可为 null（未启用记忆时） */
@@ -60,12 +61,14 @@ public class AbilityReflectionService {
     );
 
     public AbilityReflectionService(String robotName, String workspacePath,
-                                    String agentProvider, int timeoutSeconds,
+                                    String agentProvider, String description,
+                                    int timeoutSeconds,
                                     List<Path> mcpConfigPaths,
                                     MemoryManager memoryManager) {
         this.robotName = robotName;
         this.workspacePath = workspacePath;
         this.agentProvider = agentProvider;
+        this.description = description != null ? description : "";
         this.timeoutSeconds = timeoutSeconds;
         this.mcpConfigPaths = mcpConfigPaths != null ? mcpConfigPaths : Collections.emptyList();
         this.memoryManager = memoryManager;
@@ -146,7 +149,7 @@ public class AbilityReflectionService {
                 }
             }
 
-            String prompt = AbilityReflectionPromptTemplate.build(mcpServerNames, memorySummary);
+            String prompt = AbilityReflectionPromptTemplate.build(description, mcpServerNames, memorySummary);
             String groupId = "ability_reflection__" + robotName.hashCode();
 
             String response;
@@ -157,7 +160,7 @@ public class AbilityReflectionService {
             }
 
             if (response != null && !response.trim().isEmpty()) {
-                writeAbilityFile(response.trim());
+                writeAbilityFile(stripPreamble(response.trim()));
                 saveSnapshot(mcpServerNames);
                 logger.info("能力反思完成, robotName={}", robotName);
             } else {
@@ -288,6 +291,21 @@ public class AbilityReflectionService {
 
     // ==================== 文件与路径工具 ====================
 
+    /**
+     * 裁掉 LLM 输出中第一个 Markdown 标题（# 开头的行）之前的前导文字。
+     */
+    private String stripPreamble(String text) {
+        if (text.startsWith("#")) {
+            return text;
+        }
+        int idx = text.indexOf("\n#");
+        if (idx >= 0 && idx < text.length() - 2) {
+            return text.substring(idx + 1);
+        }
+        // 如果整个文本以 # 开头，无需裁剪
+        return text;
+    }
+
     private void writeAbilityFile(String content) {
         Path filePath = getAbilityFilePath();
         try {
@@ -304,7 +322,7 @@ public class AbilityReflectionService {
     }
 
     private Path getProjectDir() {
-        return Paths.get(BASE_DIR, PathUtils.sanitizePath(workspacePath));
+        return Paths.get(BASE_DIR, PathUtils.sanitizePath(robotName));
     }
 
     private String computeHash(String input) {

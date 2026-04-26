@@ -58,9 +58,6 @@ object AcpProxy {
             }
         }
 
-        // 数据迁移：将旧 hash 目录迁移到新路径命名目录
-        migrateOldHashDirs(groupRobotMap)
-
         // 冷加载：启动时为每个groupId预创建client
         for (groupId in cmdGroupList) {
             try {
@@ -603,7 +600,7 @@ object AcpProxy {
         val service = abilityServices.getOrPut(groupId) {
             AbilityReflectionService(
                 robot.name, client.workspacePath, agentProvider,
-                timeoutSeconds, mcpConfigPaths, memoryManager
+                robot.description, timeoutSeconds, mcpConfigPaths, memoryManager
             )
         }
 
@@ -626,7 +623,7 @@ object AcpProxy {
         val service = abilityServices.getOrPut(groupId) {
             AbilityReflectionService(
                 robot.name, workDir, agentProvider,
-                timeoutSeconds, mcpConfigPaths, null
+                robot.description, timeoutSeconds, mcpConfigPaths, null
             )
         }
         service.submitReflection()
@@ -681,43 +678,5 @@ object AcpProxy {
             groupId, allowedNames)
     }
 
-    /**
-     * 启动时数据迁移：将旧 hash 命名的目录迁移到新路径命名目录。
-     * memory 目录按 workDir 迁移，ability 目录也按 workDir 迁移（原来按 robotName）。
-     */
-    private fun migrateOldHashDirs(groupRobotMap: Map<String, AcpRobotParam>) {
-        val memoryBaseDir = System.getProperty("user.home") + "/.cmd-proxy/memory"
-        val abilityBaseDir = System.getProperty("user.home") + "/.cmd-proxy/ability"
-
-        // 收集所有 workDir（memory 迁移用）
-        val workDirs = groupRobotMap.values
-            .mapNotNull { it.workDir?.takeIf { d -> d.isNotBlank() } }
-            .distinct()
-        PathUtils.migrateHashDirs(memoryBaseDir, workDirs)
-
-        // ability 迁移：旧 key 是 robotName，新 key 是 workDir
-        // 需要特殊处理：旧目录名 = hash(robotName)，新目录名 = sanitize(workDir)
-        val abilityBase = java.nio.file.Paths.get(abilityBaseDir)
-        if (java.nio.file.Files.exists(abilityBase)) {
-            for (robot in groupRobotMap.values) {
-                if (robot.name.isBlank() || robot.workDir.isNullOrBlank()) continue
-                val oldHash = PathUtils.legacyHash(robot.name)
-                val newName = PathUtils.sanitizePath(robot.workDir)
-                val oldDir = abilityBase.resolve(oldHash)
-                val newDir = abilityBase.resolve(newName)
-
-                if (!java.nio.file.Files.exists(oldDir) || !java.nio.file.Files.isDirectory(oldDir)) continue
-                if (java.nio.file.Files.exists(newDir)) {
-                    log.info("ability 迁移目标已存在，跳过: {} -> {}", oldDir, newDir)
-                    continue
-                }
-                try {
-                    java.nio.file.Files.move(oldDir, newDir)
-                    log.info("ability 数据迁移完成: {} -> {}", oldDir, newDir)
-                } catch (e: Exception) {
-                    log.error("ability 数据迁移失败: {} -> {}", oldDir, newDir, e)
-                }
-            }
-        }
-    }
 }
+

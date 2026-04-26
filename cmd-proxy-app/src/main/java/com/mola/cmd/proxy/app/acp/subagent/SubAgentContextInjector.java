@@ -113,7 +113,7 @@ public class SubAgentContextInjector {
         }
 
         // 2. ability.md
-        String abilityContent = loadAbilityMd(targetRobot.getWorkDir());
+        String abilityContent = loadAbilityMd(targetRobot.getName());
         if (abilityContent != null && !abilityContent.isEmpty()) {
             return abilityContent;
         }
@@ -125,18 +125,18 @@ public class SubAgentContextInjector {
 
     /**
      * 读取目标 robot 的 ability.md 文件。
-     * 路径: ~/.cmd-proxy/ability/{sanitized-workDir}/ability.md
+     * 路径: ~/.cmd-proxy/ability/{sanitized-robotName}/ability.md
      * <p>
      * 路径计算逻辑与 AbilityReflectionService 保持一致。
      */
-    private String loadAbilityMd(String workDir) {
-        if (workDir == null || workDir.isEmpty()) return null;
+    private String loadAbilityMd(String robotName) {
+        if (robotName == null || robotName.isEmpty()) return null;
         try {
-            Path abilityFile = Paths.get(ABILITY_BASE_DIR, PathUtils.sanitizePath(workDir), ABILITY_FILE);
+            Path abilityFile = Paths.get(ABILITY_BASE_DIR, PathUtils.sanitizePath(robotName), ABILITY_FILE);
             if (!Files.exists(abilityFile)) return null;
             return new String(Files.readAllBytes(abilityFile), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            logger.warn("读取 ability.md 失败, workDir={}", workDir, e);
+            logger.warn("读取 ability.md 失败, robotName={}", robotName, e);
             return null;
         }
     }

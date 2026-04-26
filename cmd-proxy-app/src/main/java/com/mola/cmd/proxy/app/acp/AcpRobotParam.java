@@ -11,6 +11,7 @@ public class AcpRobotParam {
     private String workDir = "";
     private String avatar = "";
     private MemoryConfig memory;
+    private String description = "";
     private String agentProvider = "KIRO_CLI";
     private List<SubAgentRef> subAgents;
     private boolean onlySubAgent;
@@ -76,6 +77,14 @@ public class AcpRobotParam {
      */
     public boolean isMemoryEnabled() {
         return memory != null && memory.isEnabled();
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
     }
 
     public String getAgentProvider() {
