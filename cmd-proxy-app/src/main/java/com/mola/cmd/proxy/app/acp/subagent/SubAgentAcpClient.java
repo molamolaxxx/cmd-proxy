@@ -9,7 +9,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
 
@@ -118,6 +120,7 @@ public class SubAgentAcpClient extends AbstractAcpClient {
         sendJson(request);
 
         StringBuilder fullResponse = new StringBuilder();
+        Map<String, String> toolTitleCache = new HashMap<>();
         long lastProgressTime = System.currentTimeMillis();
         int lastProgressLength = 0;
 
@@ -164,9 +167,15 @@ public class SubAgentAcpClient extends AbstractAcpClient {
                         fullResponse.append(text);
                     }
                 } else if ("tool_call".equals(updateType) || "tool_call_update".equals(updateType)) {
+                    String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
+                    String title = update.has("title") ? update.get("title").getAsString() : "";
                     String status = update.has("status") ? update.get("status").getAsString() : "";
+                    if (!title.isEmpty()) {
+                        toolTitleCache.put(toolCallId, title);
+                    } else {
+                        title = toolTitleCache.getOrDefault(toolCallId, "");
+                    }
                     if ("completed".equals(status)) {
-                        String title = update.has("title") ? update.get("title").getAsString() : "";
                         fullResponse.append("\n🛠️ ").append(title).append(" ✅\n");
                     }
                 }

@@ -54,6 +54,9 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
 
     @Override
     public void onToolCall(String toolCallId, String title, String status, JsonObject update) {
+        if (title == null || title.length() == 0) {
+            title = "tool_call";
+        }
         if ("completed".equals(status)) {
             StringBuilder sb = new StringBuilder();
             String inputBlock = "";

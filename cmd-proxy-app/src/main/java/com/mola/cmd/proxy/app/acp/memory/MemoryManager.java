@@ -25,12 +25,12 @@ public class MemoryManager implements MemoryManagerBridge {
     private final MemoryFileStore fileStore;
     private final MemoryDreamer dreamer;
 
-    public MemoryManager(MemoryConfig config) {
+    public MemoryManager(MemoryConfig config, String agentProvider) {
         this.config = config;
         this.fileStore = new MemoryFileStore(config.getBaseDir());
         this.loader = new MemoryLoader(fileStore, config);
-        this.extractor = new MemoryExtractor(config, fileStore);
-        this.dreamer = new MemoryDreamer(config, fileStore);
+        this.extractor = new MemoryExtractor(config, fileStore, agentProvider);
+        this.dreamer = new MemoryDreamer(config, fileStore, agentProvider);
     }
 
     // ==================== MemoryManagerBridge 实现 ====================

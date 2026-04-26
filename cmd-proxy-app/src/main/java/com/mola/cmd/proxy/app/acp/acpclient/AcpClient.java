@@ -24,6 +24,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -431,6 +432,8 @@ public class AcpClient extends AbstractAcpClient {
 
         // 流式读取
         StringBuilder fullResponse = new StringBuilder();
+        // 缓存 toolCallId → title，防止后续 update 中 title 为空
+        Map<String, String> toolTitleCache = new HashMap<>();
         // 缓冲过滤器：拦截 dispatch_subagent JSON，避免推送给用户
         DispatchBufferFilter bufferFilter = new DispatchBufferFilter(
                 listener, subAgentDispatcher != null);
@@ -503,6 +506,17 @@ public class AcpClient extends AbstractAcpClient {
                     String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
                     String title = update.has("title") ? update.get("title").getAsString() : "";
                     String status = update.has("status") ? update.get("status").getAsString() : "pending";
+                    // title 缓存：首次有值时存入，后续为空时回填
+                    if (!title.isEmpty()) {
+                        toolTitleCache.put(toolCallId, title);
+                    } else {
+                        title = toolTitleCache.getOrDefault(toolCallId, "");
+                    }
+                    // 打印 update 摘要（排除 rawInput/rawOutput，避免日志过大）
+                    JsonObject updateLog = update.deepCopy();
+                    updateLog.remove("rawInput");
+                    updateLog.remove("rawOutput");
+                    logger.info("工具调用: {}", updateLog);
                     if ("completed".equals(status)) {
                         JsonObject rawInput = update.has("rawInput") ? update.getAsJsonObject("rawInput") : null;
                         JsonObject rawOutput = update.has("rawOutput") ? update.getAsJsonObject("rawOutput") : null;
@@ -511,6 +525,14 @@ public class AcpClient extends AbstractAcpClient {
                         detectMemoryAccess(rawInput);
                     }
                     listener.onToolCall(toolCallId, title, status, update);
+                } else if ("usage_update".equals(updateType)) {
+                    if (update.has("used") && update.has("size")) {
+                        double used = update.get("used").getAsDouble();
+                        double size = update.get("size").getAsDouble();
+                        if (size > 0) {
+                            contextUsagePercentage = (used / size) * 100;
+                        }
+                    }
                 } else {
                     logger.warn("ACP IN session/update 输出未匹配任何处理分支, msg={}", msg);
                 }

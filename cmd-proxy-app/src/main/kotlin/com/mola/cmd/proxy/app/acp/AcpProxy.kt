@@ -508,9 +508,11 @@ object AcpProxy {
                     if (content.contains(DISPATCH_MARKER)) {
                         // 解析 dispatch_subagent JSON，展示派发的任务入参
                         val matcher = DISPATCH_PATTERN.matcher(content)
+                        var matchedJson: String? = null
                         if (matcher.find()) {
+                            matchedJson = matcher.group()
                             try {
-                                val json = com.google.gson.JsonParser.parseString(matcher.group()).asJsonObject
+                                val json = com.google.gson.JsonParser.parseString(matchedJson).asJsonObject
                                 val tasks = json.getAsJsonArray("tasks")
                                 val sb = StringBuilder("子 Agent 派发任务：\n")
                                 for (t in tasks) {
@@ -526,7 +528,7 @@ object AcpProxy {
                             }
                         }
                         // dispatch JSON 之外可能还有正常文本，也展示出来
-                        val cleanedContent = content.replace(matcher.group() ?: "", "").trim()
+                        val cleanedContent = if (matchedJson != null) content.replace(matchedJson, "").trim() else content.trim()
                         if (cleanedContent.isNotBlank()) {
                             listener.onMessage("${cleanedContent}\n\n---\n\n")
                         }
@@ -560,7 +562,8 @@ object AcpProxy {
         if (robot == null || !robot.isMemoryEnabled) return
 
         val memCfg = robot.memory
-        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg) }
+        val agentProvider = robot.agentProvider ?: "KIRO_CLI"
+        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg, agentProvider) }
         client.setMemoryManager(mgr)
         setupTurnCallback(client, memCfg, mgr)
     }
@@ -661,7 +664,7 @@ object AcpProxy {
         for (name in allowedNames) {
             val targetRobot = globalRobotRegistry[name] ?: continue
             if (targetRobot.isMemoryEnabled) {
-                val memMgr = MemoryManager(targetRobot.memory)
+                val memMgr = MemoryManager(targetRobot.memory, targetRobot.agentProvider ?: "KIRO_CLI")
                 subAgentMemoryMap[name] = memMgr
             }
         }

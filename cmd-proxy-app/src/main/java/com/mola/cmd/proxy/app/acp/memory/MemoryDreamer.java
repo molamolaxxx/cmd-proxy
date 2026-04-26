@@ -27,6 +27,7 @@ public class MemoryDreamer {
 
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
+    private final String agentProvider;
 
     private final ExecutorService dreamQueue = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -39,9 +40,10 @@ public class MemoryDreamer {
             new ThreadPoolExecutor.DiscardOldestPolicy()
     );
 
-    public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore) {
+    public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore, String agentProvider) {
         this.config = config;
         this.fileStore = fileStore;
+        this.agentProvider = agentProvider;
     }
 
     /**
@@ -94,7 +96,7 @@ public class MemoryDreamer {
             try (MemoryAcpClient client = new MemoryAcpClient(
                     workspacePath, groupId,
                     config.getSubClientTimeout() * 2,  // 整理比提取更耗时
-                    config.getAgentProvider())) {
+                    agentProvider)) {
                 client.start();
                 response = client.sendPromptSync(prompt);
             }

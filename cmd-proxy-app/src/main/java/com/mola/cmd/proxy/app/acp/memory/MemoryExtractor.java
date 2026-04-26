@@ -31,6 +31,7 @@ public class MemoryExtractor {
 
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
+    private final String agentProvider;
 
     /** 单线程提取队列，串行执行所有提取任务 */
     private final ExecutorService extractQueue = new ThreadPoolExecutor(
@@ -47,9 +48,10 @@ public class MemoryExtractor {
     /** 上次提取时的历史消息数量，用于增量提取 */
     private final AtomicInteger lastExtractedSize = new AtomicInteger(0);
 
-    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore) {
+    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore, String agentProvider) {
         this.config = config;
         this.fileStore = fileStore;
+        this.agentProvider = agentProvider;
     }
 
     /**
@@ -107,7 +109,7 @@ public class MemoryExtractor {
         String groupId = "memory_extractor__" + workspacePath.hashCode();
 
         try (MemoryAcpClient client = new MemoryAcpClient(
-                workspacePath, groupId, config.getSubClientTimeout(), config.getAgentProvider())) {
+                workspacePath, groupId, config.getSubClientTimeout(), agentProvider)) {
             client.start();
             String response = client.sendPromptSync(prompt);
             logger.info("记忆提取子 Client 返回, 长度={}", response.length());
