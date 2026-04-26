@@ -48,4 +48,12 @@ public interface AgentProvider {
     default double extractContextUsage(JsonObject msg) {
         return -1;
     }
+
+    /**
+     * agent 的 skills 目录相对于 workspacePath 的路径。
+     * 如 kiro-cli 为 ".kiro/skills"，opencode 为 ".opencode/skills"。
+     */
+    default String getSkillsRelativePath() {
+        return ".kiro/skills";
+    }
 }

@@ -51,6 +51,9 @@ public final class McpConfigLoader {
             JsonObject root = JsonParser.parseString(content).getAsJsonObject();
             JsonObject servers = root.getAsJsonObject("mcpServers");
             if (servers == null) {
+                servers = root.getAsJsonObject("mcp");
+            }
+            if (servers == null) {
                 logger.debug("No mcpServers in config: {}", configPath);
                 return;
             }
@@ -97,15 +100,38 @@ public final class McpConfigLoader {
                 acpServer.add("headers", headerArray);
             }
         } else if (serverObj.has("command")) {
-            acpServer.addProperty("command", serverObj.get("command").getAsString());
-            if (serverObj.has("args") && serverObj.get("args").isJsonArray()) {
-                acpServer.add("args", serverObj.getAsJsonArray("args"));
+            // command 可能是字符串（kiro 格式）或数组（opencode 格式）
+            JsonElement cmdElem = serverObj.get("command");
+            if (cmdElem.isJsonArray()) {
+                JsonArray cmdArray = cmdElem.getAsJsonArray();
+                if (cmdArray.size() == 0) {
+                    logger.warn("MCP server '{}' has empty command array, skipping", name);
+                    return null;
+                }
+                acpServer.addProperty("command", cmdArray.get(0).getAsString());
+                JsonArray args = new JsonArray();
+                for (int i = 1; i < cmdArray.size(); i++) {
+                    args.add(cmdArray.get(i).getAsString());
+                }
+                acpServer.add("args", args);
             } else {
-                acpServer.add("args", new JsonArray());
+                acpServer.addProperty("command", cmdElem.getAsString());
+                if (serverObj.has("args") && serverObj.get("args").isJsonArray()) {
+                    acpServer.add("args", serverObj.getAsJsonArray("args"));
+                } else {
+                    acpServer.add("args", new JsonArray());
+                }
             }
+            // env: opencode 用 "environment"，kiro 用 "env"
+            JsonObject envObj = null;
             if (serverObj.has("env") && serverObj.get("env").isJsonObject()) {
+                envObj = serverObj.getAsJsonObject("env");
+            } else if (serverObj.has("environment") && serverObj.get("environment").isJsonObject()) {
+                envObj = serverObj.getAsJsonObject("environment");
+            }
+            if (envObj != null) {
                 JsonArray envArray = new JsonArray();
-                for (Map.Entry<String, JsonElement> e : serverObj.getAsJsonObject("env").entrySet()) {
+                for (Map.Entry<String, JsonElement> e : envObj.entrySet()) {
                     JsonObject envVar = new JsonObject();
                     envVar.addProperty("name", e.getKey());
                     envVar.addProperty("value", e.getValue().getAsString());

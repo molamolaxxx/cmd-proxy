@@ -276,21 +276,53 @@ public abstract class AbstractAcpClient implements Closeable {
     }
 
     /**
-     * 自动回复 permission 请求为 allow_always。
+     * 自动回复 permission 请求。
+     * 从 Agent 提供的 options 中优先选择 allow_always，其次 allow_once。
      */
     protected void autoAllowPermission(JsonObject msg) throws IOException {
-        String permId = msg.has("id") ? msg.get("id").getAsString() : null;
-        if (permId == null) return;
+        if (!msg.has("id")) return;
+        JsonElement permId = msg.get("id");
+
+        logger.info("收到 permission 请求: {}", gson.toJson(msg));
+
+        // 从 options 中找到合适的 optionId
+        String selectedOptionId = null;
+        JsonObject params = msg.getAsJsonObject("params");
+        if (params != null && params.has("options") && params.get("options").isJsonArray()) {
+            JsonArray options = params.getAsJsonArray("options");
+            String allowOnceId = null;
+            for (JsonElement opt : options) {
+                if (!opt.isJsonObject()) continue;
+                JsonObject optObj = opt.getAsJsonObject();
+                String kind = optObj.has("kind") ? optObj.get("kind").getAsString() : "";
+                String optId = optObj.has("optionId") ? optObj.get("optionId").getAsString() : "";
+                if ("allow_always".equals(kind)) {
+                    selectedOptionId = optId;
+                    break;
+                }
+                if ("allow_once".equals(kind) && allowOnceId == null) {
+                    allowOnceId = optId;
+                }
+            }
+            if (selectedOptionId == null) {
+                selectedOptionId = allowOnceId;
+            }
+        }
+        // fallback：兼容未提供 options 的场景
+        if (selectedOptionId == null) {
+            selectedOptionId = "allow_always";
+        }
 
         JsonObject outcomeObj = new JsonObject();
         outcomeObj.addProperty("outcome", "selected");
-        outcomeObj.addProperty("optionId", "allow_always");
+        outcomeObj.addProperty("optionId", selectedOptionId);
         JsonObject permResult = new JsonObject();
         permResult.add("outcome", outcomeObj);
         JsonObject permResp = new JsonObject();
         permResp.addProperty("jsonrpc", JSONRPC_VERSION);
-        permResp.addProperty("id", permId);
+        permResp.add("id", permId);
         permResp.add("result", permResult);
+        logger.info("回复 permission: selectedOptionId={}, response={}", selectedOptionId, gson.toJson(permResp));
         sendJson(permResp);
     }
 

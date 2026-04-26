@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.ability;
 
 import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -211,10 +212,13 @@ public class AbilityReflectionService {
     // ==================== 指纹计算 ====================
 
     /**
-     * 计算 .kiro/skills/ 目录下所有 skill 子目录名的聚合哈希。
+     * 计算 skills 目录下所有 skill 子目录名的聚合哈希。
+     * 通过 AgentProvider 获取 skills 相对路径，兼容不同 agent 实现。
      */
     private String computeSkillsHash() {
-        Path skillsDir = Paths.get(workspacePath, ".kiro", "skills");
+        String skillsRelPath = AgentProviderRouter.getInstance()
+                .resolve(agentProvider).getSkillsRelativePath();
+        Path skillsDir = Paths.get(workspacePath, skillsRelPath);
         if (!Files.exists(skillsDir) || !Files.isDirectory(skillsDir)) {
             return "empty";
         }

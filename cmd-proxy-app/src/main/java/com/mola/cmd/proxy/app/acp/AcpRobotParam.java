@@ -50,7 +50,13 @@ public class AcpRobotParam {
     }
 
     public String getAvatar() {
-        return avatar;
+        if (avatar != null && !avatar.isEmpty()) {
+            return avatar;
+        }
+        if ("OPENCODE".equalsIgnoreCase(agentProvider)) {
+            return "img/opencode.png";
+        }
+        return "img/kiro.png";
     }
 
     public void setAvatar(String avatar) {

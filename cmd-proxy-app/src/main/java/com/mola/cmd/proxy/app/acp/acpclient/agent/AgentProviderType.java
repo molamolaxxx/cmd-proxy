@@ -6,7 +6,8 @@ package com.mola.cmd.proxy.app.acp.acpclient.agent;
  */
 public enum AgentProviderType {
 
-    KIRO_CLI;
+    KIRO_CLI,
+    OPENCODE;
 
     /**
      * 从字符串解析，不区分大小写，无法匹配时返回默认值 KIRO_CLI。
