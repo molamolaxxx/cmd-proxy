@@ -20,8 +20,31 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
 
     private final String groupId;
 
+    /** 缓冲模式：开启后 sendContent 不立即发送，而是攒到 buffer 中 */
+    private boolean buffering = false;
+    private final StringBuilder buffer = new StringBuilder();
+
     public DefaultAcpResponseListener(String groupId) {
         this.groupId = groupId;
+    }
+
+    /**
+     * 开启缓冲模式，后续 sendContent 调用会攒到内部 buffer 中，不立即发送。
+     */
+    public void beginBuffer() {
+        buffering = true;
+        buffer.setLength(0);
+    }
+
+    /**
+     * 结束缓冲模式，将 buffer 中积攒的内容一次性发送给客户端。
+     */
+    public void flushBuffer() {
+        buffering = false;
+        if (buffer.length() > 0) {
+            doSend(buffer.toString(), false);
+            buffer.setLength(0);
+        }
     }
 
     @Override
@@ -40,7 +63,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                     inputJson = inputJson.substring(0, MAX_JSON_LENGTH) + "\n...";
                 }
                 inputBlock = "<details class=\"tool-detail\" open><summary>📥 输入参数</summary>\n\n```json\n"
-                        + inputJson + "\n```\n\n</details>";
+                        + escapeHtml(inputJson) + "\n```\n\n</details>";
             }
 
             String outputBlock = "";
@@ -50,7 +73,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                     outputJson = outputJson.substring(0, MAX_JSON_LENGTH) + "\n...";
                 }
                 outputBlock = "<details class=\"tool-detail\" open><summary>📤 输出结果</summary>\n\n```json\n"
-                        + outputJson + "\n```\n\n</details>";
+                        + escapeHtml(outputJson) + "\n```\n\n</details>";
             }
 
             sb.append("<details class=\"tool-call\">");
@@ -156,6 +179,22 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     }
 
     private void sendContent(String content, boolean end) {
+        if (buffering && !end) {
+            buffer.append(content);
+            return;
+        }
+        // end=true 时强制 flush buffer 再发送终止帧
+        if (buffering && end) {
+            buffer.append(content);
+            buffering = false;
+            doSend(buffer.toString(), true);
+            buffer.setLength(0);
+            return;
+        }
+        doSend(content, end);
+    }
+
+    private void doSend(String content, boolean end) {
         Map<String, String> resultMap = new HashMap<>();
         resultMap.put("groupId", groupId);
         resultMap.put("content", content);

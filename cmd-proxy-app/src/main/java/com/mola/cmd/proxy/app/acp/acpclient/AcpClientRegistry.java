@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -40,39 +41,46 @@ public class AcpClientRegistry {
      * @param robotParam    绑定的 robot 参数
      * @throws IOException 启动失败时抛出
      */
-    public void createSession(String groupId, String workspacePath, AcpRobotParam robotParam) throws IOException {
-        // 如果已存在，先关闭旧 client
-        AcpClient old = clients.remove(groupId);
-        if (old != null) {
-            logger.info("groupId={} 已有 client，先关闭旧实例", groupId);
-            try {
-                old.close();
-            } catch (IOException e) {
-                logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
+    
+        public void createSession(String groupId, String workspacePath, AcpRobotParam robotParam) throws IOException {
+            // 如果已存在，先关闭旧 client
+            AcpClient old = clients.remove(groupId);
+            boolean isClearContext = false;
+            if (old != null) {
+                logger.info("groupId={} 已有 client，先关闭旧实例", groupId);
+                isClearContext = true;
+                try {
+                    old.close();
+                } catch (IOException e) {
+                    logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
+                }
+                if (workspacePath == null || workspacePath.trim().isEmpty()) {
+                    workspacePath = old.getWorkspacePath();
+                }
+                if (robotParam == null) {
+                    robotParam = old.getRobotParam();
+                }
             }
-            if (workspacePath == null || workspacePath.trim().isEmpty()) {
-                workspacePath = old.getWorkspacePath();
+
+            AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
+            if (isClearContext) {
+                client.setForceNewSession(true);
             }
-            if (robotParam == null) {
-                robotParam = old.getRobotParam();
-            }
+            client.start();
+            clients.put(groupId, client);
+            logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());
         }
 
-        AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
-        client.start();
-        clients.put(groupId, client);
-        logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());
-    }
 
     /**
-     * 发送消息：向指定 groupId 的 AcpClient 发送用户消息，可附带图片。
+     * 发送消息：向指定 groupId 的 AcpClient 发送用户消息，可附带文件。
      */
-    public void sendMessage(String groupId, String message, List<String> imageBase64List) {
+    public void sendMessage(String groupId, String message, List<Map<String, String>> files) {
         AcpClient client = clients.get(groupId);
         if (client == null) {
             throw new IllegalStateException("groupId=" + groupId + " 的会话不存在，请先调用 createSession");
         }
-        client.send(message, imageBase64List);
+        client.send(message, files);
     }
 
     /**
@@ -91,5 +99,27 @@ public class AcpClientRegistry {
      */
     public AcpClient getClient(String groupId) {
         return clients.get(groupId);
+    }
+
+    /**
+     * 恢复指定 sessionId 的会话：关闭旧 client，创建新 client 并指定恢复目标。
+     */
+    public void restoreSession(String groupId, String targetSessionId) throws IOException {
+        AcpClient old = clients.remove(groupId);
+        String workspacePath = null;
+        AcpRobotParam robotParam = null;
+        if (old != null) {
+            workspacePath = old.getWorkspacePath();
+            robotParam = old.getRobotParam();
+            try { old.close(); } catch (IOException e) {
+                logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
+            }
+        }
+
+        AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
+        client.setTargetRestoreSessionId(targetSessionId);
+        client.start();
+        clients.put(groupId, client);
+        logger.info("groupId={} 会话恢复成功, sessionId={}", groupId, client.getSessionId());
     }
 }

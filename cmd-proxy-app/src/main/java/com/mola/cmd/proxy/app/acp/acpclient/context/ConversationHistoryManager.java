@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.acpclient.context;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,35 +12,58 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Map;
 
 /**
  * 会话上下文管理器，负责内存中的消息收集、磁盘落盘与加载。
  * <p>
  * 存储目录结构：
  * <pre>
- * ~/.cmd-proxy/session/{sessionId}/
+ * ~/.cmd-proxy/session/{workspaceDirName}/{sessionId}/
  *   ├── turn_0000.json
  *   ├── turn_0001.json
  *   └── resources.json   (去重的图片 base64)
  * </pre>
  */
+/**
+ * 会话上下文管理器，负责内存中的消息收集、磁盘落盘与加载。
+ * <p>
+ * 存储目录结构：
+ * <pre>
+ * ~/.cmd-proxy/session/{workspaceDirName}/{sessionId}/
+ *   ├── turn_0000.json
+ *   ├── turn_0001.json
+ *   └── files/          (用户上传的文件，按原始文件名存储)
+ * </pre>
+ */
 public class ConversationHistoryManager {
 
     private static final Logger logger = LoggerFactory.getLogger(ConversationHistoryManager.class);
-    private static final Path SESSION_BASE_DIR = Paths.get(System.getProperty("user.home"), ".cmd-proxy", "session");
+    private static final Path SESSION_ROOT_DIR = Paths.get(System.getProperty("user.home"), ".cmd-proxy", "session");
     private static final Gson PRETTY_GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    /** 按 workspacePath 隔离的 session 基础目录 */
+    private final Path sessionBaseDir;
 
     /** 当前 turn 的上下文消息，flushTurn 后清空 */
     private final List<ContextMessage> currentTurn = new ArrayList<>();
 
-    /** 累积的图片 base64（去重） */
-    private final LinkedHashSet<String> imageBase64History = new LinkedHashSet<>();
+    /** 累积的文件绝对路径（去重） */
+    private final LinkedHashSet<String> fileAbsolutePaths = new LinkedHashSet<>();
 
     /** turn 计数器 */
     private final AtomicInteger turnCounter = new AtomicInteger(0);
 
     /** turn 完成回调，用于每 N 轮触发记忆提取等外部逻辑 */
     private Runnable onTurnFlushed;
+
+    /**
+     * @param robotName 机器人名称，用于按 robot 隔离 session 存储
+     */
+    public ConversationHistoryManager(String robotName) {
+        String dirName = PathUtils.sanitizePath(robotName);
+        this.sessionBaseDir = SESSION_ROOT_DIR.resolve(dirName);
+    }
 
     /**
      * 设置 turn 完成回调。每次 flushTurn 成功落盘后触发。
@@ -73,20 +97,45 @@ public class ConversationHistoryManager {
         currentTurn.add(new ContextMessage(toolCallId, toolName, status, rawInput, rawOutput));
     }
 
-    /** 追加图片 base64（自动去重） */
-    public void addImages(Collection<String> images) {
-        if (images == null) return;
-        for (String img : images) {
-            if (img != null && !img.isEmpty()) {
-                imageBase64History.add(img);
+    /**
+     * 将文件 base64 内容写入会话的 files 目录，并记录绝对路径。
+     *
+     * @param sessionId 当前会话 ID
+     * @param files     文件列表，每个 Map 的 key 为文件名，value 为文件的 base64 内容
+     */
+    public void saveFiles(String sessionId, List<Map<String, String>> files) {
+        if (files == null || files.isEmpty() || sessionId == null) return;
+        try {
+            Path filesDir = sessionBaseDir.resolve(sessionId).resolve("files");
+            Files.createDirectories(filesDir);
+            for (Map<String, String> fileMap : files) {
+                for (Map.Entry<String, String> entry : fileMap.entrySet()) {
+                    String fileName = entry.getKey();
+                    String base64Content = entry.getValue();
+                    if (fileName == null || fileName.isEmpty() || base64Content == null) continue;
+                    Path filePath = filesDir.resolve(fileName);
+                    byte[] decoded = Base64.getDecoder().decode(base64Content);
+                    Files.write(filePath, decoded);
+                    fileAbsolutePaths.add(filePath.toAbsolutePath().toString());
+                    logger.info("文件已保存: {}", filePath.toAbsolutePath());
+                }
             }
+        } catch (IOException e) {
+            logger.error("文件保存失败, sessionId={}", sessionId, e);
         }
+    }
+
+    /**
+     * 获取所有已保存文件的绝对路径集合（只读）。
+     */
+    public Set<String> getFileAbsolutePaths() {
+        return Collections.unmodifiableSet(fileAbsolutePaths);
     }
 
     // ==================== 落盘 ====================
 
     /**
-     * 将当前 turn 的消息落盘并清空内存，同时同步写入图片资源文件。
+     * 将当前 turn 的消息落盘并清空内存。
      *
      * @param sessionId 当前会话 ID
      */
@@ -95,7 +144,7 @@ public class ConversationHistoryManager {
             return;
         }
         try {
-            Path sessionDir = SESSION_BASE_DIR.resolve(sessionId);
+            Path sessionDir = sessionBaseDir.resolve(sessionId);
             Files.createDirectories(sessionDir);
 
             int turn = turnCounter.getAndIncrement();
@@ -108,9 +157,6 @@ public class ConversationHistoryManager {
 
             Files.write(turnFile, PRETTY_GSON.toJson(array).getBytes(StandardCharsets.UTF_8));
             logger.info("会话上下文已落盘: {}, 消息数={}", turnFile, currentTurn.size());
-
-            // 同步落盘图片资源
-            flushImageResources(sessionDir);
         } catch (IOException e) {
             logger.error("会话上下文落盘失败, sessionId={}", sessionId, e);
         } finally {
@@ -144,7 +190,7 @@ public class ConversationHistoryManager {
     public List<ContextMessage> getFullHistory(String sessionId) {
         List<ContextMessage> result = new ArrayList<>();
         if (sessionId != null) {
-            Path sessionDir = SESSION_BASE_DIR.resolve(sessionId);
+            Path sessionDir = sessionBaseDir.resolve(sessionId);
             if (Files.isDirectory(sessionDir)) {
                 try {
                     Files.list(sessionDir)
@@ -179,63 +225,251 @@ public class ConversationHistoryManager {
     }
 
     /**
-     * 从磁盘加载图片资源。
+     * 从磁盘加载已保存的文件路径列表。
      */
-    public List<String> loadImageResources(String sessionId) {
+    public List<String> loadFilePaths(String sessionId) {
         if (sessionId == null) return Collections.emptyList();
-        Path resourceFile = SESSION_BASE_DIR.resolve(sessionId).resolve("resources.json");
-        if (!Files.exists(resourceFile)) return Collections.emptyList();
+        Path filesDir = sessionBaseDir.resolve(sessionId).resolve("files");
+        if (!Files.isDirectory(filesDir)) return Collections.emptyList();
+        List<String> result = new ArrayList<>();
         try {
-            String content = new String(Files.readAllBytes(resourceFile), StandardCharsets.UTF_8);
-            JsonObject root = JsonParser.parseString(content).getAsJsonObject();
-            JsonArray images = root.getAsJsonArray("images");
-            List<String> result = new ArrayList<>();
-            if (images != null) {
-                for (JsonElement elem : images) {
-                    result.add(elem.getAsString());
-                }
-            }
-            return result;
+            Files.list(filesDir).forEach(p -> result.add(p.toAbsolutePath().toString()));
         } catch (IOException e) {
-            logger.warn("读取图片资源失败: {}", resourceFile, e);
-            return Collections.emptyList();
+            logger.warn("读取文件目录失败: {}", filesDir, e);
         }
+        return result;
     }
 
     /**
-     * 获取内存中的图片 base64 集合（只读）。
+     * 恢复会话的内存状态（用于 session/load 后）。
+     * <p>
+     * 从磁盘恢复 fileAbsolutePaths 和 turnCounter，
+     * 使 historyManager 的状态与已落盘的数据一致。
      */
-    public Set<String> getImageBase64History() {
-        return Collections.unmodifiableSet(imageBase64History);
+    public void restoreState(String sessionId) {
+        if (sessionId == null) return;
+
+        // 恢复文件路径
+        fileAbsolutePaths.addAll(loadFilePaths(sessionId));
+
+        // 恢复 turn 计数器：统计已有的 turn 文件数
+        Path sessionDir = sessionBaseDir.resolve(sessionId);
+        if (Files.isDirectory(sessionDir)) {
+            try {
+                long turnCount = Files.list(sessionDir)
+                        .filter(p -> p.getFileName().toString().startsWith("turn_")
+                                && p.getFileName().toString().endsWith(".json"))
+                        .count();
+                turnCounter.set((int) turnCount);
+            } catch (IOException e) {
+                logger.warn("恢复 turnCounter 失败: {}", sessionDir, e);
+            }
+        }
+
+        logger.info("会话状态已恢复, sessionId={}, files={}, turnCounter={}",
+                sessionId, fileAbsolutePaths.size(), turnCounter.get());
     }
+
 
     /**
      * 重置状态（用于 session 重建等场景）。
      */
     public void reset() {
         currentTurn.clear();
-        imageBase64History.clear();
+        fileAbsolutePaths.clear();
         turnCounter.set(0);
     }
 
-    // ==================== 内部方法 ====================
+    /**
+     * 查找当前 workspace 下最新的 sessionId。
+     * <p>
+     * 遍历 sessionBaseDir 下的所有子目录，按目录修改时间倒序排列，
+     * 返回最新的目录名作为 sessionId。
+     *
+     * @return 最新的 sessionId，如果不存在则返回 null
+     */
+    
+        /**
+         * 查找当前 workspace 下最新的 sessionId。
+         * <p>
+         * 优先读取 last_session 标记文件（session/new 成功后写入），
+         * 如果标记文件不存在，则回退到按目录修改时间查找。
+         *
+         * @return 最新的 sessionId，如果不存在则返回 null
+         */
+        public String findLatestSessionId() {
+            // 优先读取标记文件
+            Path marker = sessionBaseDir.resolve("last_session");
+            if (Files.isRegularFile(marker)) {
+                try {
+                    String id = new String(Files.readAllBytes(marker), StandardCharsets.UTF_8).trim();
+                    if (!id.isEmpty()) {
+                        logger.info("从标记文件读取到最新 sessionId: {}", id);
+                        return id;
+                    }
+                } catch (IOException e) {
+                    logger.warn("读取 last_session 标记文件失败: {}", marker, e);
+                }
+            }
 
-    private void flushImageResources(Path sessionDir) {
-        if (imageBase64History.isEmpty()) return;
+            // 回退：按目录修改时间查找
+            if (!Files.isDirectory(sessionBaseDir)) {
+                return null;
+            }
+            try {
+                return Files.list(sessionBaseDir)
+                        .filter(Files::isDirectory)
+                        .filter(p -> {
+                            try {
+                                return Files.list(p).anyMatch(f ->
+                                        f.getFileName().toString().startsWith("turn_")
+                                                && f.getFileName().toString().endsWith(".json"));
+                            } catch (IOException e) {
+                                return false;
+                            }
+                        })
+                        .max(Comparator.comparingLong(p -> {
+                            try {
+                                return Files.getLastModifiedTime(p).toMillis();
+                            } catch (IOException e) {
+                                return 0L;
+                            }
+                        }))
+                        .map(p -> p.getFileName().toString())
+                        .orElse(null);
+            } catch (IOException e) {
+                logger.warn("查找最新 sessionId 失败: {}", sessionBaseDir, e);
+                return null;
+            }
+        }
+
+        /**
+         * 记录当前活跃的 sessionId 到标记文件。
+         * 在 session/new 成功后立即调用，确保重启时能恢复到正确的会话。
+         */
+        public void saveLastSessionId(String sessionId) {
+            if (sessionId == null) return;
+            try {
+                Files.createDirectories(sessionBaseDir);
+                Path marker = sessionBaseDir.resolve("last_session");
+                Files.write(marker, sessionId.getBytes(StandardCharsets.UTF_8));
+                logger.info("已记录最新 sessionId: {}", sessionId);
+            } catch (IOException e) {
+                logger.warn("写入 last_session 标记文件失败, sessionId={}", sessionId, e);
+            }
+        }
+
+
+
+    // ==================== 会话列表 ====================
+
+    public static class SessionSummary {
+        private final String sessionId;
+        private final String preview;
+        private final String lastModified;
+
+        public SessionSummary(String sessionId, String preview, String lastModified) {
+            this.sessionId = sessionId;
+            this.preview = preview;
+            this.lastModified = lastModified;
+        }
+
+        public String getSessionId() { return sessionId; }
+        public String getPreview() { return preview; }
+        public String getLastModified() { return lastModified; }
+    }
+
+    private static final Set<String> GREETINGS = new HashSet<>(Arrays.asList(
+            "你好", "hi", "hello", "在吗", "hey", "嗨", "在不在", "您好"));
+
+    /**
+     * 列出最近的会话摘要。跳过纯寒暄，取第一条有实质内容的用户消息；
+     * 若全是寒暄则取第一条 ASSISTANT 回复。截断到 30 字符。
+     */
+    public List<SessionSummary> listRecentSessions(int limit) {
+        if (!Files.isDirectory(sessionBaseDir)) return Collections.emptyList();
         try {
-            Path resourceFile = sessionDir.resolve("resources.json");
-            JsonArray images = new JsonArray();
-            imageBase64History.forEach(images::add);
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm");
+            List<Path> dirs = Files.list(sessionBaseDir)
+                    .filter(Files::isDirectory)
+                    .filter(p -> {
+                        try { return Files.list(p).anyMatch(f -> f.getFileName().toString().startsWith("turn_")); }
+                        catch (IOException e) { return false; }
+                    })
+                    .sorted((a, b) -> {
+                        try { return Long.compare(Files.getLastModifiedTime(b).toMillis(), Files.getLastModifiedTime(a).toMillis()); }
+                        catch (IOException e) { return 0; }
+                    })
+                    .limit(limit)
+                    .collect(java.util.stream.Collectors.toList());
 
-            JsonObject root = new JsonObject();
-            root.add("images", images);
-
-            Files.write(resourceFile, PRETTY_GSON.toJson(root).getBytes(StandardCharsets.UTF_8));
-            logger.info("图片资源已落盘: {}, 图片数={}", resourceFile, imageBase64History.size());
+            List<SessionSummary> result = new ArrayList<>();
+            for (Path dir : dirs) {
+                String sid = dir.getFileName().toString();
+                String modified = sdf.format(new java.util.Date(Files.getLastModifiedTime(dir).toMillis()));
+                String preview = extractPreview(dir);
+                result.add(new SessionSummary(sid, preview, modified));
+            }
+            return result;
         } catch (IOException e) {
-            logger.error("图片资源落盘失败: {}", sessionDir, e);
+            logger.warn("listRecentSessions 失败", e);
+            return Collections.emptyList();
         }
     }
+
+    private String extractPreview(Path sessionDir) {
+        try {
+            List<Path> turnFiles = Files.list(sessionDir)
+                    .filter(p -> p.getFileName().toString().startsWith("turn_") && p.getFileName().toString().endsWith(".json"))
+                    .sorted()
+                    .collect(java.util.stream.Collectors.toList());
+
+            String firstAssistant = null;
+            for (Path tf : turnFiles) {
+                JsonArray arr = JsonParser.parseString(new String(Files.readAllBytes(tf), StandardCharsets.UTF_8)).getAsJsonArray();
+                for (JsonElement el : arr) {
+                    JsonObject obj = el.getAsJsonObject();
+                    String role = obj.get("role").getAsString();
+                    String content = obj.has("content") ? obj.get("content").getAsString() : null;
+                    if (content == null || content.trim().isEmpty()) continue;
+                    if ("USER".equals(role) && !GREETINGS.contains(content.trim().toLowerCase())) {
+                        return sanitizePreview(content.trim(), 60);
+                    }
+                    if ("ASSISTANT".equals(role) && firstAssistant == null) {
+                        firstAssistant = content.trim();
+                    }
+                }
+            }
+            return firstAssistant != null ? sanitizePreview(firstAssistant, 80) : "(空会话)";
+        } catch (Exception e) {
+            return "(读取失败)";
+        }
+    }
+
+    /**
+     * 对 preview 文本进行清洗：
+     * 1. 换行符替换为分号
+     * 2. 转义 HTML 标签和 Markdown 特殊字符
+     * 3. 截取至指定长度
+     */
+    private static String sanitizePreview(String s, int max) {
+        // 换行符替换为分号
+        String result = s.replaceAll("[\\r\\n]+", "; ");
+        // 转义 HTML 标签
+        result = result.replace("&", "&amp;")
+                       .replace("<", "&lt;")
+                       .replace(">", "&gt;")
+                       .replace("\"", "&quot;");
+        // 转义 Markdown 特殊字符: * _ ` # ~ [ ] |
+        result = result.replaceAll("([*_`#~\\[\\]|])", "\\\\$1");
+        return truncate(result, max);
+    }
+
+    private static String truncate(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    // ==================== 内部方法 ====================
 
     private JsonObject serializeMessage(ContextMessage msg) {
         JsonObject obj = new JsonObject();

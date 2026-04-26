@@ -130,7 +130,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpClearContext", cmdGroupList, "会话上下文清除，groupId必填") { params ->
+        CmdReceiver.register("acpNewSession", cmdGroupList, "会话上下文清除，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -156,15 +156,15 @@ object AcpProxy {
                     initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
                 }
 
-                resultMap["result"] = "会话上下文已清除"
+                resultMap["result"] = "已开启新会话"
             } catch (e: Exception) {
-                log.error("acpClearSession 失败", e)
-                resultMap["result"] = "会话上下文清除失败: ${e.message}"
+                log.error("acpNewSession 失败", e)
+                resultMap["result"] = "开启新会话失败: ${e.message}"
             }
             resultMap
         }
 
-        CmdReceiver.register("acpSendMessage", cmdGroupList, "向ACP会话发送消息，groupId和message必填，images可选(base64数组)") { params ->
+        CmdReceiver.register("acpSendMessage", cmdGroupList, "向ACP会话发送消息，groupId和message必填，files可选(数组，每个元素是{文件名:base64}的map)") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -178,10 +178,17 @@ object AcpProxy {
                     resultMap["result"] = "message不能为空"
                     return@register resultMap
                 }
-                val imageBase64List: MutableList<String>? = if (param.containsKey("images")) {
-                    param.getJSONArray("images")?.map { it.toString() }?.toMutableList()
+                val files: MutableList<Map<String, String>>? = if (param.containsKey("files")) {
+                    param.getJSONArray("files")?.map { item ->
+                        val jsonObj = item as JSONObject
+                        val map = mutableMapOf<String, String>()
+                        for (key in jsonObj.keys) {
+                            map[key] = jsonObj.getString(key)
+                        }
+                        map as Map<String, String>
+                    }?.toMutableList()
                 } else null
-                registry.sendMessage(groupId, message, imageBase64List)
+                registry.sendMessage(groupId, message, files)
                 resultMap["result"] = "消息发送成功"
             } catch (e: Exception) {
                 log.error("acpSendMessage 失败", e)
@@ -222,6 +229,93 @@ object AcpProxy {
             } catch (e: Exception) {
                 log.error("acpGetContextUsage 失败", e)
                 resultMap["result"] = "-1"
+            }
+            resultMap
+        }
+
+        CmdReceiver.register("acpListSessions", cmdGroupList, "获取最近N个会话列表，groupId必填，limit可选(默认7)") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            try {
+                val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
+                val groupId = param.getString("groupId")
+                if (groupId.isNullOrBlank()) {
+                    resultMap["result"] = "groupId不能为空"
+                    return@register resultMap
+                }
+                val limit = param.getIntValue("limit").let { if (it <= 0) 7 else it }
+                val client = registry.getClient(groupId)
+                if (client == null) {
+                    resultMap["result"] = "会话不存在"
+                    return@register resultMap
+                }
+                val currentSessionId = client.sessionId
+                val sessions = client.historyManager.listRecentSessions(limit)
+                val arr = com.alibaba.fastjson.JSONArray()
+                for (s in sessions) {
+                    if (arr.size >= limit) break
+                    val obj = JSONObject()
+                    obj["sessionId"] = s.sessionId
+                    val isCurrent = s.sessionId == currentSessionId
+                    obj["preview"] = s.preview
+                    obj["lastModified"] = s.lastModified
+                    obj["current"] = isCurrent
+                    arr.add(obj)
+                }
+                resultMap["result"] = arr.toJSONString()
+            } catch (e: Exception) {
+                log.error("acpListSessions 失败", e)
+                resultMap["result"] = "查询失败: ${e.message}"
+            }
+            resultMap
+        }
+
+        CmdReceiver.register("acpRestoreSession", cmdGroupList, "恢复指定历史会话，groupId和sessionId必填") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            try {
+                val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
+                val groupId = param.getString("groupId")
+                val sessionId = param.getString("sessionId")
+                if (groupId.isNullOrBlank()) {
+                    resultMap["result"] = "groupId不能为空"
+                    return@register resultMap
+                }
+                if (sessionId.isNullOrBlank()) {
+                    resultMap["result"] = "sessionId不能为空"
+                    return@register resultMap
+                }
+                val client = registry.getClient(groupId)
+                if (client == null || client.state != AbstractAcpClient.State.READY) {
+                    resultMap["result"] = "当前client状态不允许恢复会话"
+                    return@register resultMap
+                }
+
+                // 如果目标 session 和当前 session 相同，直接报错
+                if (sessionId == client.sessionId) {
+                    resultMap["result"] = "当前已是该会话，无需切换"
+                    return@register resultMap
+                }
+
+                registry.restoreSession(groupId, sessionId)
+
+                // 重新初始化 memory/ability/subAgent
+                val newClient = registry.getClient(groupId)
+                if (newClient != null) {
+                    initMemoryForClient(groupId, newClient, newClient.robotParam)
+                    initAbilityReflection(groupId, newClient, newClient.robotParam)
+                    initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
+
+                    // 异步发送会话快照，让用户回忆聊天细节
+                    Thread {
+                        try {
+                            replaySessionSnapshot(groupId, newClient)
+                        } catch (e: Exception) {
+                            log.error("发送会话快照失败, groupId={}, sessionId={}", groupId, sessionId, e)
+                        }
+                    }.start()
+                }
+            } catch (e: Exception) {
+                log.error("acpRestoreSession 失败", e)
+                resultMap["result"] = "恢复失败: ${e.message}"
             }
             resultMap
         }
@@ -354,6 +448,109 @@ object AcpProxy {
         }
 
         log.info("AcpProxy 命令注册完成")
+    }
+
+    private val DISPATCH_MARKER = "dispatch_subagent"
+    private val SUB_AGENT_RESULTS_MARKER = "Sub-Agent Results"
+    private val DISPATCH_PATTERN = java.util.regex.Pattern.compile(
+        "\\{\\s*\"action\"\\s*:\\s*\"dispatch_subagent\".*?\"tasks\"\\s*:\\s*\\[.*?]\\s*}",
+        java.util.regex.Pattern.DOTALL
+    )
+
+    /**
+     * 将恢复的会话历史以快照形式异步推送给 molachat，让用户回忆聊天细节。
+     * <p>
+     * 回放规则：
+     * - USER 消息：普通消息以用户标识展示；sub_agent_results 以子 Agent 结果展示
+     * - ASSISTANT 消息：包含 dispatch_subagent 时解析并展示派发任务；否则正常 onMessage
+     * - TOOL 消息：通过 onToolCall 展示
+     */
+    private fun replaySessionSnapshot(groupId: String, client: AcpClient) {
+        val listener = client.globalListener ?: return
+        val sessionId = client.sessionId ?: return
+        val history = client.historyManager.getFullHistory(sessionId)
+        if (history.isEmpty()) return
+
+        // 整个回放过程开启缓冲，最后一次性发送
+        val bufferListener = listener as? com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener
+        bufferListener?.beginBuffer()
+
+        for (msg in history) {
+            when (msg.role) {
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.USER -> {
+                    val content = msg.content ?: continue
+                    if (content.contains(SUB_AGENT_RESULTS_MARKER)) {
+                        // 子 Agent 结果回传，按每个子 Agent 逐条展示
+                        val agentBlockPattern = Regex("### (.+?)\\n状态: (.+?)\\n([\\s\\S]*?)(?=### |请综合以上|$)")
+                        val matches = agentBlockPattern.findAll(content)
+                        var matched = false
+                        for (m in matches) {
+                            matched = true
+                            val agentName = m.groupValues[1].trim()
+                            val status = m.groupValues[2].trim()
+                            val detail = m.groupValues[3].trim()
+                            if (status == "SUCCESS") {
+                                listener.onSubAgentEvent("AGENT_COMPLETE", agentName, detail)
+                            } else {
+                                listener.onSubAgentEvent("AGENT_ERROR", agentName, detail)
+                            }
+                        }
+                        if (!matched) {
+                            // 兜底：无法解析时整体展示
+                            listener.onSubAgentEvent("AGENT_COMPLETE", "agent派发结果", content)
+                        }
+                    } else {
+                        listener.onMessage("**🧑 用户：**\n${content}\n\n---\n\n")
+                    }
+                }
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.ASSISTANT -> {
+                    val content = msg.content ?: continue
+                    if (content.contains(DISPATCH_MARKER)) {
+                        // 解析 dispatch_subagent JSON，展示派发的任务入参
+                        val matcher = DISPATCH_PATTERN.matcher(content)
+                        if (matcher.find()) {
+                            try {
+                                val json = com.google.gson.JsonParser.parseString(matcher.group()).asJsonObject
+                                val tasks = json.getAsJsonArray("tasks")
+                                val sb = StringBuilder("子 Agent 派发任务：\n")
+                                for (t in tasks) {
+                                    val task = t.asJsonObject
+                                    val agent = task.get("agent")?.asString ?: "unknown"
+                                    val title = task.get("title")?.asString ?: ""
+                                    val prompt = task.get("prompt")?.asString ?: ""
+                                    sb.append("- [$agent/$title] $prompt\n")
+                                }
+                                listener.onSubAgentEvent("DISPATCH_START", null, sb.toString())
+                            } catch (e: Exception) {
+                                listener.onSubAgentEvent("DISPATCH_START", null, "子 Agent 派发（解析失败）")
+                            }
+                        }
+                        // dispatch JSON 之外可能还有正常文本，也展示出来
+                        val cleanedContent = content.replace(matcher.group() ?: "", "").trim()
+                        if (cleanedContent.isNotBlank()) {
+                            listener.onMessage("${cleanedContent}\n\n---\n\n")
+                        }
+                    } else if (content.isNotBlank()) {
+                        listener.onMessage("${content}\n\n---\n\n")
+                    }
+                }
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.TOOL -> {
+                    val update = com.google.gson.JsonObject()
+                    if (msg.rawInput != null) update.add("rawInput", msg.rawInput)
+                    if (msg.rawOutput != null) update.add("rawOutput", msg.rawOutput)
+                    listener.onToolCall(
+                        msg.toolCallId ?: "",
+                        msg.toolName ?: "tool",
+                        "completed",
+                        update
+                    )
+                }
+            }
+        }
+
+        // 回放结束，flush 缓冲后再发终止帧
+        bufferListener?.flushBuffer()
+        listener.onComplete("")
     }
 
     /**

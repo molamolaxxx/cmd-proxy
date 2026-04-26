@@ -18,6 +18,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collection;
@@ -32,7 +34,7 @@ import java.util.concurrent.Executors;
  * <ul>
  *   <li>MCP Server 配置加载</li>
  *   <li>流式 prompt 读取与回调</li>
- *   <li>图片处理与会话历史管理</li>
+ *   <li>文件处理与会话历史管理</li>
  *   <li>记忆系统集成（通过 MemoryManager 注入）</li>
  * </ul>
  */
@@ -50,7 +52,7 @@ public class AcpClient extends AbstractAcpClient {
     private final List<Path> mcpConfigPaths;
 
     /** 会话上下文管理器 */
-    private final ConversationHistoryManager historyManager = new ConversationHistoryManager();
+    private final ConversationHistoryManager historyManager;
 
     private AcpResponseListener globalListener;
 
@@ -69,12 +71,24 @@ public class AcpClient extends AbstractAcpClient {
     /** 绑定的 robot 参数，构造时传入，不可变 */
     private final AcpRobotParam robotParam;
 
+    /** 强制创建新会话，跳过历史会话恢复（用于 clearContext 场景） */
+    private boolean forceNewSession = false;
+
+    /** 指定恢复的目标 sessionId（用于 acpRestoreSession 场景） */
+    private String targetRestoreSessionId;
+
+    /** session 加载完成时的 turn 数，用于 close 时判断是否有新对话 */
+    private int initialTurnCount;
+
     /**
      * 使用指定 AgentProvider 创建 AcpClient（包级私有，供未来扩展）。
      */
     AcpClient(AgentProvider agentProvider, String workspacePath, String groupId, AcpRobotParam robotParam) {
         super(agentProvider, workspacePath, groupId);
         this.robotParam = robotParam;
+        this.historyManager = new ConversationHistoryManager(
+                robotParam != null && !robotParam.getName().isEmpty()
+                        ? robotParam.getName() : groupId);
         this.globalListener = new DefaultAcpResponseListener(groupId);
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath);
     }
@@ -113,31 +127,178 @@ public class AcpClient extends AbstractAcpClient {
 
     // ==================== 生命周期 ====================
 
-    @Override
-    protected void createSession() throws IOException {
-        JsonObject params = new JsonObject();
-        params.addProperty("cwd", workspacePath);
+    
+        
+            @Override
+            protected void createSession() throws IOException {
+                // 指定恢复目标 sessionId（acpRestoreSession 场景）
+                if (targetRestoreSessionId != null) {
+                    try {
+                        loadSession(targetRestoreSessionId);
+                    } catch (IOException e) {
+                        if (tryKillConflictingProcess(e)) {
+                            logger.info("已终止占用进程，重试 session/load (restore), sessionId={}", targetRestoreSessionId);
+                            loadSession(targetRestoreSessionId);
+                        } else {
+                            throw e;
+                        }
+                    }
+                    historyManager.saveLastSessionId(targetRestoreSessionId);
+                    return;
+                }
 
-        JsonArray mcpServers = loadMcpServersFromConfigs();
-        params.add("mcpServers", mcpServers);
-        logger.info("session/new 携带 {} 个 MCP server", mcpServers.size());
+                // clearContext 场景下强制创建新会话，跳过历史恢复
+                if (!forceNewSession) {
+                    String latestSessionId = historyManager.findLatestSessionId();
+                    if (latestSessionId != null) {
+                        try {
+                            loadSession(latestSessionId);
+                            return;
+                        } catch (IOException e) {
+                            // 如果是 "Session is active in another process"，尝试 kill 占用进程后重试
+                            if (tryKillConflictingProcess(e)) {
+                                try {
+                                    logger.info("已终止占用进程，重试 session/load, sessionId={}", latestSessionId);
+                                    loadSession(latestSessionId);
+                                    return;
+                                } catch (IOException retryEx) {
+                                    logger.warn("终止占用进程后 session/load 仍然失败，回退到 session/new, sessionId={}", latestSessionId, retryEx);
+                                }
+                            } else {
+                                logger.warn("session/load 失败，回退到 session/new, sessionId={}", latestSessionId, e);
+                            }
+                            historyManager.reset();
+                        }
+                    }
+                }
 
-        JsonObject response = sendRequest("session/new", params);
-        JsonObject result = response.getAsJsonObject("result");
-        setSessionId(result.get("sessionId").getAsString());
-        logger.info("ACP session 创建成功: {}", getSessionId());
-    }
+                newSession();
+            }
 
-    public void send(String userInput, List<String> imageBase64List) {
+        private static final Pattern PID_PATTERN = Pattern.compile("PID\\s+(\\d+)");
+
+        /**
+         * 检查异常是否为 "Session is active in another process" 错误，
+         * 如果是则尝试 kill 该进程。
+         *
+         * @return true 表示成功终止了占用进程，调用方可以重试 loadSession
+         */
+        private boolean tryKillConflictingProcess(IOException e) {
+            String message = e.getMessage();
+            if (message == null || !message.contains("Session is active in another process")) {
+                return false;
+            }
+            Matcher matcher = PID_PATTERN.matcher(message);
+            if (!matcher.find()) {
+                logger.warn("检测到会话被其他进程占用，但无法提取 PID: {}", message);
+                return false;
+            }
+            String pid = matcher.group(1);
+            logger.info("检测到会话被进程占用, PID={}, 尝试终止该进程", pid);
+            try {
+                ProcessBuilder pb = new ProcessBuilder("kill", "-9", pid);
+                pb.redirectErrorStream(true);
+                Process process = pb.start();
+                int exitCode = process.waitFor();
+                if (exitCode == 0) {
+                    logger.info("成功终止占用进程, PID={}", pid);
+                    // 等待一小段时间让资源释放
+                    Thread.sleep(500);
+                    return true;
+                } else {
+                    logger.warn("终止进程失败, PID={}, exitCode={}", pid, exitCode);
+                    return false;
+                }
+            } catch (Exception ex) {
+                logger.warn("终止占用进程时发生异常, PID={}", pid, ex);
+                return false;
+            }
+        }
+
+
+        /**
+         * 通过 session/load 恢复历史会话。
+         * Agent 会通过 session/update 回放完整对话历史，全部回放完成后返回响应。
+         */
+        private void loadSession(String targetSessionId) throws IOException {
+            JsonObject params = new JsonObject();
+            params.addProperty("sessionId", targetSessionId);
+            params.addProperty("cwd", workspacePath);
+
+            JsonArray mcpServers = loadMcpServersFromConfigs();
+            params.add("mcpServers", mcpServers);
+            logger.info("session/load 尝试恢复会话: {}, 携带 {} 个 MCP server", targetSessionId, mcpServers.size());
+
+            JsonObject request = buildRequest("session/load", params);
+            String requestId = request.get("id").getAsString();
+            sendJson(request);
+
+            // 读取 agent 回放的 session/update 通知，直到收到 load 响应
+            int replayedMessages = 0;
+            while (true) {
+                String line = reader.readLine();
+                if (line == null) {
+                    throw new IOException("ACP 进程在 session/load 期间意外关闭");
+                }
+                String trimmed = line.trim();
+                if (!trimmed.startsWith("{")) continue;
+
+                JsonObject msg;
+                try {
+                    msg = JsonParser.parseString(trimmed).getAsJsonObject();
+                } catch (JsonSyntaxException e) {
+                    continue;
+                }
+
+                // 匹配到 load 响应，回放结束
+                if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+                    if (msg.has("error")) {
+                        throw new IOException("session/load 返回错误: " + msg.get("error"));
+                    }
+                    setSessionId(targetSessionId);
+                    historyManager.restoreState(targetSessionId);
+                    initialTurnCount = historyManager.getTurnCount();
+                    logger.info("session/load 成功，已恢复会话: {}, 回放消息数={}", targetSessionId, replayedMessages);
+                    return;
+                }
+
+                // 处理回放的 session/update 通知（静默消费，不推送给 listener）
+                if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
+                    replayedMessages++;
+                    logger.debug("session/load 回放消息: {}", trimmed);
+                }
+            }
+        }
+
+        /**
+         * 创建全新的 ACP 会话。
+         */
+        private void newSession() throws IOException {
+            JsonObject params = new JsonObject();
+            params.addProperty("cwd", workspacePath);
+
+            JsonArray mcpServers = loadMcpServersFromConfigs();
+            params.add("mcpServers", mcpServers);
+            logger.info("session/new 携带 {} 个 MCP server", mcpServers.size());
+
+            JsonObject response = sendRequest("session/new", params);
+            JsonObject result = response.getAsJsonObject("result");
+            setSessionId(result.get("sessionId").getAsString());
+            historyManager.saveLastSessionId(getSessionId());
+            logger.info("ACP session 创建成功: {}", getSessionId());
+        }
+
+
+    public void send(String userInput, List<Map<String, String>> files) {
         if (userInput == null || userInput.trim().isEmpty()) {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
-        historyManager.addImages(imageBase64List);
+        historyManager.saveFiles(sessionId, files);
         state.set(State.BUSY);
         executor.submit(() -> {
             try {
-                sendPrompt(userInput, historyManager.getImageBase64History(), globalListener);
+                sendPrompt(userInput, historyManager.getFileAbsolutePaths(), globalListener);
                 state.set(State.READY);
             } catch (Exception e) {
                 logger.error("ACP send 失败", e);
@@ -177,8 +338,12 @@ public class AcpClient extends AbstractAcpClient {
         // 提交全量记忆提取到异步队列（队列会在 shutdown 时执行完）
         if (memoryManager != null && sessionId != null) {
             try {
-                memoryManager.submitExtractFull(workspacePath, historyManager.getFullHistory(sessionId));
-                memoryManager.incrementSessionCount(workspacePath);
+                if (historyManager.getTurnCount() > initialTurnCount) {
+                    memoryManager.submitExtractFull(workspacePath, historyManager.getFullHistory(sessionId));
+                    memoryManager.incrementSessionCount(workspacePath);
+                } else {
+                    logger.info("本次 session 无新对话，跳过记忆提取, sessionId={}", sessionId);
+                }
             } catch (Exception e) {
                 logger.warn("关闭时提交记忆提取失败", e);
             }
@@ -202,7 +367,7 @@ public class AcpClient extends AbstractAcpClient {
     // ==================== Prompt ====================
 
     
-    private void sendPrompt(String userInput, Collection<String> imageBase64List, AcpResponseListener listener) throws IOException {
+    private void sendPrompt(String userInput, Collection<String> filePaths, AcpResponseListener listener) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
@@ -234,26 +399,25 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
-        JsonArray prompt = new JsonArray();
-
-        // 添加图片内容块
-        if (imageBase64List != null) {
-            for (String base64Data : imageBase64List) {
-                if (base64Data == null || base64Data.isEmpty()) continue;
-                JsonObject imageBlock = new JsonObject();
-                imageBlock.addProperty("type", "image");
-                imageBlock.addProperty("mimeType", guessMimeType(base64Data));
-                imageBlock.addProperty("data", base64Data);
-                prompt.add(imageBlock);
+        // 构建文件路径上下文
+        String fileContext = "";
+        if (filePaths != null && !filePaths.isEmpty()) {
+            StringBuilder fb = new StringBuilder("[Attached Files]\n");
+            for (String path : filePaths) {
+                fb.append("- ").append(path).append("\n");
             }
+            fileContext = fb.toString();
         }
+
+        JsonArray prompt = new JsonArray();
 
         JsonObject textBlock = new JsonObject();
         textBlock.addProperty("type", "text");
-        // 拼接顺序：子Agent上下文 → 记忆 → 时间 → 用户输入
+        // 拼接顺序：子Agent上下文 → 记忆 → 文件路径 → 时间 → 用户输入
         StringBuilder fullTextBuilder = new StringBuilder();
         if (!subAgentContext.isEmpty()) fullTextBuilder.append(subAgentContext).append("\n");
         if (!memoryContext.isEmpty()) fullTextBuilder.append(memoryContext).append("\n");
+        if (!fileContext.isEmpty()) fullTextBuilder.append(fileContext).append("\n");
         fullTextBuilder.append(timeContext).append(userInput);
         textBlock.addProperty("text", fullTextBuilder.toString());
         prompt.add(textBlock);
@@ -428,13 +592,6 @@ public class AcpClient extends AbstractAcpClient {
         }
     }
 
-    private String guessMimeType(String base64Data) {
-        if (base64Data.startsWith("iVBOR")) return "image/png";
-        if (base64Data.startsWith("/9j/")) return "image/jpeg";
-        if (base64Data.startsWith("R0lG")) return "image/gif";
-        if (base64Data.startsWith("UklGR")) return "image/webp";
-        return "image/png";
-    }
 
     // ==================== Getters ====================
 
@@ -442,6 +599,14 @@ public class AcpClient extends AbstractAcpClient {
         if (listener != null) {
             this.globalListener = listener;
         }
+    }
+
+    public void setForceNewSession(boolean forceNewSession) {
+        this.forceNewSession = forceNewSession;
+    }
+
+    public void setTargetRestoreSessionId(String targetRestoreSessionId) {
+        this.targetRestoreSessionId = targetRestoreSessionId;
     }
 
     public AcpResponseListener getGlobalListener() {
