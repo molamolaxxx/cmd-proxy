@@ -46,7 +46,7 @@ public class MemoryPromptTemplate {
         sb.append("- 如果新信息与某条已有记忆的主题高度重叠 → 使用 UPDATE（携带该条的 id），将新信息合并进去\n");
         sb.append("- 如果新信息与已有记忆矛盾 → 使用 UPDATE 覆盖旧内容，而非同时保留两条矛盾记忆\n");
         sb.append("- 只有当信息确实是全新主题时才使用 ADD\n");
-        sb.append("- 当已有记忆接近上限（≥40 条）时，提高 ADD 门槛，只保存高价值信息\n\n");
+        sb.append("- 当已有记忆接近上限（≥25 条）时，提高 ADD 门槛，只保存高价值信息\n\n");
 
         sb.append("## 提取规则\n");
         sb.append("请按以下分类提取记忆，只提取跨 session 有价值的信息：\n\n");
@@ -78,7 +78,7 @@ public class MemoryPromptTemplate {
         sb.append("    \"type\": \"feedback\",\n");
         sb.append("    \"title\": \"简短标题（10 字以内）\",\n");
         sb.append("    \"summary\": \"仅标注主题和类型的关键词式概要，不含具体结论或做法（20 字以内）\",\n");
-        sb.append("    \"detail\": \"What: 具体内容。Why: 为什么重要。Apply: 未来如何应用。（200 字以内）\",\n");
+        sb.append("    \"detail\": \"What: 具体内容，充分记录关键细节和涉及的组件，不要过度压缩。Why: 为什么重要。Apply: 未来如何应用。feedback/user 类型 150~400 字；project/reference 类型按需写够，不设上限，但避免冗余重复。\",\n");
         sb.append("    \"tags\": [\"标签1\", \"标签2\"]\n");
         sb.append("  },\n");
         sb.append("  {\n");

@@ -66,15 +66,19 @@ public class AbilityReflectionPromptTemplate {
 
         // 输出要求
         sb.append("## 输出要求\n");
-        sb.append("请输出一份 Markdown 格式的能力总结文档，包含以下部分：\n");
-        sb.append("1. **核心能力**：基于 skills 定义，你最擅长做什么\n");
-        sb.append("2. **领域知识**：基于记忆积累，你在哪些领域有实际经验\n");
-        sb.append("3. **工具链**：你可以调用哪些外部工具，各自的用途\n");
-        sb.append("4. **局限性**：你做不到什么，需要注意什么\n\n");
+        sb.append("请输出一份精简的 Markdown 能力卡片，总长度严格控制在 800 字以内。\n");
+        sb.append("这份卡片的唯一用途是：让调度 Agent 判断「什么任务该派给你」。\n\n");
+        sb.append("包含以下部分：\n");
+        sb.append("1. **核心能力**（3~6 条）：只列出你独有的、区别于通用编码 Agent 的能力。");
+        sb.append("每条一句话，突出「我能做什么别人做不了的」\n");
+        sb.append("2. **领域知识**（关键词标签）：基于记忆积累，用逗号分隔的标签列表，最多 10 个。");
+        sb.append("格式示例：`ACP协议, LevelDB调优, SVG动画`\n");
+        sb.append("3. **专属工具**：只列外部 MCP Server 工具（如有），不要列内置工具");
+        sb.append("（Bash/Read/Write/Glob/Grep 等所有 Agent 都有）\n");
+        sb.append("4. **关键约束**（1~3 条）：只列该 Agent 特有的限制。");
+        sb.append("不要列通用限制（如「无法启动长时间运行的服务」「无法进行 WCAG 验证」等所有 Agent 共有的约束）\n\n");
         sb.append("直接输出 Markdown 内容，不要包裹在代码块中。\n");
-        sb.append("内容应简洁实用，避免空泛描述，侧重于具体的、可操作的能力点。\n");
-        sb.append("在「局限性」部分，必须明确说明你的代码查阅范围仅限于当前工作空间，");
-        sb.append("无法访问其他项目的代码库。如果记忆中涉及多个项目，需注明哪些能力依赖外部项目、无法在当前工作空间内独立完成。\n");
+        sb.append("不要输出表格。不要输出空泛描述。不要重复通用能力。\n");
 
         return sb.toString();
     }

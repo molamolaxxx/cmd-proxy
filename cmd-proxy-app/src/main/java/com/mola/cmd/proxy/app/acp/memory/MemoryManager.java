@@ -26,8 +26,13 @@ public class MemoryManager implements MemoryManagerBridge {
     private final MemoryDreamer dreamer;
 
     public MemoryManager(MemoryConfig config, String agentProvider) {
+        this(config, agentProvider, null);
+    }
+
+    public MemoryManager(MemoryConfig config, String agentProvider, String robotName) {
         this.config = config;
-        this.fileStore = new MemoryFileStore(config.getBaseDir());
+        String effectiveRobotName = config.isRobotScope() ? robotName : null;
+        this.fileStore = new MemoryFileStore(config.getBaseDir(), effectiveRobotName);
         this.loader = new MemoryLoader(fileStore, config);
         this.extractor = new MemoryExtractor(config, fileStore, agentProvider);
         this.dreamer = new MemoryDreamer(config, fileStore, agentProvider);

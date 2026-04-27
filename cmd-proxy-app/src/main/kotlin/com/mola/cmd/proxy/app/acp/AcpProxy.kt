@@ -560,7 +560,7 @@ object AcpProxy {
 
         val memCfg = robot.memory
         val agentProvider = robot.agentProvider ?: "KIRO_CLI"
-        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg, agentProvider) }
+        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg, agentProvider, robot.name) }
         client.setMemoryManager(mgr)
         setupTurnCallback(client, memCfg, mgr)
     }
@@ -661,7 +661,7 @@ object AcpProxy {
         for (name in allowedNames) {
             val targetRobot = globalRobotRegistry[name] ?: continue
             if (targetRobot.isMemoryEnabled) {
-                val memMgr = MemoryManager(targetRobot.memory, targetRobot.agentProvider ?: "KIRO_CLI")
+                val memMgr = MemoryManager(targetRobot.memory, targetRobot.agentProvider ?: "KIRO_CLI", targetRobot.name)
                 subAgentMemoryMap[name] = memMgr
             }
         }

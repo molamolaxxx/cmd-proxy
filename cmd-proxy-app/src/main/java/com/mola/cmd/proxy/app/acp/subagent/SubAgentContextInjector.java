@@ -112,15 +112,37 @@ public class SubAgentContextInjector {
             return ref.getDescription();
         }
 
-        // 2. ability.md
+        // 2. ability.md（带截断兜底）
         String abilityContent = loadAbilityMd(targetRobot.getName());
         if (abilityContent != null && !abilityContent.isEmpty()) {
-            return abilityContent;
+            return truncateAbility(abilityContent);
         }
 
         // 3. 兜底 signature
         String sig = targetRobot.getSignature();
         return (sig != null && !sig.isEmpty()) ? sig : "（无能力描述）";
+    }
+
+    /**
+     * 截断 ability 内容。在 ABILITY_SUMMARY_MAX_CHARS 附近按段落边界截断，
+     * 避免截在句子中间。
+     */
+    private String truncateAbility(String content) {
+        if (content.length() <= ABILITY_SUMMARY_MAX_CHARS) {
+            return content;
+        }
+        // 在限制范围内找最后一个段落分隔符
+        int cutoff = content.lastIndexOf("\n\n", ABILITY_SUMMARY_MAX_CHARS);
+        if (cutoff <= 0) {
+            // 没找到段落分隔，退而求其次找换行
+            cutoff = content.lastIndexOf("\n", ABILITY_SUMMARY_MAX_CHARS);
+        }
+        if (cutoff <= 0) {
+            cutoff = ABILITY_SUMMARY_MAX_CHARS;
+        }
+        logger.info("ability 内容超长（{}字符），截断至{}字符, robotName 见调用方",
+                content.length(), cutoff);
+        return content.substring(0, cutoff).trim() + "\n\n（...已截断，完整能力描述见 ability.md）";
     }
 
     /**

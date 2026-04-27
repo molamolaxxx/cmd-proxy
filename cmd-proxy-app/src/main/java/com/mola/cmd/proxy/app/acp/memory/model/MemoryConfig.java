@@ -15,6 +15,9 @@ public class MemoryConfig {
     private int projectExpireDays = 30;
     private int subClientTimeout = 120;
 
+    /** 记忆隔离级别："workspace"（默认，同工作区共享）或 "robot"（按 robot name 隔离） */
+    private String scope = "workspace";
+
     // Dream（记忆整理）相关配置
     private boolean dreamEnabled = true;
     private int dreamMinHours = 24;
@@ -43,6 +46,11 @@ public class MemoryConfig {
 
     public int getSubClientTimeout() { return subClientTimeout; }
     public void setSubClientTimeout(int subClientTimeout) { this.subClientTimeout = subClientTimeout; }
+
+    public String getScope() { return scope; }
+    public void setScope(String scope) { this.scope = scope; }
+
+    public boolean isRobotScope() { return "robot".equals(scope); }
 
     public boolean isDreamEnabled() { return dreamEnabled; }
     public void setDreamEnabled(boolean dreamEnabled) { this.dreamEnabled = dreamEnabled; }

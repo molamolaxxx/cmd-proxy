@@ -63,9 +63,16 @@ public class MemoryFileStore {
     private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 
     private final String baseDir;
+    /** scope=robot 时非 null，用于在 workspacePath 下追加 robot 子目录 */
+    private final String robotName;
 
     public MemoryFileStore(String baseDir) {
+        this(baseDir, null);
+    }
+
+    public MemoryFileStore(String baseDir, String robotName) {
         this.baseDir = baseDir;
+        this.robotName = robotName;
     }
 
     // ==================== 索引操作 ====================
@@ -490,7 +497,11 @@ public class MemoryFileStore {
     }
 
     private Path getProjectDir(String workspacePath) {
-        return Paths.get(baseDir, PathUtils.sanitizePath(workspacePath));
+        Path dir = Paths.get(baseDir, PathUtils.sanitizePath(workspacePath));
+        if (robotName != null) {
+            dir = dir.resolve(PathUtils.sanitizePath(robotName));
+        }
+        return dir;
     }
 
     /**
