@@ -53,7 +53,8 @@ public class MemoryLoader {
         sb.append("- 如果不确定是否相关，宁可多读一条也不要漏读\n");
         sb.append("⚠️ 记忆文件由记忆系统自动管理，你只能读取，严禁写入、修改或删除。\n");
         sb.append("⚠️ 当用户要求管理记忆（删除、修改、新增、忘记等）时，你无需自己操作，只需在回复中明确表达你理解了用户的意图即可。");
-        sb.append("记忆管理子系统会在后续自动读取本次对话，识别并执行相应的记忆操作。\n\n");
+        sb.append("记忆管理子系统会在后续自动读取本次对话，识别并执行相应的记忆操作。\n");
+        sb.append("- 记忆条目如果标注了「关联 skill」，当任务涉及该领域时，必须使用 skill 工具加载对应的 skill，再结合记忆明细一起使用\n\n");
 
         int lineCount = 4; // 头部已用行数
         int maxLines = config.getIndexMaxLines();
@@ -65,9 +66,12 @@ public class MemoryLoader {
             String tagStr = (entry.getTags() != null && !entry.getTags().isEmpty())
                     ? " #" + String.join(" #", entry.getTags())
                     : "";
-            sb.append(String.format("%d. [%s] %s：%s%s\n   \uD83D\uDCC4 %s\n\n",
+            String skillHint = (entry.getRelatedSkills() != null && !entry.getRelatedSkills().isEmpty())
+                    ? "\n   🔗 关联 skill: " + String.join(", ", entry.getRelatedSkills())
+                    : "";
+            sb.append(String.format("%d. [%s] %s：%s%s\n   \uD83D\uDCC4 %s%s\n\n",
                     shown, entry.getType(), entry.getTitle(),
-                    entry.getSummary(), tagStr, entry.getFile()));
+                    entry.getSummary(), tagStr, entry.getFile(), skillHint));
             lineCount += 3;
         }
 

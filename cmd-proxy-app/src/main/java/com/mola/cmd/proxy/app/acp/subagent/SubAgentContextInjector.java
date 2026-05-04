@@ -65,6 +65,11 @@ public class SubAgentContextInjector {
             if (isSelf) {
                 sb.append(" ⚡ (self-fork: 你自己的并行分身，拥有相同的能力，适合并行处理独立子任务)");
             } else {
+                // 标注工作目录
+                String workDir = targetRobot.getWorkDir();
+                if (workDir != null && !workDir.isEmpty()) {
+                    sb.append("\n  工作目录: ").append(workDir);
+                }
                 String desc = resolveDescription(ref, targetRobot);
                 sb.append("\n  能力: ").append(desc);
             }
@@ -93,12 +98,17 @@ public class SubAgentContextInjector {
         result.append("\n");
         result.append("不要使用能力描述、工具名、技能名等作为 agent 字段的值。\n\n");
 
+        // 派发注意事项
+        result.append("## 派发注意事项\n");
+        result.append("每个子 Agent 只能访问其标注的「工作目录」下的文件。派发任务前请确认目标 Agent 的工作目录与任务所需的文件路径一致。self-fork 继承你当前的工作目录。\n\n");
+
         // 调用格式 + 示例
         result.append("## 调用格式\n");
         result.append("当你需要调用子 Agent 时，请在回复中输出以下 JSON（独占一行，不要包裹在代码块中）：\n");
         result.append("{\"action\":\"dispatch_subagent\",\"tasks\":[");
         result.append("{\"agent\":\"").append(validNames.get(0)).append("\",\"title\":\"简短任务名\",\"prompt\":\"具体任务描述\"}]}\n");
-        result.append("其中 title 是任务的简短名称（2~6个字），用于在执行过程中区分同一 agent 的不同任务。\n\n");
+        result.append("其中 title 是任务的简短名称（2~6个字），用于在执行过程中区分同一 agent 的不同任务。\n");
+        result.append("tasks 数组中可以包含多个任务，同一个 agent 也可以派发多个不同任务，它们会各自启动独立实例并行执行。\n\n");
 
         return result.toString();
     }

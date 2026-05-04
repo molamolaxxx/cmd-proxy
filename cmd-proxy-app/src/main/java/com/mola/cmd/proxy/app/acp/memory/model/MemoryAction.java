@@ -19,6 +19,7 @@ public class MemoryAction {
     private String summary;
     private String detail;
     private List<String> tags = new ArrayList<>();
+    private List<String> relatedSkills = new ArrayList<>();
 
     public ActionType getAction() { return action; }
     public void setAction(ActionType action) { this.action = action; }
@@ -40,4 +41,7 @@ public class MemoryAction {
 
     public List<String> getTags() { return tags; }
     public void setTags(List<String> tags) { this.tags = tags; }
+
+    public List<String> getRelatedSkills() { return relatedSkills; }
+    public void setRelatedSkills(List<String> relatedSkills) { this.relatedSkills = relatedSkills; }
 }

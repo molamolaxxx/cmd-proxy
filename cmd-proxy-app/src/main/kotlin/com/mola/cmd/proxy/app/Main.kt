@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
 import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.acp.AcpRobotParam
+import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
 import com.mola.cmd.proxy.app.mcp.McpProxy
 import com.mola.cmd.proxy.app.utils.LogUtil
 import com.mola.cmd.proxy.app.utils.McpFileUtils
@@ -120,6 +121,7 @@ private fun interactiveAcpConfig(): String {
     while (addMore) {
         println("\n配置第 $robotIndex 个 Robot：")
 
+        // name：必填
         print("  请输入 Robot 名称（name）：")
         var name = readln().trim()
         while (name.isBlank()) {
@@ -127,16 +129,71 @@ private fun interactiveAcpConfig(): String {
             name = readln().trim()
         }
 
-        print("  请输入 Robot 签名描述（signature）：")
+        // signature：可选
+        print("  请输入签名描述（signature，直接回车跳过）：")
         val signature = readln().trim()
 
-        print("  请输入工作目录（workDir，可选，直接回车跳过）：")
-        val workDir = readln().trim()
+        // workDir：必填，目录存在性校验
+        print("  请输入工作目录（workDir）：")
+        var workDir = readln().trim()
+        while (true) {
+            if (workDir.isBlank()) {
+                print("  工作目录不能为空，请重新输入：")
+                workDir = readln().trim()
+                continue
+            }
+            if (!File(workDir).isDirectory) {
+                print("  目录不存在，请重新输入：")
+                workDir = readln().trim()
+                continue
+            }
+            break
+        }
 
-        print("  请输入用户头像URL（avatar，可选，直接回车跳过）：")
-        val avatar = readln().trim()
+        // agentProvider：有默认值
+        print("  请选择 Agent 后端（1=KIRO_CLI, 2=OPENCODE，默认1，直接回车使用默认）：")
+        val providerInput = readln().trim()
+        val agentProvider = if (providerInput == "2") "OPENCODE" else "KIRO_CLI"
 
-        robots.add(AcpRobotParam(name, signature, workDir, avatar))
+        val robot = AcpRobotParam(name, signature, workDir, "")
+        robot.agentProvider = agentProvider
+
+        // 记忆系统默认开启
+        val memoryConfig = MemoryConfig()
+        memoryConfig.isEnabled = true
+        robot.memory = memoryConfig
+
+        // 高级配置（可选）
+        print("\n  是否进入高级配置？(y/n，默认n)：")
+        if (readln().trim().lowercase() == "y") {
+            // avatar：可选，有默认
+            print("    请输入头像URL（avatar，直接回车使用默认头像）：")
+            val avatar = readln().trim()
+            if (avatar.isNotBlank()) {
+                robot.avatar = avatar
+            }
+
+            // description：可选
+            print("    请输入 Robot 描述（description，直接回车跳过）：")
+            val description = readln().trim()
+            if (description.isNotBlank()) {
+                robot.description = description
+            }
+
+            // memory：开关，默认开启
+            print("    是否关闭记忆系统？(y/n，默认n)：")
+            if (readln().trim().lowercase() == "y") {
+                robot.memory = null
+            }
+
+            // onlySubAgent：默认 false
+            print("    该 Robot 是否仅作为子 Agent？(y/n，默认n)：")
+            if (readln().trim().lowercase() == "y") {
+                robot.isOnlySubAgent = true
+            }
+        }
+
+        robots.add(robot)
         println("  ✓ Robot「$name」已添加")
         robotIndex++
 

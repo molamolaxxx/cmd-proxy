@@ -20,6 +20,7 @@ public class MemoryEntry {
     private String sourceSession;
     private String lastAccessedAt;
     private int accessCount;
+    private List<String> relatedSkills = new ArrayList<>();
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -56,4 +57,7 @@ public class MemoryEntry {
 
     public int getAccessCount() { return accessCount; }
     public void setAccessCount(int accessCount) { this.accessCount = accessCount; }
+
+    public List<String> getRelatedSkills() { return relatedSkills; }
+    public void setRelatedSkills(List<String> relatedSkills) { this.relatedSkills = relatedSkills; }
 }

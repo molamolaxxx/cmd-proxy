@@ -127,6 +127,9 @@ public class MemoryFileStore {
             sb.append("type: ").append(entry.getType()).append("\n");
             sb.append("title: ").append(entry.getTitle()).append("\n");
             sb.append("tags: [").append(String.join(", ", entry.getTags())).append("]\n");
+            if (entry.getRelatedSkills() != null && !entry.getRelatedSkills().isEmpty()) {
+                sb.append("relatedSkills: [").append(String.join(", ", entry.getRelatedSkills())).append("]\n");
+            }
             sb.append("createdAt: ").append(entry.getCreatedAt()).append("\n");
             sb.append("updatedAt: ").append(entry.getUpdatedAt()).append("\n");
             if (entry.getSourceSession() != null) {
@@ -222,6 +225,7 @@ public class MemoryFileStore {
                     newEntry.setSummary(action.getSummary());
                     newEntry.setDetail(action.getDetail());
                     newEntry.setTags(action.getTags());
+                    newEntry.setRelatedSkills(action.getRelatedSkills());
                     newEntry.setCreatedAt(now);
                     newEntry.setUpdatedAt(now);
                     writeDetail(workspacePath, newEntry);
@@ -241,6 +245,9 @@ public class MemoryFileStore {
                             if (action.getDetail() != null) entry.setDetail(action.getDetail());
                             if (action.getTags() != null && !action.getTags().isEmpty()) {
                                 entry.setTags(action.getTags());
+                            }
+                            if (action.getRelatedSkills() != null && !action.getRelatedSkills().isEmpty()) {
+                                entry.setRelatedSkills(action.getRelatedSkills());
                             }
                             entry.setUpdatedAt(now);
                             writeDetail(workspacePath, entry);

@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 import com.mola.cmd.proxy.app.acp.memory.prompt.MemoryPromptTemplate;
@@ -10,6 +11,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.StringReader;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
@@ -104,7 +109,8 @@ public class MemoryExtractor {
     private void doExtract(String workspacePath, List<ContextMessage> history) {
         String historyText = serializeHistory(history);
         MemoryIndex existingIndex = fileStore.loadIndex(workspacePath);
-        String prompt = MemoryPromptTemplate.build(historyText, existingIndex);
+        List<String> availableSkills = scanAvailableSkills(workspacePath);
+        String prompt = MemoryPromptTemplate.build(historyText, existingIndex, availableSkills);
 
         String groupId = "memory_extractor__" + workspacePath.hashCode();
 
@@ -205,6 +211,13 @@ public class MemoryExtractor {
                     }
                     action.setTags(tags);
                 }
+                if (obj.has("relatedSkills") && obj.get("relatedSkills").isJsonArray()) {
+                    List<String> skills = new ArrayList<>();
+                    for (JsonElement skill : obj.getAsJsonArray("relatedSkills")) {
+                        skills.add(skill.getAsString());
+                    }
+                    action.setRelatedSkills(skills);
+                }
 
                 actions.add(action);
             }
@@ -255,5 +268,33 @@ public class MemoryExtractor {
             extractQueue.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    // ==================== Skill 扫描 ====================
+
+    /**
+     * 扫描当前 workspace 下可用的 skill 目录名列表。
+     * 通过 AgentProvider 获取 skills 相对路径，兼容不同 agent 实现。
+     */
+    private List<String> scanAvailableSkills(String workspacePath) {
+        List<String> skills = new ArrayList<>();
+        try {
+            String skillsRelPath = AgentProviderRouter.getInstance()
+                    .resolve(agentProvider).getSkillsRelativePath();
+            Path skillsDir = Paths.get(workspacePath, skillsRelPath);
+            if (!Files.exists(skillsDir) || !Files.isDirectory(skillsDir)) {
+                return skills;
+            }
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(skillsDir)) {
+                for (Path entry : stream) {
+                    if (Files.isDirectory(entry) && Files.exists(entry.resolve("SKILL.md"))) {
+                        skills.add(entry.getFileName().toString());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("扫描可用 skills 失败, workspacePath={}", workspacePath, e);
+        }
+        return skills;
     }
 }

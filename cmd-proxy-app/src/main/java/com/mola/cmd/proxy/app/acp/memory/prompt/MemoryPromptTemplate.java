@@ -3,6 +3,8 @@ package com.mola.cmd.proxy.app.acp.memory.prompt;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryIndex;
 
+import java.util.List;
+
 /**
  * 记忆提取 prompt 模板，构建发送给子 Client 的指令文本。
  */
@@ -13,11 +15,23 @@ public class MemoryPromptTemplate {
     /**
      * 构建完整的记忆提取 prompt。
      *
-     * @param historyText   序列化后的对话历史文本
-     * @param existingIndex 已有记忆索引（用于去重和更新判断）
+     * @param historyText    序列化后的对话历史文本
+     * @param existingIndex  已有记忆索引（用于去重和更新判断）
      * @return 完整 prompt 文本
      */
     public static String build(String historyText, MemoryIndex existingIndex) {
+        return build(historyText, existingIndex, null);
+    }
+
+    /**
+     * 构建完整的记忆提取 prompt。
+     *
+     * @param historyText    序列化后的对话历史文本
+     * @param existingIndex  已有记忆索引（用于去重和更新判断）
+     * @param availableSkills 当前可用的 skill 名称列表（可为 null）
+     * @return 完整 prompt 文本
+     */
+    public static String build(String historyText, MemoryIndex existingIndex, List<String> availableSkills) {
         int existingCount = (existingIndex != null) ? existingIndex.getMemories().size() : 0;
 
         StringBuilder sb = new StringBuilder();
@@ -69,6 +83,18 @@ public class MemoryPromptTemplate {
         sb.append("- Git 历史可查的变更记录\n");
         sb.append("- 工具调用的原始输入输出文本\n\n");
 
+        sb.append("## Skill 关联\n");
+        sb.append("每条记忆可以关联 0~N 个 skill 名称。当该记忆被激活时，agent 应同时加载关联的 skill 以获得完整的操作指南。\n");
+        sb.append("判断依据：该记忆涉及的领域知识，是否有对应的 skill 能提供代码架构、工作流或操作规范方面的补充。\n");
+        sb.append("- 如果对话中涉及的项目/模块有对应的 skill（如 cmd-proxy 项目有 cmd-proxy skill），应关联\n");
+        sb.append("- 如果记忆内容是通用偏好（如沟通风格、语言偏好），通常不需要关联 skill\n");
+        sb.append("- relatedSkills 填写 skill 的 name（即 skill 目录名），如 [\"cmd-proxy\", \"molachat\"]\n\n");
+
+        // 列出当前可用的 skill 名称供参考
+        if (availableSkills != null && !availableSkills.isEmpty()) {
+            sb.append("当前可用的 skill 列表：").append(String.join(", ", availableSkills)).append("\n\n");
+        }
+
         sb.append("## 输出格式\n");
         sb.append("请以 JSON 数组返回，每条记忆格式如下：\n");
         sb.append("```json\n");
@@ -79,7 +105,8 @@ public class MemoryPromptTemplate {
         sb.append("    \"title\": \"简短标题（10 字以内）\",\n");
         sb.append("    \"summary\": \"仅标注主题和类型的关键词式概要，不含具体结论或做法（20 字以内）\",\n");
         sb.append("    \"detail\": \"What: 具体内容，充分记录关键细节和涉及的组件，不要过度压缩。Why: 为什么重要。Apply: 未来如何应用。feedback/user 类型 150~400 字；project/reference 类型按需写够，不设上限，但避免冗余重复。\",\n");
-        sb.append("    \"tags\": [\"标签1\", \"标签2\"]\n");
+        sb.append("    \"tags\": [\"标签1\", \"标签2\"],\n");
+        sb.append("    \"relatedSkills\": [\"skill-name\"]\n");
         sb.append("  },\n");
         sb.append("  {\n");
         sb.append("    \"action\": \"UPDATE\",\n");
@@ -88,7 +115,8 @@ public class MemoryPromptTemplate {
         sb.append("    \"title\": \"更新后的标题\",\n");
         sb.append("    \"summary\": \"更新后的概要\",\n");
         sb.append("    \"detail\": \"合并新旧信息后的完整内容\",\n");
-        sb.append("    \"tags\": [\"标签1\"]\n");
+        sb.append("    \"tags\": [\"标签1\"],\n");
+        sb.append("    \"relatedSkills\": [\"skill-name\"]\n");
         sb.append("  },\n");
         sb.append("  {\n");
         sb.append("    \"action\": \"DELETE\",\n");
