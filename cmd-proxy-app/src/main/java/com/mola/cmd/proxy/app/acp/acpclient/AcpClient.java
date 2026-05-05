@@ -8,27 +8,25 @@ import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener;
+import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher;
-import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentResult;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentTask;
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * ACP 主 Client，继承 {@link AbstractAcpClient}，负责：
@@ -68,6 +66,12 @@ public class AcpClient extends AbstractAcpClient {
 
     /** 全局 robot 注册表引用，用于子 Agent 上下文构建 */
     private Map<String, AcpRobotParam> globalRobotRegistry;
+
+    /** 定时任务管理器，通过 setter 注入，未启用时为 null */
+    private ScheduleTaskManager scheduleTaskManager;
+
+    /** 定时任务上下文注入器，通过 setter 注入 */
+    private ScheduleContextInjector scheduleContextInjector;
 
     /** 绑定的 robot 参数，构造时传入，不可变 */
     private final AcpRobotParam robotParam;
@@ -124,6 +128,15 @@ public class AcpClient extends AbstractAcpClient {
         this.subAgentDispatcher = dispatcher;
         this.subAgentContextInjector = injector;
         this.globalRobotRegistry = robotRegistry;
+    }
+
+    /**
+     * 注入定时任务支持。
+     */
+    public void setScheduleSupport(ScheduleTaskManager taskManager,
+                                   ScheduleContextInjector contextInjector) {
+        this.scheduleTaskManager = taskManager;
+        this.scheduleContextInjector = contextInjector;
     }
 
     // ==================== 生命周期 ====================
@@ -291,6 +304,10 @@ public class AcpClient extends AbstractAcpClient {
 
 
     public void send(String userInput, List<Map<String, String>> files) {
+        send(userInput, files, PromptOptions.defaults());
+    }
+
+    public void send(String userInput, List<Map<String, String>> files, PromptOptions options) {
         if (userInput == null || userInput.trim().isEmpty()) {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
@@ -299,7 +316,7 @@ public class AcpClient extends AbstractAcpClient {
         state.set(State.BUSY);
         executor.submit(() -> {
             try {
-                sendPrompt(userInput, historyManager.getFileAbsolutePaths(), globalListener);
+                sendPrompt(userInput, historyManager.getFileAbsolutePaths(), globalListener, options);
                 state.set(State.READY);
             } catch (Exception e) {
                 logger.error("ACP send 失败", e);
@@ -369,6 +386,10 @@ public class AcpClient extends AbstractAcpClient {
 
     
     private void sendPrompt(String userInput, Collection<String> filePaths, AcpResponseListener listener) throws IOException {
+        sendPrompt(userInput, filePaths, listener, PromptOptions.defaults());
+    }
+
+    private void sendPrompt(String userInput, Collection<String> filePaths, AcpResponseListener listener, PromptOptions options) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
@@ -400,6 +421,17 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
+        // 注入定时任务上下文
+        String scheduleContext = "";
+        if (scheduleContextInjector != null) {
+            try {
+                boolean scheduleEnabled = robotParam == null || robotParam.isScheduleEnabled();
+                scheduleContext = scheduleContextInjector.buildContext(scheduleEnabled, options.isScheduleExecution());
+            } catch (Exception e) {
+                logger.warn("构建定时任务上下文失败，跳过", e);
+            }
+        }
+
         // 构建文件路径上下文
         String fileContext = "";
         if (filePaths != null && !filePaths.isEmpty()) {
@@ -414,9 +446,10 @@ public class AcpClient extends AbstractAcpClient {
 
         JsonObject textBlock = new JsonObject();
         textBlock.addProperty("type", "text");
-        // 拼接顺序：子Agent上下文 → 记忆 → 文件路径 → 时间 → 用户输入
+        // 拼接顺序：子Agent上下文 → 定时任务上下文 → 记忆 → 文件路径 → 时间 → 用户输入
         StringBuilder fullTextBuilder = new StringBuilder();
         if (!subAgentContext.isEmpty()) fullTextBuilder.append(subAgentContext).append("\n");
+        if (!scheduleContext.isEmpty()) fullTextBuilder.append(scheduleContext).append("\n");
         if (!memoryContext.isEmpty()) fullTextBuilder.append(memoryContext).append("\n");
         if (!fileContext.isEmpty()) fullTextBuilder.append(fileContext).append("\n");
         fullTextBuilder.append(timeContext).append(userInput);
@@ -434,9 +467,10 @@ public class AcpClient extends AbstractAcpClient {
         StringBuilder fullResponse = new StringBuilder();
         // 缓存 toolCallId → title，防止后续 update 中 title 为空
         Map<String, String> toolTitleCache = new HashMap<>();
-        // 缓冲过滤器：拦截 dispatch_subagent JSON，避免推送给用户
+        // 缓冲过滤器：拦截 dispatch_subagent / schedule_task / manage_schedule JSON，避免推送给用户
+        boolean scheduleFilterEnabled = scheduleTaskManager != null;
         DispatchBufferFilter bufferFilter = new DispatchBufferFilter(
-                listener, subAgentDispatcher != null);
+                listener, subAgentDispatcher != null, scheduleFilterEnabled);
         while (true) {
             String line = reader.readLine();
             if (line == null) {
@@ -468,6 +502,11 @@ public class AcpClient extends AbstractAcpClient {
 
                 // flush 缓冲区（如果有未推送的非 dispatch 内容）
                 bufferFilter.flush();
+
+                // 检测定时任务指令并处理
+                if (handleScheduleAction(fullResponse.toString(), listener)) {
+                    return;
+                }
 
                 // 检测子 Agent 派发指令并处理
                 if (handleSubAgentDispatch(fullResponse.toString(), listener)) {
@@ -585,6 +624,69 @@ public class AcpClient extends AbstractAcpClient {
         }
     }
 
+
+
+    /**
+     * 检测并处理定时任务指令（schedule_task / manage_schedule）。
+     *
+     * @return true 如果检测到并处理了定时任务指令
+     */
+    private boolean handleScheduleAction(String fullResponse, AcpResponseListener listener) {
+        if (scheduleTaskManager == null) return false;
+
+        try {
+            String robotName = robotParam != null ? robotParam.getName() : groupId;
+            String resultText = scheduleTaskManager.detectAndHandle(fullResponse, robotName);
+            if (resultText == null) return false;
+
+            // UI 事件推送：根据 action 类型决定展开/收起
+            boolean isCreate = fullResponse.contains("schedule_task");
+            String eventType = isCreate ? "SCHEDULE_CREATE" : "SCHEDULE_MANAGE";
+            listener.onScheduleEvent(eventType, resultText, isCreate);
+
+            logger.info("定时任务指令处理完成");
+            sendPrompt(resultText, null, listener);
+            return true;
+
+        } catch (Exception e) {
+            logger.error("定时任务指令处理失败", e);
+            try {
+                sendPrompt("[定时任务操作结果]\n操作失败: " + e.getMessage(), null, listener);
+            } catch (IOException ioe) {
+                logger.error("发送错误结果失败", ioe);
+                listener.onComplete(fullResponse);
+            }
+            return true;
+        }
+    }
+
+
+
+    /**
+     * 检测工具调用是否读取了记忆明细文件，触发访问强化。
+        if (braceStart < 0) return null;
+
+        int braces = 0;
+        boolean inString = false;
+        boolean escaped = false;
+
+        for (int i = braceStart; i < fullResponse.length(); i++) {
+            char c = fullResponse.charAt(i);
+            if (escaped) { escaped = false; continue; }
+            if (c == '\\' && inString) { escaped = true; continue; }
+            if (c == '"') { inString = !inString; continue; }
+            if (inString) continue;
+
+            if (c == '{') braces++;
+            else if (c == '}') {
+                braces--;
+                if (braces == 0) {
+                    return fullResponse.substring(braceStart, i + 1);
+                }
+            }
+        }
+        return null;
+    }
 
 
     /**

@@ -15,6 +15,7 @@ public class AcpRobotParam {
     private String agentProvider = "KIRO_CLI";
     private List<SubAgentRef> subAgents;
     private boolean onlySubAgent;
+    private boolean scheduleEnabled = false;
 
     public AcpRobotParam() {
     }
@@ -116,5 +117,13 @@ public class AcpRobotParam {
 
     public void setOnlySubAgent(boolean onlySubAgent) {
         this.onlySubAgent = onlySubAgent;
+    }
+
+    public boolean isScheduleEnabled() {
+        return scheduleEnabled;
+    }
+
+    public void setScheduleEnabled(boolean scheduleEnabled) {
+        this.scheduleEnabled = scheduleEnabled;
     }
 }

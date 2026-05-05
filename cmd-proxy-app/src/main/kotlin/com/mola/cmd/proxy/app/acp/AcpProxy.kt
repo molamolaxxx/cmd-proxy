@@ -12,6 +12,9 @@ import com.mola.cmd.proxy.app.acp.memory.MemoryManager
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector
+import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
 import org.slf4j.Logger
@@ -34,6 +37,9 @@ object AcpProxy {
 
     /** 全局 robot 注册表，name -> AcpRobotParam */
     private val globalRobotRegistry = ConcurrentHashMap<String, AcpRobotParam>()
+
+    /** 定时任务管理器（全局单例） */
+    private val scheduleTaskManager = ScheduleTaskManager()
 
     fun start(
         cmdGroupList: List<String>,
@@ -84,6 +90,9 @@ object AcpProxy {
                 // 初始化子 Agent 派发
                 initSubAgentDispatcher(groupId, client, robot)
 
+                // 初始化定时任务
+                initScheduleSupport(groupId, client, robot)
+
                 log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
                     groupId, robot?.name ?: "unknown", workDir ?: "default",
                     robot?.isMemoryEnabled ?: false,
@@ -92,6 +101,9 @@ object AcpProxy {
                 log.error("ACP client 冷加载失败, groupId={}", groupId, e)
             }
         }
+
+        // 启动定时任务调度器
+        startScheduler(groupRobotMap)
 
         // 会话注册完成后，调用 acpSyncRobots 通知服务端同步 robot 信息
         if (!robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank() && cmdGroupList.isNotEmpty()) {
@@ -151,6 +163,7 @@ object AcpProxy {
                     initMemoryForClient(groupId, newClient, newClient.robotParam)
                     initAbilityReflection(groupId, newClient, newClient.robotParam)
                     initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
+                    initScheduleSupport(groupId, newClient, newClient.robotParam)
                 }
 
                 resultMap["result"] = "已开启新会话"
@@ -449,6 +462,8 @@ object AcpProxy {
 
     private val DISPATCH_MARKER = "dispatch_subagent"
     private val SUB_AGENT_RESULTS_MARKER = "Sub-Agent Results"
+    private val SCHEDULE_RESULT_MARKER = "[定时任务操作结果]"
+    private val SCHEDULE_LIST_MARKER = "[定时任务列表]"
     private val DISPATCH_PATTERN = java.util.regex.Pattern.compile(
         "\\{\\s*\"action\"\\s*:\\s*\"dispatch_subagent\".*?\"tasks\"\\s*:\\s*\\[.*?]\\s*}",
         java.util.regex.Pattern.DOTALL
@@ -496,6 +511,11 @@ object AcpProxy {
                             // 兜底：无法解析时整体展示
                             listener.onSubAgentEvent("AGENT_COMPLETE", "agent派发结果", content)
                         }
+                    } else if (content.contains(SCHEDULE_RESULT_MARKER) || content.contains(SCHEDULE_LIST_MARKER)) {
+                        // 定时任务操作结果回传
+                        val isCreate = content.contains("操作: create")
+                        val eventType = if (isCreate) "SCHEDULE_CREATE" else "SCHEDULE_MANAGE"
+                        listener.onScheduleEvent(eventType, content, isCreate)
                     } else {
                         listener.onMessage("**🧑 用户：**\n${content}\n\n---\n\n")
                     }
@@ -676,6 +696,61 @@ object AcpProxy {
 
         log.info("子 Agent 派发器初始化完成, groupId={}, subAgents={}",
             groupId, allowedNames)
+    }
+
+    /**
+     * 初始化定时任务支持。
+     */
+    private fun initScheduleSupport(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
+        val injector = ScheduleContextInjector()
+        client.setScheduleSupport(scheduleTaskManager, injector)
+        log.info("定时任务支持初始化完成, groupId={}, scheduleEnabled={}",
+            groupId, robot?.isScheduleEnabled ?: true)
+    }
+
+    /**
+     * 启动定时任务调度器（在所有 client 初始化完成后调用）。
+     */
+    fun startScheduler(groupRobotMap: Map<String, AcpRobotParam>) {
+        // 设置执行回调：检查 client 状态，空闲则新建 session 并执行
+        scheduleTaskManager.setExecutionCallback { robotName, taskId, prompt ->
+            // 找到该 robot 对应的 groupId
+            val targetGroupId = groupRobotMap.entries
+                .firstOrNull { it.value?.name == robotName }?.key
+
+            if (targetGroupId == null) {
+                log.error("定时任务执行失败：找不到 robot '{}' 对应的 groupId", robotName)
+                throw RuntimeException("找不到 robot '$robotName' 对应的 groupId")
+            }
+
+            val client = registry.getClient(targetGroupId)
+            if (client == null) {
+                log.error("定时任务执行失败：groupId '{}' 的 client 不存在", targetGroupId)
+                throw RuntimeException("client 不存在, groupId=$targetGroupId")
+            }
+
+            // 检查 client 是否空闲
+            if (client.state != AbstractAcpClient.State.READY) {
+                log.info("定时任务跳过：client 忙碌, robot={}, state={}", robotName, client.state)
+                false
+            } else {
+                // 新建 session，复用主 client 所有能力
+                registry.createSession(targetGroupId, null, null)
+                val newClient = registry.getClient(targetGroupId)
+                if (newClient != null) {
+                    initMemoryForClient(targetGroupId, newClient, newClient.robotParam)
+                    initAbilityReflection(targetGroupId, newClient, newClient.robotParam)
+                    initSubAgentDispatcher(targetGroupId, newClient, newClient.robotParam)
+                    initScheduleSupport(targetGroupId, newClient, newClient.robotParam)
+                    // 发送定时任务 prompt（防套娃）
+                    newClient.send(prompt, null, PromptOptions.forScheduleExecution())
+                }
+                true
+            }
+        }
+
+        scheduleTaskManager.start()
+        log.info("定时任务调度器已启动")
     }
 
 }

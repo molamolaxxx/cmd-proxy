@@ -38,6 +38,20 @@ public interface AcpResponseListener {
     }
 
     /**
+     * 定时任务事件回调。
+     * <p>
+     * 与 onMessage 分离，让客户端可以用不同的 UI 展示定时任务操作状态。
+     * 默认空实现，向后兼容已有的 Listener 实现。
+     *
+     * @param eventType  事件类型：SCHEDULE_CREATE / SCHEDULE_MANAGE
+     * @param detail     事件详情（JSON 原文或操作摘要）
+     * @param expanded   是否默认展开明细
+     */
+    default void onScheduleEvent(String eventType, String detail, boolean expanded) {
+        // 默认空实现，向后兼容
+    }
+
+    /**
      * agent 回答完成时回调
      *
      * @param fullResponse 完整的回答文本

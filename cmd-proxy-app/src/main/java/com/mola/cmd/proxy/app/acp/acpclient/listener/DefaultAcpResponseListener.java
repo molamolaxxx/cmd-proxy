@@ -24,6 +24,9 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     private boolean buffering = false;
     private final StringBuilder buffer = new StringBuilder();
 
+    /** 追踪最近一次输出内容的末尾字符，用于判断卡片前是否需要补换行 */
+    private char lastChar = '\0';
+
     public DefaultAcpResponseListener(String groupId) {
         this.groupId = groupId;
     }
@@ -86,7 +89,7 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
             sb.append(outputBlock);
             sb.append("\n\n</div></details>\n");
 
-            sendContent(sb.toString(), false);
+            sendCardContent(sb.toString(), false);
         }
     }
 
@@ -155,7 +158,33 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
                         + "<summary>ℹ️ " + escapeMarkdown(safeDetail) + "</summary>"
                         + "</details>\n";
         }
-        sendContent(content, false);
+        sendCardContent(content, false);
+    }
+
+    @Override
+    public void onScheduleEvent(String eventType, String detail, boolean expanded) {
+        String safeDetail = sanitizeCodeFences(detail);
+        String openAttr = expanded ? " open" : "";
+        String content;
+        switch (eventType) {
+            case "SCHEDULE_CREATE":
+                content = "<details class=\"tool-call\"" + openAttr + ">"
+                        + "<summary>⏰ 定时任务创建</summary>"
+                        + "<div class=\"tool-call-body\">\n\n```\n"
+                        + safeDetail + "\n```\n\n</div></details>\n";
+                break;
+            case "SCHEDULE_MANAGE":
+                content = "<details class=\"tool-call\"" + openAttr + ">"
+                        + "<summary>⏰ 定时任务操作</summary>"
+                        + "<div class=\"tool-call-body\">\n\n```\n"
+                        + safeDetail + "\n```\n\n</div></details>\n";
+                break;
+            default:
+                content = "<details class=\"tool-call\"" + openAttr + ">"
+                        + "<summary>⏰ " + escapeMarkdown(safeDetail) + "</summary>"
+                        + "</details>\n";
+        }
+        sendCardContent(content, false);
     }
 
     private static String escapeHtml(String text) {
@@ -181,7 +210,15 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         return text.replaceAll("```[a-zA-Z]*", "").replace("```", "");
     }
 
+    private void sendCardContent(String content, boolean end) {
+        String prefix = (lastChar != '\0' && lastChar != '\n') ? "\n" : "";
+        sendContent(prefix + content, end);
+    }
+
     private void sendContent(String content, boolean end) {
+        if (content.length() > 0) {
+            lastChar = content.charAt(content.length() - 1);
+        }
         if (buffering && !end) {
             buffer.append(content);
             return;

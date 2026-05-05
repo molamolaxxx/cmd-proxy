@@ -191,6 +191,12 @@ private fun interactiveAcpConfig(): String {
             if (readln().trim().lowercase() == "y") {
                 robot.isOnlySubAgent = true
             }
+
+            // scheduleEnabled：默认 false
+            print("    是否启用定时任务能力？(y/n，默认n)：")
+            if (readln().trim().lowercase() == "y") {
+                robot.isScheduleEnabled = true
+            }
         }
 
         robots.add(robot)

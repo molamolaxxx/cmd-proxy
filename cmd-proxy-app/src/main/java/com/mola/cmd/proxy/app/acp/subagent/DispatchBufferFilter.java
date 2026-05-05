@@ -28,10 +28,17 @@ public class DispatchBufferFilter {
     /** 前缀的宽松匹配（LLM 可能在 { 前有换行或空格） */
     private static final String DISPATCH_TRIGGER = "dispatch_subagent";
 
+    /** schedule_task 的特征关键词 */
+    private static final String SCHEDULE_TASK_TRIGGER = "schedule_task";
+    /** manage_schedule 的特征关键词 */
+    private static final String MANAGE_SCHEDULE_TRIGGER = "manage_schedule";
+
     private enum State { NORMAL, BUFFERING }
 
     private final AcpResponseListener listener;
     private final boolean enabled;
+    /** 是否启用定时任务拦截 */
+    private final boolean scheduleEnabled;
 
     private State state = State.NORMAL;
     private final StringBuilder buffer = new StringBuilder();
@@ -43,8 +50,18 @@ public class DispatchBufferFilter {
      * @param enabled  是否启用过滤（未配置 subAgent 时传 false，直通模式）
      */
     public DispatchBufferFilter(AcpResponseListener listener, boolean enabled) {
+        this(listener, enabled, false);
+    }
+
+    /**
+     * @param listener        下游 listener
+     * @param enabled         是否启用 subAgent 派发过滤
+     * @param scheduleEnabled 是否启用定时任务过滤
+     */
+    public DispatchBufferFilter(AcpResponseListener listener, boolean enabled, boolean scheduleEnabled) {
         this.listener = listener;
-        this.enabled = enabled;
+        this.enabled = enabled || scheduleEnabled;
+        this.scheduleEnabled = scheduleEnabled;
     }
 
     /**
@@ -111,9 +128,11 @@ public class DispatchBufferFilter {
     private boolean checkBuffer() {
         String content = buffer.toString();
 
-        // 快速判断：如果缓冲区已经足够长但不包含 dispatch 关键词，不是 dispatch
+        // 快速判断：如果缓冲区已经足够长但不包含任何已知 action 关键词
         if (content.length() > DISPATCH_PREFIX.length()
-                && !content.contains(DISPATCH_TRIGGER)) {
+                && !content.contains(DISPATCH_TRIGGER)
+                && !content.contains(SCHEDULE_TASK_TRIGGER)
+                && !content.contains(MANAGE_SCHEDULE_TRIGGER)) {
             flushBuffer();
             return true;
         }
@@ -130,12 +149,16 @@ public class DispatchBufferFilter {
             return false;
         }
 
-        // 缓冲区足够长，检查是否是完整的 dispatch JSON
-        if (content.contains(DISPATCH_TRIGGER)) {
+        // 缓冲区足够长，检查是否包含已知 action 关键词
+        boolean isKnownAction = content.contains(DISPATCH_TRIGGER)
+                || (scheduleEnabled && content.contains(SCHEDULE_TASK_TRIGGER))
+                || (scheduleEnabled && content.contains(MANAGE_SCHEDULE_TRIGGER));
+
+        if (isKnownAction) {
             // 检查 JSON 是否闭合（简单的花括号计数）
             if (isJsonComplete(content)) {
-                // 确认是 dispatch JSON，吞掉不推送
-                logger.info("缓冲区捕获 dispatch JSON，长度={}", content.length());
+                // 确认是已知 action JSON，吞掉不推送
+                logger.info("缓冲区捕获 action JSON，长度={}", content.length());
                 captured = true;
                 state = State.NORMAL;
                 buffer.setLength(0);
@@ -145,7 +168,7 @@ public class DispatchBufferFilter {
             return false;
         }
 
-        // 不是 dispatch，flush
+        // 不是已知 action，flush
         flushBuffer();
         return true;
     }
