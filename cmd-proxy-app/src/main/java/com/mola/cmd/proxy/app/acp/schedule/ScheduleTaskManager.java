@@ -58,8 +58,8 @@ public class ScheduleTaskManager {
             System.getProperty("user.home") + "/.cmd-proxy/schedules";
     private static final String TASKS_FILE = "tasks.json";
 
-    /** 相对时间表达式：+30m, +2h, +1d */
-    private static final Pattern RELATIVE_TIME_PATTERN = Pattern.compile("^\\+(\\d+)([mhd])$");
+    /** 相对时间表达式：+30s, +30m, +2h, +1d */
+    private static final Pattern RELATIVE_TIME_PATTERN = Pattern.compile("^\\+(\\d+)([smhd])$");
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type TASK_LIST_TYPE = new TypeToken<List<ScheduledTask>>() {}.getType();
@@ -496,13 +496,14 @@ public class ScheduleTaskManager {
     }
 
     private long calculateOnceRunAt(String expr) {
-        // 相对时间：+30m, +2h, +1d
+        // 相对时间：+30s, +30m, +2h, +1d
         Matcher matcher = RELATIVE_TIME_PATTERN.matcher(expr.trim());
         if (matcher.matches()) {
             long value = Long.parseLong(matcher.group(1));
             String unit = matcher.group(2);
             long millis;
             switch (unit) {
+                case "s": millis = value * 1000; break;
                 case "m": millis = value * 60 * 1000; break;
                 case "h": millis = value * 3600 * 1000; break;
                 case "d": millis = value * 86400 * 1000; break;
