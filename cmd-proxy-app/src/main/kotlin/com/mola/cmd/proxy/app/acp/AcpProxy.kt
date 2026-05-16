@@ -15,6 +15,8 @@ import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions
+import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector
+import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
 import org.slf4j.Logger
@@ -41,6 +43,12 @@ object AcpProxy {
     /** 定时任务管理器（全局单例） */
     private val scheduleTaskManager = ScheduleTaskManager()
 
+    /** robotName → groupId 反向索引，用于 talkTo 查找目标 client */
+    private val robotToGroupIdMap = ConcurrentHashMap<String, String>()
+
+    /** TalkTo 消息投递器（全局单例） */
+    private lateinit var talkToDispatcher: TalkToDispatcher
+
     fun start(
         cmdGroupList: List<String>,
         robotsJson: String? = null,
@@ -63,6 +71,18 @@ object AcpProxy {
                 globalRobotRegistry[robot.name] = robot
             }
         }
+
+        // 构建 robotName → groupId 反向索引（取第一个）
+        for ((groupId, robot) in groupRobotMap) {
+            if (robot != null && robot.name.isNotBlank()) {
+                robotToGroupIdMap.putIfAbsent(robot.name, groupId)
+            }
+        }
+
+        // 初始化 TalkTo 消息投递器
+        talkToDispatcher = TalkToDispatcher(
+            globalRobotRegistry, registry, robotToGroupIdMap
+        )
 
         // 冷加载：启动时为每个groupId预创建client
         for (groupId in cmdGroupList) {
@@ -92,6 +112,9 @@ object AcpProxy {
 
                 // 初始化定时任务
                 initScheduleSupport(groupId, client, robot)
+
+                // 初始化 TalkTo 支持
+                initTalkToSupport(groupId, client, robot)
 
                 log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
                     groupId, robot?.name ?: "unknown", workDir ?: "default",
@@ -164,6 +187,7 @@ object AcpProxy {
                     initAbilityReflection(groupId, newClient, newClient.robotParam)
                     initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
                     initScheduleSupport(groupId, newClient, newClient.robotParam)
+                    initTalkToSupport(groupId, newClient, newClient.robotParam)
                 }
 
                 resultMap["result"] = "已开启新会话"
@@ -611,6 +635,7 @@ object AcpProxy {
      */
     private fun initAbilityReflection(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
         if (robot == null || robot.name.isBlank()) return
+        if (!robot.isAbilityAutoRefresh) return
 
         val agentProvider = robot.agentProvider ?: "KIRO_CLI"
         val timeoutSeconds = if (robot.isMemoryEnabled) robot.memory.subClientTimeout else 120
@@ -620,7 +645,7 @@ object AcpProxy {
         val service = abilityServices.getOrPut(groupId) {
             AbilityReflectionService(
                 robot.name, client.workspacePath, agentProvider,
-                robot.description, timeoutSeconds, mcpConfigPaths, memoryManager
+                timeoutSeconds, mcpConfigPaths, memoryManager
             )
         }
 
@@ -633,6 +658,7 @@ object AcpProxy {
      */
     private fun initAbilityReflectionStandalone(groupId: String, robot: AcpRobotParam) {
         if (robot.name.isBlank()) return
+        if (!robot.isAbilityAutoRefresh) return
 
         val agentProvider = robot.agentProvider ?: "KIRO_CLI"
         val workDir = robot.workDir ?: return
@@ -643,7 +669,7 @@ object AcpProxy {
         val service = abilityServices.getOrPut(groupId) {
             AbilityReflectionService(
                 robot.name, workDir, agentProvider,
-                robot.description, timeoutSeconds, mcpConfigPaths, null
+                timeoutSeconds, mcpConfigPaths, null
             )
         }
         service.submitReflection()
@@ -709,6 +735,16 @@ object AcpProxy {
     }
 
     /**
+     * 初始化 TalkTo 支持（如果该 robot 配置了通讯录或系统中有多个 robot）。
+     */
+    private fun initTalkToSupport(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
+        val injector = TalkToContextInjector()
+        client.setTalkToSupport(talkToDispatcher, injector, globalRobotRegistry)
+        log.info("TalkTo 支持初始化完成, groupId={}, contacts={}",
+            groupId, robot?.contacts?.map { it.name } ?: emptyList<String>())
+    }
+
+    /**
      * 启动定时任务调度器（在所有 client 初始化完成后调用）。
      */
     fun startScheduler(groupRobotMap: Map<String, AcpRobotParam>) {
@@ -742,6 +778,7 @@ object AcpProxy {
                     initAbilityReflection(targetGroupId, newClient, newClient.robotParam)
                     initSubAgentDispatcher(targetGroupId, newClient, newClient.robotParam)
                     initScheduleSupport(targetGroupId, newClient, newClient.robotParam)
+                    initTalkToSupport(targetGroupId, newClient, newClient.robotParam)
                     // 发送定时任务 prompt（防套娃）
                     newClient.send(prompt, null, PromptOptions.forScheduleExecution())
                 }
@@ -751,6 +788,31 @@ object AcpProxy {
 
         scheduleTaskManager.start()
         log.info("定时任务调度器已启动")
+    }
+
+    /**
+     * 停止所有 ACP 服务，用于热重载前清理。
+     */
+    fun stop() {
+        log.info("正在停止 ACP 服务...")
+
+        // 停止定时任务调度器
+        try {
+            scheduleTaskManager.stop()
+        } catch (e: Exception) {
+            log.warn("停止定时任务调度器失败", e)
+        }
+
+        // 关闭所有 AcpClient
+        registry.closeAll()
+
+        // 清理内部状态
+        memoryManagers.clear()
+        abilityServices.clear()
+        globalRobotRegistry.clear()
+        robotToGroupIdMap.clear()
+
+        log.info("ACP 服务已停止")
     }
 
 }

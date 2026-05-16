@@ -43,7 +43,6 @@ public class AbilityReflectionService {
     private final String robotName;
     private final String workspacePath;
     private final String agentProvider;
-    private final String description;
     private final int timeoutSeconds;
     private final List<Path> mcpConfigPaths;
     /** 记忆管理器，可为 null（未启用记忆时） */
@@ -61,14 +60,13 @@ public class AbilityReflectionService {
     );
 
     public AbilityReflectionService(String robotName, String workspacePath,
-                                    String agentProvider, String description,
+                                    String agentProvider,
                                     int timeoutSeconds,
                                     List<Path> mcpConfigPaths,
                                     MemoryManager memoryManager) {
         this.robotName = robotName;
         this.workspacePath = workspacePath;
         this.agentProvider = agentProvider;
-        this.description = description != null ? description : "";
         this.timeoutSeconds = timeoutSeconds;
         this.mcpConfigPaths = mcpConfigPaths != null ? mcpConfigPaths : Collections.emptyList();
         this.memoryManager = memoryManager;
@@ -149,7 +147,7 @@ public class AbilityReflectionService {
                 }
             }
 
-            String prompt = AbilityReflectionPromptTemplate.build(description, mcpServerNames, memorySummary);
+            String prompt = AbilityReflectionPromptTemplate.build(mcpServerNames, memorySummary);
             String groupId = "ability_reflection__" + robotName.hashCode();
 
             String response;

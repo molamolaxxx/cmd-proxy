@@ -52,6 +52,20 @@ public interface AcpResponseListener {
     }
 
     /**
+     * TalkTo 消息事件回调。
+     * <p>
+     * 与 onMessage 分离，让客户端可以用不同的 UI 展示 Agent 间通信状态。
+     * 默认空实现，向后兼容已有的 Listener 实现。
+     *
+     * @param eventType  事件类型：TALK_TO_SEND / TALK_TO_RECEIVE
+     * @param robotName  对方 robot 名称（发送时为目标，接收时为来源）
+     * @param content    消息内容
+     */
+    default void onTalkToEvent(String eventType, String robotName, String content) {
+        // 默认空实现，向后兼容
+    }
+
+    /**
      * agent 回答完成时回调
      *
      * @param fullResponse 完整的回答文本

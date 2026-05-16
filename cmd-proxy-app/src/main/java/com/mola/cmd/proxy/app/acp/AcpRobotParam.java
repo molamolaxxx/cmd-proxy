@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp;
 
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentRef;
+import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 
 import java.util.List;
 
@@ -11,11 +12,12 @@ public class AcpRobotParam {
     private String workDir = "";
     private String avatar = "";
     private MemoryConfig memory;
-    private String description = "";
     private String agentProvider = "KIRO_CLI";
+    private boolean abilityAutoRefresh = true;
     private List<SubAgentRef> subAgents;
     private boolean onlySubAgent;
     private boolean scheduleEnabled = false;
+    private List<ContactRef> contacts;
 
     public AcpRobotParam() {
     }
@@ -80,12 +82,12 @@ public class AcpRobotParam {
         return memory != null && memory.isEnabled();
     }
 
-    public String getDescription() {
-        return description;
+    public boolean isAbilityAutoRefresh() {
+        return abilityAutoRefresh;
     }
 
-    public void setDescription(String description) {
-        this.description = description;
+    public void setAbilityAutoRefresh(boolean abilityAutoRefresh) {
+        this.abilityAutoRefresh = abilityAutoRefresh;
     }
 
     public String getAgentProvider() {
@@ -125,5 +127,20 @@ public class AcpRobotParam {
 
     public void setScheduleEnabled(boolean scheduleEnabled) {
         this.scheduleEnabled = scheduleEnabled;
+    }
+
+    public List<ContactRef> getContacts() {
+        return contacts;
+    }
+
+    public void setContacts(List<ContactRef> contacts) {
+        this.contacts = contacts;
+    }
+
+    /**
+     * 该 robot 是否配置了通讯录。
+     */
+    public boolean hasContacts() {
+        return contacts != null && !contacts.isEmpty();
     }
 }

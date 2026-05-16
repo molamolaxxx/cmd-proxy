@@ -187,6 +187,33 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         sendCardContent(content, false);
     }
 
+    @Override
+    public void onTalkToEvent(String eventType, String robotName, String messageContent) {
+        String safeName = escapeMarkdown(robotName);
+        String safeContent = sanitizeCodeFences(messageContent);
+        String content;
+        switch (eventType) {
+            case "TALK_TO_SEND":
+                content = "<details class=\"tool-call\" open>"
+                        + "<summary>📤 发送消息给 " + safeName + "</summary>"
+                        + "<div class=\"tool-call-body\">\n\n```\n"
+                        + safeContent + "\n```\n\n</div></details>\n";
+                break;
+            case "TALK_TO_RECEIVE":
+                content = "<details class=\"tool-call\" open>"
+                        + "<summary>📨 收到来自 " + safeName + " 的消息</summary>"
+                        + "<div class=\"tool-call-body\">\n\n```\n"
+                        + safeContent + "\n```\n\n</div></details>\n";
+                break;
+            default:
+                content = "<details class=\"tool-call\" open>"
+                        + "<summary>💬 " + safeName + "</summary>"
+                        + "<div class=\"tool-call-body\">\n\n```\n"
+                        + safeContent + "\n```\n\n</div></details>\n";
+        }
+        sendCardContent(content, false);
+    }
+
     private static String escapeHtml(String text) {
         if (text == null) return "";
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");

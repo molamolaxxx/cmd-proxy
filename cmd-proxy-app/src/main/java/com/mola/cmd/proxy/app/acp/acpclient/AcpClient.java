@@ -8,13 +8,17 @@ import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener;
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentResult;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentTask;
-import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
-import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
+import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector;
+import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,6 +76,12 @@ public class AcpClient extends AbstractAcpClient {
 
     /** 定时任务上下文注入器，通过 setter 注入 */
     private ScheduleContextInjector scheduleContextInjector;
+
+    /** TalkTo 消息投递器，通过 setter 注入，未配置通讯录时为 null */
+    private TalkToDispatcher talkToDispatcher;
+
+    /** TalkTo 上下文注入器，通过 setter 注入 */
+    private TalkToContextInjector talkToContextInjector;
 
     /** 绑定的 robot 参数，构造时传入，不可变 */
     private final AcpRobotParam robotParam;
@@ -137,6 +147,23 @@ public class AcpClient extends AbstractAcpClient {
                                    ScheduleContextInjector contextInjector) {
         this.scheduleTaskManager = taskManager;
         this.scheduleContextInjector = contextInjector;
+    }
+
+    /**
+     * 注入 TalkTo 支持。
+     *
+     * @param dispatcher      TalkTo 消息投递器
+     * @param injector        TalkTo 上下文注入器
+     * @param robotRegistry   全局 robot 注册表
+     */
+    public void setTalkToSupport(TalkToDispatcher dispatcher,
+                                 TalkToContextInjector injector,
+                                 Map<String, AcpRobotParam> robotRegistry) {
+        this.talkToDispatcher = dispatcher;
+        this.talkToContextInjector = injector;
+        if (robotRegistry != null) {
+            this.globalRobotRegistry = robotRegistry;
+        }
     }
 
     // ==================== 生命周期 ====================
@@ -318,6 +345,8 @@ public class AcpClient extends AbstractAcpClient {
             try {
                 sendPrompt(userInput, historyManager.getFileAbsolutePaths(), globalListener, options);
                 state.set(State.READY);
+                // turn 结束后检查 inbox
+                checkAndDeliverInbox();
             } catch (Exception e) {
                 logger.error("ACP send 失败", e);
                 state.set(State.ERROR);
@@ -432,6 +461,18 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
+        // 注入 TalkTo 通讯录上下文
+        String talkToContext = "";
+        if (talkToContextInjector != null && robotParam != null
+                && robotParam.hasContacts() && globalRobotRegistry != null) {
+            try {
+                talkToContext = talkToContextInjector.buildContext(
+                        robotParam.getContacts(), globalRobotRegistry, robotParam.getName());
+            } catch (Exception e) {
+                logger.warn("构建 TalkTo 上下文失败，跳过", e);
+            }
+        }
+
         // 构建文件路径上下文
         String fileContext = "";
         if (filePaths != null && !filePaths.isEmpty()) {
@@ -446,10 +487,11 @@ public class AcpClient extends AbstractAcpClient {
 
         JsonObject textBlock = new JsonObject();
         textBlock.addProperty("type", "text");
-        // 拼接顺序：子Agent上下文 → 定时任务上下文 → 记忆 → 文件路径 → 时间 → 用户输入
+        // 拼接顺序：子Agent上下文 → 定时任务上下文 → 通讯录上下文 → 记忆 → 文件路径 → 时间 → 用户输入
         StringBuilder fullTextBuilder = new StringBuilder();
         if (!subAgentContext.isEmpty()) fullTextBuilder.append(subAgentContext).append("\n");
         if (!scheduleContext.isEmpty()) fullTextBuilder.append(scheduleContext).append("\n");
+        if (!talkToContext.isEmpty()) fullTextBuilder.append(talkToContext).append("\n");
         if (!memoryContext.isEmpty()) fullTextBuilder.append(memoryContext).append("\n");
         if (!fileContext.isEmpty()) fullTextBuilder.append(fileContext).append("\n");
         fullTextBuilder.append(timeContext).append(userInput);
@@ -467,10 +509,11 @@ public class AcpClient extends AbstractAcpClient {
         StringBuilder fullResponse = new StringBuilder();
         // 缓存 toolCallId → title，防止后续 update 中 title 为空
         Map<String, String> toolTitleCache = new HashMap<>();
-        // 缓冲过滤器：拦截 dispatch_subagent / schedule_task / manage_schedule JSON，避免推送给用户
+        // 缓冲过滤器：拦截 dispatch_subagent / schedule_task / manage_schedule / talk_to JSON，避免推送给用户
         boolean scheduleFilterEnabled = scheduleTaskManager != null;
+        boolean talkToFilterEnabled = talkToDispatcher != null;
         DispatchBufferFilter bufferFilter = new DispatchBufferFilter(
-                listener, subAgentDispatcher != null, scheduleFilterEnabled);
+                listener, subAgentDispatcher != null, scheduleFilterEnabled, talkToFilterEnabled);
         while (true) {
             String line = reader.readLine();
             if (line == null) {
@@ -510,6 +553,11 @@ public class AcpClient extends AbstractAcpClient {
 
                 // 检测子 Agent 派发指令并处理
                 if (handleSubAgentDispatch(fullResponse.toString(), listener)) {
+                    return;
+                }
+
+                // 检测 talkTo 指令并处理
+                if (handleTalkTo(fullResponse.toString(), listener)) {
                     return;
                 }
 
@@ -660,6 +708,64 @@ public class AcpClient extends AbstractAcpClient {
         }
     }
 
+
+
+    /**
+     * 检测并处理 talkTo 指令。
+     * <p>
+     * 在主 Agent turn 结束后调用。如果检测到 talk_to 指令：
+     * 1. 解析目标和内容
+     * 2. 通过 TalkToDispatcher 投递消息
+     * 3. 将结果作为 follow-up prompt 发回主 Agent
+     *
+     * @return true 如果检测到并处理了 talkTo 指令
+     */
+    private boolean handleTalkTo(String fullResponse, AcpResponseListener listener) {
+        if (talkToDispatcher == null) return false;
+
+        TalkToRequest request =
+                talkToDispatcher.detectTalkTo(fullResponse);
+        if (request == null) return false;
+
+        String senderName = robotParam != null ? robotParam.getName() : groupId;
+        logger.info("检测到 talkTo 指令: {} → {}", senderName, request.getTarget());
+
+        try {
+            String resultText = talkToDispatcher.deliver(request, senderName);
+            // 在发送方前端推送 talkTo 卡片
+            listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            sendPrompt(resultText, null, listener);
+            return true;
+        } catch (Exception e) {
+            logger.error("talkTo 处理失败", e);
+            try {
+                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null, listener);
+            } catch (IOException ioe) {
+                logger.error("发送 talkTo 错误结果失败", ioe);
+                listener.onComplete(fullResponse);
+            }
+            return true;
+        }
+    }
+
+    /**
+     * 检查并投递 inbox 中的待处理消息。
+     * 在 turn 结束 state 变为 READY 后调用。
+     */
+    private void checkAndDeliverInbox() {
+        if (talkToDispatcher == null) return;
+        String robotName = robotParam != null ? robotParam.getName() : null;
+        if (robotName == null || robotName.isEmpty()) return;
+
+        TalkToMessage pending = talkToDispatcher.pollInbox(robotName);
+        if (pending != null) {
+            logger.info("从 inbox 投递消息: from={}, to={}", pending.getSender(), robotName);
+            // 先推送来信卡片到前端
+            talkToDispatcher.pushIncomingMessageCard(this, pending);
+            // 再发送消息，会再次进入 BUSY 状态
+            send(pending.buildPrompt(), null);
+        }
+    }
 
 
     /**

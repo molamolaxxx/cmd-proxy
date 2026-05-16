@@ -122,4 +122,19 @@ public class AcpClientRegistry {
         clients.put(groupId, client);
         logger.info("groupId={} 会话恢复成功, sessionId={}", groupId, client.getSessionId());
     }
+
+    /**
+     * 关闭所有 client，用于热重载前清理。
+     */
+    public void closeAll() {
+        for (Map.Entry<String, AcpClient> entry : clients.entrySet()) {
+            try {
+                entry.getValue().close();
+            } catch (IOException e) {
+                logger.warn("关闭 AcpClient 失败, groupId={}", entry.getKey(), e);
+            }
+        }
+        clients.clear();
+        logger.info("所有 AcpClient 已关闭");
+    }
 }

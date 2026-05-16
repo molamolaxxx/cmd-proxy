@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ACP 配置管理</title>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bottom:80px}
+.app-bar{position:sticky;top:0;z-index:100;background:#1976d2;color:#fff;height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;box-shadow:0 2px 4px rgba(0,0,0,.2)}
+.app-bar h1{font-size:20px;font-weight:500}
+.app-bar-actions{display:flex;gap:8px}
+.container{max-width:960px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.24);margin-bottom:16px;overflow:hidden}
+.card-header{padding:16px 24px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e0e0e0}
+.card-header h2{font-size:16px;font-weight:500;color:#424242}
+.card-body{padding:24px}
+.field-group{margin-bottom:16px}
+.field-group label{display:block;font-size:12px;color:#757575;margin-bottom:4px;font-weight:500}
+.field-group input[type="text"],.field-group input[type="number"],.field-group select{width:100%;padding:8px 0;border:none;border-bottom:1px solid #bdbdbd;font-size:14px;outline:none;background:transparent}
+.field-group input:focus,.field-group select:focus{border-bottom:2px solid #1976d2}
+.field-row{display:flex;gap:12px;align-items:flex-end}
+.field-row .field-group{flex:1}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #f5f5f5}
+.toggle-row:last-child{border-bottom:none}
+.toggle-label{font-size:14px;color:#424242}
+.toggle-desc{font-size:12px;color:#757575;margin-top:2px}
+.switch{position:relative;width:36px;height:20px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#bdbdbd;border-radius:10px;transition:.3s}
+.slider:before{content:"";position:absolute;height:16px;width:16px;left:2px;bottom:2px;background:#fff;border-radius:50%;transition:.3s}
+.switch input:checked+.slider{background:#1976d2}
+.switch input:checked+.slider:before{transform:translateX(16px)}
+.btn{padding:8px 16px;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background .2s}
+.btn-primary{background:#1976d2;color:#fff}
+.btn-primary:hover{background:#1565c0}
+.btn-secondary{background:transparent;color:#1976d2}
+.btn-secondary:hover{background:rgba(25,118,210,.08)}
+.btn-danger{background:transparent;color:#d32f2f}
+.btn-danger:hover{background:rgba(211,47,47,.08)}
+.btn-sm{padding:4px 8px;font-size:12px}
+.btn-fab{position:fixed;bottom:24px;right:24px;width:56px;height:56px;border-radius:50%;background:#1976d2;color:#fff;border:none;box-shadow:0 4px 8px rgba(0,0,0,.3);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:24px}
+.btn-fab:hover{background:#1565c0}
+.chip-list{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;padding:4px 12px;background:#e3f2fd;border-radius:16px;font-size:13px;color:#1565c0}
+.chip .material-icons{font-size:16px;margin-left:4px;cursor:pointer;color:#90a4ae}
+.chip .material-icons:hover{color:#d32f2f}
+.section-title{font-size:14px;font-weight:500;color:#1976d2;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #e3f2fd}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.robot-actions{display:flex;gap:4px}
+.robot-info{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;color:#616161}
+.robot-info div{padding:4px 0}
+.list-item{display:flex;gap:8px;align-items:center;padding:8px;background:#fafafa;border-radius:4px;margin-bottom:8px}
+.list-item input{flex:1;padding:6px;border:1px solid #e0e0e0;border-radius:4px;font-size:13px}
+.empty-state{text-align:center;padding:48px 24px;color:#9e9e9e}
+.empty-state .material-icons{font-size:64px;margin-bottom:16px}
+.dialog-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:300;align-items:center;justify-content:center}
+.dialog-overlay.show{display:flex}
+.dialog{background:#fff;border-radius:8px;width:90%;max-width:600px;max-height:85vh;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.3)}
+.dialog-title{padding:20px 24px 0;font-size:18px;font-weight:500}
+.dialog-body{padding:16px 24px}
+.dialog-actions{padding:12px 16px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #e0e0e0}
+.dir-list{max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:4px}
+.dir-item{padding:10px 16px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid #f5f5f5}
+.dir-item:hover{background:#e3f2fd}
+.dir-path{padding:12px 16px;background:#f5f5f5;border-radius:4px;font-size:13px;color:#424242;margin-bottom:12px;word-break:break-all}
+.snackbar{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:#323232;color:#fff;padding:12px 24px;border-radius:4px;font-size:14px;opacity:0;transition:transform .3s,opacity .3s;z-index:400}
+.snackbar.show{transform:translateX(-50%) translateY(0);opacity:1}
+.memory-panel{background:#fafafa;border-radius:4px;padding:16px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="app-bar">
+<h1>ACP 配置管理</h1>
+<div class="app-bar-actions">
+<button class="btn btn-secondary" style="color:#fff" onclick="refreshService()"><span class="material-icons">refresh</span>刷新服务</button>
+<button class="btn btn-secondary" style="color:#fff" onclick="saveConfig()"><span class="material-icons">save</span>保存</button>
+</div>
+</div>
+<div class="container">
+<div class="card"><div class="card-header"><h2>服务设置</h2></div><div class="card-body">
+<div class="field-group"><label>配置页面端口</label><input type="number" id="cfgPort" min="1" max="65535" placeholder="10528"></div>
+<div class="toggle-row"><div><div class="toggle-label">启用配置页面</div><div class="toggle-desc">关闭后下次启动不再提供此页面</div></div><label class="switch"><input type="checkbox" id="cfgEnabled"><span class="slider"></span></label></div>
+</div></div>
+<div class="card"><div class="card-header"><h2>Chatter ID 列表</h2><button class="btn btn-secondary btn-sm" onclick="addChatterId()"><span class="material-icons">add</span>添加</button></div><div class="card-body"><div id="chatterList" class="chip-list"></div></div></div>
+<div id="robotList"></div>
+</div>
+<button class="btn-fab" onclick="openRobotDialog(-1)" title="添加 Robot"><span class="material-icons">add</span></button>
+
+<div class="dialog-overlay" id="robotDialog"><div class="dialog">
+<div class="dialog-title" id="dlgTitle">添加 Robot</div>
+<div class="dialog-body" id="dlgBody"></div>
+<div class="dialog-actions"><button class="btn btn-secondary" onclick="closeDialog('robotDialog')">取消</button><button class="btn btn-primary" onclick="saveRobot()">确定</button></div>
+</div></div>
+
+<div class="dialog-overlay" id="dirDialog"><div class="dialog">
+<div class="dialog-title">选择文件夹</div>
+<div class="dialog-body">
+<div class="dir-path" id="dirPath"></div>
+<div class="dir-list" id="dirList"></div>
+</div>
+<div class="dialog-actions"><button class="btn btn-secondary" onclick="closeDialog('dirDialog')">取消</button><button class="btn btn-primary" onclick="confirmDir()">选择此目录</button></div>
+</div></div>
+
+<div class="snackbar" id="snackbar"></div>
+
+<script>
+var config={robots:[],chatterIds:[],configUi:{enabled:true,port:10528}};
+var editIdx=-1;
+var currentDirPath='';
+var dlgSubAgents=[];
+var dlgContacts=[];
+
+async function loadConfig(){
+try{var r=await fetch('/api/config');config=await r.json();
+if(!config.robots)config.robots=[];
+if(!config.chatterIds)config.chatterIds=[];
+if(!config.configUi)config.configUi={enabled:true,port:10528};
+}catch(e){showSnackbar('加载失败:'+e.message)}
+render();
+}
+
+function render(){
+document.getElementById('cfgPort').value=config.configUi.port||10528;
+document.getElementById('cfgEnabled').checked=config.configUi.enabled!==false;
+renderChatters();renderRobots();
+}
+
+function renderChatters(){
+var c=document.getElementById('chatterList');
+if(!config.chatterIds.length){c.innerHTML='<span style="color:#9e9e9e;font-size:14px">暂无，点击添加</span>';return}
+c.innerHTML=config.chatterIds.map(function(id,i){return '<span class="chip">'+esc(id)+'<span class="material-icons" onclick="removeChatter('+i+')">close</span></span>'}).join('');
+}
+
+function renderRobots(){
+var c=document.getElementById('robotList');
+if(!config.robots.length){c.innerHTML='<div class="card"><div class="empty-state"><span class="material-icons">smart_toy</span><p>暂无 Robot，点击右下角添加</p></div></div>';return}
+c.innerHTML=config.robots.map(function(r,i){
+var mem=(r.memory&&r.memory.enabled!==false)?'开启':'关闭';
+return '<div class="card"><div class="card-header"><h2>'+esc(r.name||'未命名')+'</h2><div class="robot-actions"><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div></div></div></div>'
+}).join('');
+}
+
+function addChatterId(){var id=prompt('请输入 Chatter ID:');if(id&&id.trim()){config.chatterIds.push(id.trim());render()}}
+function removeChatter(i){config.chatterIds.splice(i,1);render()}
+function deleteRobot(i){if(confirm('确定删除「'+(config.robots[i].name||'')+'」?')){config.robots.splice(i,1);render()}}
+
+function openRobotDialog(idx){
+editIdx=idx;
+var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',abilityAutoRefresh:true,onlySubAgent:false,scheduleEnabled:false,memory:{enabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,maxEntriesGlobal:20,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
+if(!r.memory)r.memory={enabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,maxEntriesGlobal:20,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};
+dlgSubAgents=r.subAgents?r.subAgents.slice():[];
+dlgContacts=r.contacts?r.contacts.slice():[];
+document.getElementById('dlgTitle').textContent=idx>=0?'编辑 Robot':'添加 Robot';
+var m=r.memory;
+var h='<div class="section-title">基本信息</div>'+
+'<div class="field-group"><label>名称 *</label><input type="text" id="dName" value="'+esc(r.name)+'"></div>'+
+'<div class="field-group"><label>签名描述</label><input type="text" id="dSig" value="'+esc(r.signature||'')+'"></div>'+
+'<div class="field-row"><div class="field-group"><label>工作目录 *</label><input type="text" id="dWorkDir" value="'+esc(r.workDir)+'"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker()" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
+'<div class="grid-2"><div class="field-group"><label>Agent 后端</label><select id="dProvider"><option value="KIRO_CLI"'+(r.agentProvider!=='OPENCODE'?' selected':'')+'>Kiro CLI</option><option value="OPENCODE"'+(r.agentProvider==='OPENCODE'?' selected':'')+'>OpenCode</option></select></div><div class="field-group"><label>头像 URL</label><input type="text" id="dAvatar" value="'+esc(r.avatar||'')+'"></div></div>'+
+'<div class="section-title">功能开关</div>'+
+'<div class="toggle-row"><div><div class="toggle-label">自动刷新 Ability</div></div><label class="switch"><input type="checkbox" id="dAbility"'+(r.abilityAutoRefresh!==false?' checked':'')+'><span class="slider"></span></label></div>'+
+'<div class="toggle-row"><div><div class="toggle-label">仅作为子 Agent</div></div><label class="switch"><input type="checkbox" id="dOnlySub"'+(r.onlySubAgent?' checked':'')+'><span class="slider"></span></label></div>'+
+'<div class="toggle-row"><div><div class="toggle-label">定时任务</div></div><label class="switch"><input type="checkbox" id="dSchedule"'+(r.scheduleEnabled?' checked':'')+'><span class="slider"></span></label></div>'+
+'<div class="section-title">记忆配置</div>'+
+'<div class="toggle-row"><div><div class="toggle-label">启用记忆系统</div></div><label class="switch"><input type="checkbox" id="dMemEnabled"'+(m.enabled!==false?' checked':'')+' onchange="toggleMemPanel()"><span class="slider"></span></label></div>'+
+'<div class="memory-panel" id="memPanel" style="'+(m.enabled===false?'display:none':'')+'"><div class="grid-2">'+
+'<div class="field-group"><label>隔离级别</label><select id="dMemScope"><option value="workspace"'+(m.scope!=='robot'?' selected':'')+'>workspace</option><option value="robot"'+(m.scope==='robot'?' selected':'')+'>robot</option></select></div>'+
+'<div class="field-group"><label>提取间隔轮次</label><input type="number" id="dMemExtract" min="1" value="'+(m.extractIntervalTurns||5)+'"></div>'+
+'<div class="field-group"><label>索引最大行数</label><input type="number" id="dMemIndex" min="1" value="'+(m.indexMaxLines||200)+'"></div>'+
+'<div class="field-group"><label>项目最大条目</label><input type="number" id="dMemProject" min="1" value="'+(m.maxEntriesPerProject||30)+'"></div>'+
+'<div class="field-group"><label>全局最大条目</label><input type="number" id="dMemGlobal" min="1" value="'+(m.maxEntriesGlobal||20)+'"></div>'+
+'<div class="field-group"><label>项目过期天数</label><input type="number" id="dMemExpire" min="1" value="'+(m.projectExpireDays||30)+'"></div>'+
+'<div class="field-group"><label>子Client超时(秒)</label><input type="number" id="dMemTimeout" min="10" value="'+(m.subClientTimeout||120)+'"></div>'+
+'<div class="field-group"><label>&nbsp;</label><div class="toggle-row" style="border:none;padding:0"><div class="toggle-label">Dream整理</div><label class="switch"><input type="checkbox" id="dMemDream"'+(m.dreamEnabled!==false?' checked':'')+'><span class="slider"></span></label></div></div>'+
+'<div class="field-group"><label>Dream最小间隔(时)</label><input type="number" id="dMemDreamH" min="1" value="'+(m.dreamMinHours||24)+'"></div>'+
+'<div class="field-group"><label>Dream最小会话数</label><input type="number" id="dMemDreamS" min="1" value="'+(m.dreamMinSessions||5)+'"></div>'+
+'</div></div>'+
+'<div class="section-title">子 Agent</div><div id="dSubList"></div><button class="btn btn-secondary btn-sm" onclick="addSubAgent()"><span class="material-icons">add</span>添加子 Agent</button>'+
+'<div class="section-title">通讯录</div><div id="dContactList"></div><button class="btn btn-secondary btn-sm" onclick="addContact()"><span class="material-icons">add</span>添加联系人</button>';
+document.getElementById('dlgBody').innerHTML=h;
+renderSubAgents();renderContacts();
+document.getElementById('robotDialog').classList.add('show');
+}
+
+function toggleMemPanel(){document.getElementById('memPanel').style.display=document.getElementById('dMemEnabled').checked?'':'none'}
+
+function renderSubAgents(){
+var c=document.getElementById('dSubList');
+c.innerHTML=dlgSubAgents.map(function(s,i){return '<div class="list-item"><input type="text" placeholder="Robot名称" value="'+esc(s.name||'')+'" onchange="dlgSubAgents['+i+'].name=this.value"><input type="text" placeholder="描述(可选)" value="'+esc(s.description||'')+'" onchange="dlgSubAgents['+i+'].description=this.value"><button class="btn btn-danger btn-sm" onclick="dlgSubAgents.splice('+i+',1);renderSubAgents()"><span class="material-icons">close</span></button></div>'}).join('');
+}
+function addSubAgent(){dlgSubAgents.push({name:'',description:''});renderSubAgents()}
+
+function renderContacts(){
+var c=document.getElementById('dContactList');
+c.innerHTML=dlgContacts.map(function(s,i){return '<div class="list-item"><input type="text" placeholder="Robot名称" value="'+esc(s.name||'')+'" onchange="dlgContacts['+i+'].name=this.value"><input type="text" placeholder="备注" value="'+esc(s.remark||'')+'" onchange="dlgContacts['+i+'].remark=this.value"><button class="btn btn-danger btn-sm" onclick="dlgContacts.splice('+i+',1);renderContacts()"><span class="material-icons">close</span></button></div>'}).join('');
+}
+function addContact(){dlgContacts.push({name:'',remark:''});renderContacts()}
+
+function saveRobot(){
+var name=document.getElementById('dName').value.trim();
+var workDir=document.getElementById('dWorkDir').value.trim();
+if(!name){showSnackbar('名称不能为空');return}
+if(!workDir){showSnackbar('工作目录不能为空');return}
+var orig=editIdx>=0?config.robots[editIdx]:{};
+var robot=Object.assign({},orig,{
+name:name,signature:document.getElementById('dSig').value.trim(),
+workDir:workDir,agentProvider:document.getElementById('dProvider').value,
+avatar:document.getElementById('dAvatar').value.trim(),
+abilityAutoRefresh:document.getElementById('dAbility').checked,
+onlySubAgent:document.getElementById('dOnlySub').checked,
+scheduleEnabled:document.getElementById('dSchedule').checked
+});
+var memEnabled=document.getElementById('dMemEnabled').checked;
+if(memEnabled){
+robot.memory={enabled:true,scope:document.getElementById('dMemScope').value,
+extractIntervalTurns:parseInt(document.getElementById('dMemExtract').value)||5,
+indexMaxLines:parseInt(document.getElementById('dMemIndex').value)||200,
+maxEntriesPerProject:parseInt(document.getElementById('dMemProject').value)||30,
+maxEntriesGlobal:parseInt(document.getElementById('dMemGlobal').value)||20,
+projectExpireDays:parseInt(document.getElementById('dMemExpire').value)||30,
+subClientTimeout:parseInt(document.getElementById('dMemTimeout').value)||120,
+dreamEnabled:document.getElementById('dMemDream').checked,
+dreamMinHours:parseInt(document.getElementById('dMemDreamH').value)||24,
+dreamMinSessions:parseInt(document.getElementById('dMemDreamS').value)||5};
+}else{robot.memory={enabled:false}}
+robot.subAgents=dlgSubAgents.filter(function(s){return s.name&&s.name.trim()});
+robot.contacts=dlgContacts.filter(function(s){return s.name&&s.name.trim()});
+if(editIdx>=0){config.robots[editIdx]=robot}else{config.robots.push(robot)}
+closeDialog('robotDialog');render();
+showSnackbar(editIdx>=0?'Robot 已更新':'Robot 已添加');
+}
+
+function openDirPicker(){
+var cur=document.getElementById('dWorkDir').value.trim()||'/home';
+browseDir(cur);
+document.getElementById('dirDialog').classList.add('show');
+}
+
+async function browseDir(path){
+currentDirPath=path;
+document.getElementById('dirPath').textContent=path;
+try{
+var r=await fetch('/api/browse-dir?path='+encodeURIComponent(path));
+var data=await r.json();
+currentDirPath=data.path||path;
+document.getElementById('dirPath').textContent=currentDirPath;
+var items='';
+if(currentDirPath!=='/'){items+='<div class="dir-item" onclick="browseDir(\''+esc(parentDir(currentDirPath))+'\')"><span class="material-icons">arrow_upward</span>..</div>'}
+if(data.dirs){data.dirs.forEach(function(d){items+='<div class="dir-item" onclick="browseDir(\''+esc(currentDirPath+(currentDirPath.endsWith('/')?'':'/')+d)+'\')"><span class="material-icons">folder</span>'+esc(d)+'</div>'})}
+document.getElementById('dirList').innerHTML=items||'<div style="padding:16px;color:#9e9e9e">无子目录</div>';
+}catch(e){document.getElementById('dirList').innerHTML='<div style="padding:16px;color:#d32f2f">加载失败</div>'}
+}
+
+function parentDir(p){var i=p.lastIndexOf('/');return i<=0?'/':p.substring(0,i)}
+function confirmDir(){document.getElementById('dWorkDir').value=currentDirPath;closeDialog('dirDialog')}
+function closeDialog(id){document.getElementById(id).classList.remove('show')}
+
+async function saveConfig(){
+config.configUi={enabled:document.getElementById('cfgEnabled').checked,port:parseInt(document.getElementById('cfgPort').value)||10528};
+try{var r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
+var d=await r.json();if(d.ok)showSnackbar('配置已保存');else showSnackbar('保存失败')}
+catch(e){showSnackbar('保存失败:'+e.message)}
+}
+
+async function refreshService(){
+await saveConfig();
+try{var r=await fetch('/api/refresh',{method:'POST'});var d=await r.json();
+if(d.ok)showSnackbar('服务已刷新');else showSnackbar('刷新失败:'+(d.error||''))}
+catch(e){showSnackbar('刷新失败:'+e.message)}
+}
+
+function showSnackbar(msg){var el=document.getElementById('snackbar');el.textContent=msg;el.classList.add('show');setTimeout(function(){el.classList.remove('show')},3000)}
+function esc(s){if(!s)return '';var d=document.createElement('div');d.textContent=s;return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+
+loadConfig();
+</script>
+</body>
+</html>

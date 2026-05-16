@@ -32,6 +32,8 @@ public class DispatchBufferFilter {
     private static final String SCHEDULE_TASK_TRIGGER = "schedule_task";
     /** manage_schedule 的特征关键词 */
     private static final String MANAGE_SCHEDULE_TRIGGER = "manage_schedule";
+    /** talk_to 的特征关键词 */
+    private static final String TALK_TO_TRIGGER = "talk_to";
 
     private enum State { NORMAL, BUFFERING }
 
@@ -39,6 +41,8 @@ public class DispatchBufferFilter {
     private final boolean enabled;
     /** 是否启用定时任务拦截 */
     private final boolean scheduleEnabled;
+    /** 是否启用 talkTo 拦截 */
+    private final boolean talkToEnabled;
 
     private State state = State.NORMAL;
     private final StringBuilder buffer = new StringBuilder();
@@ -50,7 +54,7 @@ public class DispatchBufferFilter {
      * @param enabled  是否启用过滤（未配置 subAgent 时传 false，直通模式）
      */
     public DispatchBufferFilter(AcpResponseListener listener, boolean enabled) {
-        this(listener, enabled, false);
+        this(listener, enabled, false, false);
     }
 
     /**
@@ -59,9 +63,21 @@ public class DispatchBufferFilter {
      * @param scheduleEnabled 是否启用定时任务过滤
      */
     public DispatchBufferFilter(AcpResponseListener listener, boolean enabled, boolean scheduleEnabled) {
+        this(listener, enabled, scheduleEnabled, false);
+    }
+
+    /**
+     * @param listener        下游 listener
+     * @param enabled         是否启用 subAgent 派发过滤
+     * @param scheduleEnabled 是否启用定时任务过滤
+     * @param talkToEnabled   是否启用 talkTo 过滤
+     */
+    public DispatchBufferFilter(AcpResponseListener listener, boolean enabled,
+                                boolean scheduleEnabled, boolean talkToEnabled) {
         this.listener = listener;
-        this.enabled = enabled || scheduleEnabled;
+        this.enabled = enabled || scheduleEnabled || talkToEnabled;
         this.scheduleEnabled = scheduleEnabled;
+        this.talkToEnabled = talkToEnabled;
     }
 
     /**
@@ -132,7 +148,8 @@ public class DispatchBufferFilter {
         if (content.length() > DISPATCH_PREFIX.length()
                 && !content.contains(DISPATCH_TRIGGER)
                 && !content.contains(SCHEDULE_TASK_TRIGGER)
-                && !content.contains(MANAGE_SCHEDULE_TRIGGER)) {
+                && !content.contains(MANAGE_SCHEDULE_TRIGGER)
+                && !content.contains(TALK_TO_TRIGGER)) {
             flushBuffer();
             return true;
         }
@@ -152,7 +169,8 @@ public class DispatchBufferFilter {
         // 缓冲区足够长，检查是否包含已知 action 关键词
         boolean isKnownAction = content.contains(DISPATCH_TRIGGER)
                 || (scheduleEnabled && content.contains(SCHEDULE_TASK_TRIGGER))
-                || (scheduleEnabled && content.contains(MANAGE_SCHEDULE_TRIGGER));
+                || (scheduleEnabled && content.contains(MANAGE_SCHEDULE_TRIGGER))
+                || (talkToEnabled && content.contains(TALK_TO_TRIGGER));
 
         if (isKnownAction) {
             // 检查 JSON 是否闭合（简单的花括号计数）
