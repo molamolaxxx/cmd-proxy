@@ -1,20 +1,29 @@
 package com.mola.cmd.proxy.app.acp.configui;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.*;
 import java.net.InetSocketAddress;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.security.cert.X509Certificate;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 内嵌轻量 HTTP 服务，提供 ACP 配置管理页面。
@@ -25,9 +34,18 @@ public class ConfigUiServer {
     private static final Logger logger = LoggerFactory.getLogger(ConfigUiServer.class);
     private static final String CONFIG_PATH = System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json";
 
+    private static final String UPDATE_JAR_URL = "https://106.54.193.10/download/cmd-proxy.jar";
+
     private final int port;
     private final Runnable refreshCallback;
     private HttpServer server;
+    private ExecutorService executor;
+
+    // 更新状态
+    private final AtomicBoolean updating = new AtomicBoolean(false);
+    private volatile String updateStatus = "idle"; // idle, downloading, done, error
+    private volatile int updateProgress = 0;
+    private volatile String updateMessage = "";
 
     /**
      * @param port            监听端口
@@ -40,7 +58,8 @@ public class ConfigUiServer {
 
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(4));
+        executor = Executors.newFixedThreadPool(4);
+        server.setExecutor(executor);
 
         // 静态页面
         server.createContext("/", this::handleIndex);
@@ -48,6 +67,8 @@ public class ConfigUiServer {
         server.createContext("/api/config", this::handleConfig);
         server.createContext("/api/refresh", this::handleRefresh);
         server.createContext("/api/browse-dir", this::handleBrowseDir);
+        server.createContext("/api/update-jar", this::handleUpdateJar);
+        server.createContext("/api/update-jar/status", this::handleUpdateJarStatus);
 
         server.start();
         logger.info("ConfigUI 已启动: http://localhost:{}", port);
@@ -201,5 +222,137 @@ public class ConfigUiServer {
             buffer.write(tmp, 0, n);
         }
         return buffer.toByteArray();
+    }
+
+    // ========== 更新 JAR 相关 ==========
+
+    private void handleUpdateJar(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        if (!updating.compareAndSet(false, true)) {
+            sendResponse(exchange, 409, "application/json",
+                    "{\"error\":\"更新进行中，请勿重复操作\"}");
+            return;
+        }
+        // 重置状态
+        updateStatus = "downloading";
+        updateProgress = 0;
+        updateMessage = "开始下载...";
+
+        // 异步执行下载替换
+        new Thread(this::doUpdateJar, "jar-updater").start();
+
+        sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+    }
+
+    private void handleUpdateJarStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String json = "{\"status\":\"" + updateStatus + "\",\"progress\":" + updateProgress +
+                ",\"message\":\"" + updateMessage.replace("\"", "'") + "\"}";
+        sendResponse(exchange, 200, "application/json", json);
+    }
+
+    private void doUpdateJar() {
+        try {
+            Path jarPath = getRunningJarPath();
+            if (jarPath == null) {
+                updateStatus = "error";
+                updateMessage = "无法确定当前运行的 JAR 路径";
+                updating.set(false);
+                return;
+            }
+
+            logger.info("开始下载更新: {} -> {}", UPDATE_JAR_URL, jarPath);
+
+            // 创建忽略 SSL 的连接
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, new TrustManager[]{new X509TrustManager() {
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            }}, null);
+
+            URL url = new URL(UPDATE_JAR_URL);
+            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
+            conn.setSSLSocketFactory(sslContext.getSocketFactory());
+            conn.setHostnameVerifier((hostname, session) -> true);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(60000);
+            conn.connect();
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode != 200) {
+                updateStatus = "error";
+                updateMessage = "下载失败，HTTP " + responseCode;
+                updating.set(false);
+                return;
+            }
+
+            long totalSize = conn.getContentLengthLong();
+            Path tmpFile = jarPath.resolveSibling(".cmd-proxy-update.tmp");
+
+            try (InputStream in = conn.getInputStream();
+                 OutputStream out = Files.newOutputStream(tmpFile)) {
+                byte[] buf = new byte[8192];
+                long downloaded = 0;
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    out.write(buf, 0, n);
+                    downloaded += n;
+                    if (totalSize > 0) {
+                        updateProgress = (int) (downloaded * 100 / totalSize);
+                    }
+                    updateMessage = "下载中 " + (downloaded / 1024) + "KB" +
+                            (totalSize > 0 ? " / " + (totalSize / 1024) + "KB" : "");
+                }
+            }
+
+            // 原子替换
+            Files.move(tmpFile, jarPath, StandardCopyOption.REPLACE_EXISTING);
+
+            updateProgress = 100;
+            updateStatus = "done";
+            updateMessage = "更新完成，重启后生效";
+            logger.info("JAR 更新完成: {}", jarPath);
+
+        } catch (Exception e) {
+            logger.error("JAR 更新失败", e);
+            updateStatus = "error";
+            updateMessage = "更新失败: " + e.getMessage();
+        } finally {
+            updating.set(false);
+        }
+    }
+
+    private Path getRunningJarPath() {
+        try {
+            // 通过 CodeSource 获取当前 jar 路径
+            URL location = ConfigUiServer.class.getProtectionDomain().getCodeSource().getLocation();
+            Path path = Paths.get(location.toURI());
+            if (Files.isRegularFile(path) && path.toString().endsWith(".jar")) {
+                return path;
+            }
+        } catch (Exception e) {
+            logger.warn("通过 CodeSource 获取 JAR 路径失败", e);
+        }
+        // 备选：从启动命令解析
+        try {
+            String cmd = System.getProperty("sun.java.command");
+            if (cmd != null) {
+                String jarFile = cmd.split("\\s+")[0];
+                Path path = Paths.get(jarFile).toAbsolutePath();
+                if (Files.isRegularFile(path) && path.toString().endsWith(".jar")) {
+                    return path;
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("通过 sun.java.command 获取 JAR 路径失败", e);
+        }
+        return null;
     }
 }

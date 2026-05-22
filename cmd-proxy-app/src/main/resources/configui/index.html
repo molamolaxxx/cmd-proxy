@@ -75,6 +75,7 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 <div class="app-bar">
 <h1>ACP 配置管理</h1>
 <div class="app-bar-actions">
+<button class="btn btn-secondary" style="color:#fff" id="updateBtn" onclick="updateVersion()"><span class="material-icons">system_update</span>更新版本</button>
 <button class="btn btn-secondary" style="color:#fff" onclick="refreshService()"><span class="material-icons">refresh</span>刷新服务</button>
 <button class="btn btn-secondary" style="color:#fff" onclick="saveConfig(false)"><span class="material-icons">save</span>保存</button>
 </div>
@@ -105,6 +106,19 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 </div></div>
 
 <div class="snackbar" id="snackbar"></div>
+
+<div class="dialog-overlay" id="updateOverlay">
+<div class="dialog" style="max-width:420px">
+<div class="dialog-title" id="updateTitle">更新版本</div>
+<div class="dialog-body">
+<div style="margin-bottom:12px;font-size:14px;color:#616161" id="updateMsg">准备下载...</div>
+<div style="background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden">
+<div id="updateBar" style="height:100%;width:0%;background:#1976d2;border-radius:4px;transition:width .3s"></div>
+</div>
+<div style="text-align:right;margin-top:8px;font-size:13px;color:#757575" id="updatePct">0%</div>
+</div>
+</div>
+</div>
 
 <script>
 var config={robots:[],chatterIds:[],configUi:{enabled:true,port:10528}};
@@ -281,6 +295,54 @@ function showSnackbar(msg){var el=document.getElementById('snackbar');el.textCon
 function esc(s){if(!s)return '';var d=document.createElement('div');d.textContent=s;return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
 loadConfig();
+
+async function updateVersion(){
+var btn=document.getElementById('updateBtn');
+btn.disabled=true;btn.style.opacity='0.5';
+try{
+var r=await fetch('/api/update-jar',{method:'POST'});
+var d=await r.json();
+if(d.error){showSnackbar(d.error);btn.disabled=false;btn.style.opacity='1';return}
+document.getElementById('updateOverlay').classList.add('show');
+document.getElementById('updateBar').style.width='0%';
+document.getElementById('updatePct').textContent='0%';
+document.getElementById('updateMsg').textContent='准备下载...';
+document.getElementById('updateBar').style.background='#1976d2';
+pollUpdateStatus();
+}catch(e){showSnackbar('请求失败:'+e.message);btn.disabled=false;btn.style.opacity='1'}
+}
+
+function pollUpdateStatus(){
+var timer=setInterval(async function(){
+try{
+var r=await fetch('/api/update-jar/status');
+var d=await r.json();
+document.getElementById('updateBar').style.width=d.progress+'%';
+document.getElementById('updatePct').textContent=d.progress+'%';
+document.getElementById('updateMsg').textContent=d.message||'';
+if(d.status==='done'){
+clearInterval(timer);
+document.getElementById('updateBar').style.background='#4caf50';
+document.getElementById('updateMsg').textContent='更新完成，重启后生效';
+setTimeout(function(){
+document.getElementById('updateOverlay').classList.remove('show');
+document.getElementById('updateBtn').disabled=false;
+document.getElementById('updateBtn').style.opacity='1';
+},3000);
+}else if(d.status==='error'){
+clearInterval(timer);
+document.getElementById('updateBar').style.background='#d32f2f';
+document.getElementById('updateMsg').textContent=d.message||'更新失败';
+setTimeout(function(){
+document.getElementById('updateOverlay').classList.remove('show');
+document.getElementById('updateBtn').disabled=false;
+document.getElementById('updateBtn').style.opacity='1';
+},3000);
+}
+}catch(e){clearInterval(timer);document.getElementById('updateOverlay').classList.remove('show');
+document.getElementById('updateBtn').disabled=false;document.getElementById('updateBtn').style.opacity='1'}
+},500);
+}
 </script>
 </body>
 </html>
