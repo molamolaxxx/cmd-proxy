@@ -49,7 +49,8 @@ public class ScheduleContextInjector {
         sb.append("{\"action\":\"manage_schedule\",\"operation\":\"update\",\"taskId\":\"任务ID\",\"updates\":{\"title\":\"...\",\"prompt\":\"...\",\"schedule\":{\"type\":\"...\",\"expr\":\"...\"}}}\n\n");
 
         sb.append("schedule.type 支持：cron（标准5位cron表达式，周期性）、once（一次性，expr为ISO时间戳如2026-05-06T09:00:00，或相对时间如+30s/+30m/+2h/+1d）\n");
-        sb.append("tasks 数组可包含多个任务，一次创建多个定时任务。\n");
+        sb.append("tasks 数组可包含多个任务，一次创建多个定时任务。\n\n");
+        sb.append("重要：输出上述指令 JSON 后，必须立即结束当前回复，不要在指令 JSON 之后继续输出任何文字。系统会自动执行指令并将结果返回给你。\n");
 
         return sb.toString();
     }

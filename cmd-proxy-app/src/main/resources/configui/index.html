@@ -76,7 +76,7 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 <h1>ACP 配置管理</h1>
 <div class="app-bar-actions">
 <button class="btn btn-secondary" style="color:#fff" onclick="refreshService()"><span class="material-icons">refresh</span>刷新服务</button>
-<button class="btn btn-secondary" style="color:#fff" onclick="saveConfig()"><span class="material-icons">save</span>保存</button>
+<button class="btn btn-secondary" style="color:#fff" onclick="saveConfig(false)"><span class="material-icons">save</span>保存</button>
 </div>
 </div>
 <div class="container">
@@ -139,7 +139,10 @@ var c=document.getElementById('robotList');
 if(!config.robots.length){c.innerHTML='<div class="card"><div class="empty-state"><span class="material-icons">smart_toy</span><p>暂无 Robot，点击右下角添加</p></div></div>';return}
 c.innerHTML=config.robots.map(function(r,i){
 var mem=(r.memory&&r.memory.enabled!==false)?'开启':'关闭';
-return '<div class="card"><div class="card-header"><h2>'+esc(r.name||'未命名')+'</h2><div class="robot-actions"><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div></div></div></div>'
+var disabled=r.enabled===false;
+var cardStyle=disabled?' style="opacity:0.6"':'';
+var badge=disabled?'<span style="margin-left:8px;font-size:12px;color:#9e9e9e;font-weight:400">已禁用</span>':'';
+return '<div class="card"'+cardStyle+'><div class="card-header"><h2>'+esc(r.name||'未命名')+badge+'</h2><div class="robot-actions"><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div></div></div></div>'
 }).join('');
 }
 
@@ -149,8 +152,8 @@ function deleteRobot(i){if(confirm('确定删除「'+(config.robots[i].name||'')
 
 function openRobotDialog(idx){
 editIdx=idx;
-var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',abilityAutoRefresh:true,onlySubAgent:false,scheduleEnabled:false,memory:{enabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,maxEntriesGlobal:20,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
-if(!r.memory)r.memory={enabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,maxEntriesGlobal:20,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};
+var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,scheduleEnabled:false,memory:{enabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
+if(!r.memory)r.memory={enabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};
 dlgSubAgents=r.subAgents?r.subAgents.slice():[];
 dlgContacts=r.contacts?r.contacts.slice():[];
 document.getElementById('dlgTitle').textContent=idx>=0?'编辑 Robot':'添加 Robot';
@@ -161,6 +164,7 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-row"><div class="field-group"><label>工作目录 *</label><input type="text" id="dWorkDir" value="'+esc(r.workDir)+'"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker()" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
 '<div class="grid-2"><div class="field-group"><label>Agent 后端</label><select id="dProvider"><option value="KIRO_CLI"'+(r.agentProvider!=='OPENCODE'?' selected':'')+'>Kiro CLI</option><option value="OPENCODE"'+(r.agentProvider==='OPENCODE'?' selected':'')+'>OpenCode</option></select></div><div class="field-group"><label>头像 URL</label><input type="text" id="dAvatar" value="'+esc(r.avatar||'')+'"></div></div>'+
 '<div class="section-title">功能开关</div>'+
+'<div class="toggle-row"><div><div class="toggle-label">启用该 Robot</div><div class="toggle-desc">禁用后不会启动服务</div></div><label class="switch"><input type="checkbox" id="dEnabled"'+(r.enabled!==false?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">自动刷新 Ability</div></div><label class="switch"><input type="checkbox" id="dAbility"'+(r.abilityAutoRefresh!==false?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">仅作为子 Agent</div></div><label class="switch"><input type="checkbox" id="dOnlySub"'+(r.onlySubAgent?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">定时任务</div></div><label class="switch"><input type="checkbox" id="dSchedule"'+(r.scheduleEnabled?' checked':'')+'><span class="slider"></span></label></div>'+
@@ -171,7 +175,6 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-group"><label>提取间隔轮次</label><input type="number" id="dMemExtract" min="1" value="'+(m.extractIntervalTurns||5)+'"></div>'+
 '<div class="field-group"><label>索引最大行数</label><input type="number" id="dMemIndex" min="1" value="'+(m.indexMaxLines||200)+'"></div>'+
 '<div class="field-group"><label>项目最大条目</label><input type="number" id="dMemProject" min="1" value="'+(m.maxEntriesPerProject||30)+'"></div>'+
-'<div class="field-group"><label>全局最大条目</label><input type="number" id="dMemGlobal" min="1" value="'+(m.maxEntriesGlobal||20)+'"></div>'+
 '<div class="field-group"><label>项目过期天数</label><input type="number" id="dMemExpire" min="1" value="'+(m.projectExpireDays||30)+'"></div>'+
 '<div class="field-group"><label>子Client超时(秒)</label><input type="number" id="dMemTimeout" min="10" value="'+(m.subClientTimeout||120)+'"></div>'+
 '<div class="field-group"><label>&nbsp;</label><div class="toggle-row" style="border:none;padding:0"><div class="toggle-label">Dream整理</div><label class="switch"><input type="checkbox" id="dMemDream"'+(m.dreamEnabled!==false?' checked':'')+'><span class="slider"></span></label></div></div>'+
@@ -209,6 +212,7 @@ var robot=Object.assign({},orig,{
 name:name,signature:document.getElementById('dSig').value.trim(),
 workDir:workDir,agentProvider:document.getElementById('dProvider').value,
 avatar:document.getElementById('dAvatar').value.trim(),
+enabled:document.getElementById('dEnabled').checked,
 abilityAutoRefresh:document.getElementById('dAbility').checked,
 onlySubAgent:document.getElementById('dOnlySub').checked,
 scheduleEnabled:document.getElementById('dSchedule').checked
@@ -219,7 +223,6 @@ robot.memory={enabled:true,scope:document.getElementById('dMemScope').value,
 extractIntervalTurns:parseInt(document.getElementById('dMemExtract').value)||5,
 indexMaxLines:parseInt(document.getElementById('dMemIndex').value)||200,
 maxEntriesPerProject:parseInt(document.getElementById('dMemProject').value)||30,
-maxEntriesGlobal:parseInt(document.getElementById('dMemGlobal').value)||20,
 projectExpireDays:parseInt(document.getElementById('dMemExpire').value)||30,
 subClientTimeout:parseInt(document.getElementById('dMemTimeout').value)||120,
 dreamEnabled:document.getElementById('dMemDream').checked,
@@ -258,17 +261,19 @@ function parentDir(p){var i=p.lastIndexOf('/');return i<=0?'/':p.substring(0,i)}
 function confirmDir(){document.getElementById('dWorkDir').value=currentDirPath;closeDialog('dirDialog')}
 function closeDialog(id){document.getElementById(id).classList.remove('show')}
 
-async function saveConfig(){
+async function saveConfig(silent){
 config.configUi={enabled:document.getElementById('cfgEnabled').checked,port:parseInt(document.getElementById('cfgPort').value)||10528};
 try{var r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
-var d=await r.json();if(d.ok)showSnackbar('配置已保存');else showSnackbar('保存失败')}
-catch(e){showSnackbar('保存失败:'+e.message)}
+var d=await r.json();if(d.ok){if(!silent)showSnackbar('配置已保存')}else{showSnackbar('保存失败');return false}}
+catch(e){showSnackbar('保存失败:'+e.message);return false}
+return true;
 }
 
 async function refreshService(){
-await saveConfig();
+var ok=await saveConfig(true);
+if(!ok)return;
 try{var r=await fetch('/api/refresh',{method:'POST'});var d=await r.json();
-if(d.ok)showSnackbar('服务已刷新');else showSnackbar('刷新失败:'+(d.error||''))}
+if(d.ok)showSnackbar('配置已保存，服务已刷新');else showSnackbar('刷新失败:'+(d.error||''))}
 catch(e){showSnackbar('刷新失败:'+e.message)}
 }
 

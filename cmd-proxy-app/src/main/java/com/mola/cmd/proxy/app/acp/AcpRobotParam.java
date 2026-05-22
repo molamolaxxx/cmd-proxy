@@ -11,6 +11,7 @@ public class AcpRobotParam {
     private String signature = "";
     private String workDir = "";
     private String avatar = "";
+    private boolean enabled = true;
     private MemoryConfig memory;
     private String agentProvider = "KIRO_CLI";
     private boolean abilityAutoRefresh = true;
@@ -65,6 +66,14 @@ public class AcpRobotParam {
 
     public void setAvatar(String avatar) {
         this.avatar = avatar;
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
     }
 
     public MemoryConfig getMemory() {

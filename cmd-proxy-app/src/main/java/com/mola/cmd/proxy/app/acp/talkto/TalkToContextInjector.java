@@ -1,10 +1,16 @@
 package com.mola.cmd.proxy.app.acp.talkto;
 
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 
@@ -19,6 +25,10 @@ import java.util.Map;
 public class TalkToContextInjector {
 
     private static final Logger logger = LoggerFactory.getLogger(TalkToContextInjector.class);
+    private static final String ABILITY_BASE_DIR =
+            System.getProperty("user.home") + "/.cmd-proxy/ability";
+    private static final String ABILITY_FILE = "ability.md";
+    private static final int ABILITY_SUMMARY_MAX_CHARS = 200;
 
     /**
      * 构建通讯录上下文，注入到 prompt 中。
@@ -49,8 +59,9 @@ public class TalkToContextInjector {
                 continue;
             }
             sb.append("- ").append(contact.getName());
-            if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
-                sb.append(": ").append(contact.getRemark());
+            String description = resolveDescription(contact, robotRegistry.get(contact.getName()));
+            if (description != null && !description.isEmpty()) {
+                sb.append(": ").append(description);
             }
             sb.append("\n");
             validCount++;
@@ -63,8 +74,61 @@ public class TalkToContextInjector {
 
         sb.append("与 dispatch_subagent 的区别：\n");
         sb.append("- talk_to: 异步发送，不等待结果，目标在自己的上下文中处理\n");
-        sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n");
+        sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n\n");
+        sb.append("重要：输出上述指令 JSON 后，必须立即结束当前回复，不要在指令 JSON 之后继续输出任何文字。系统会自动执行指令并将结果返回给你。\n");
 
         return sb.toString();
+    }
+
+    /**
+     * 按优先级解析联系人的描述。
+     * 优先级：remark > ability.md 摘要 > signature
+     */
+    private String resolveDescription(ContactRef contact, AcpRobotParam targetRobot) {
+        // 1. 配置中的 remark
+        if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
+            return contact.getRemark();
+        }
+
+        // 2. ability.md 摘要
+        String abilityContent = loadAbilityMd(targetRobot.getName());
+        if (abilityContent != null && !abilityContent.isEmpty()) {
+            return truncateAbility(abilityContent);
+        }
+
+        // 3. 兜底 signature
+        String sig = targetRobot.getSignature();
+        return (sig != null && !sig.isEmpty()) ? sig : null;
+    }
+
+    /**
+     * 截断 ability 内容，取前 ABILITY_SUMMARY_MAX_CHARS 字符作为摘要。
+     */
+    private String truncateAbility(String content) {
+        if (content.length() <= ABILITY_SUMMARY_MAX_CHARS) {
+            return content.trim();
+        }
+        // 在限制范围内找最后一个换行
+        int cutoff = content.lastIndexOf("\n", ABILITY_SUMMARY_MAX_CHARS);
+        if (cutoff <= 0) {
+            cutoff = ABILITY_SUMMARY_MAX_CHARS;
+        }
+        return content.substring(0, cutoff).trim() + "...";
+    }
+
+    /**
+     * 读取目标 robot 的 ability.md 文件。
+     * 路径: ~/.cmd-proxy/ability/{sanitized-robotName}/ability.md
+     */
+    private String loadAbilityMd(String robotName) {
+        if (robotName == null || robotName.isEmpty()) return null;
+        try {
+            Path abilityFile = Paths.get(ABILITY_BASE_DIR, PathUtils.sanitizePath(robotName), ABILITY_FILE);
+            if (!Files.exists(abilityFile)) return null;
+            return new String(Files.readAllBytes(abilityFile), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            logger.warn("读取 ability.md 失败, robotName={}", robotName, e);
+            return null;
+        }
     }
 }

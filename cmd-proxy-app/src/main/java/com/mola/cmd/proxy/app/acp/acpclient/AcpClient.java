@@ -546,18 +546,10 @@ public class AcpClient extends AbstractAcpClient {
                 // flush 缓冲区（如果有未推送的非 dispatch 内容）
                 bufferFilter.flush();
 
-                // 检测定时任务指令并处理
-                if (handleScheduleAction(fullResponse.toString(), listener)) {
-                    return;
-                }
-
-                // 检测子 Agent 派发指令并处理
-                if (handleSubAgentDispatch(fullResponse.toString(), listener)) {
-                    return;
-                }
-
-                // 检测 talkTo 指令并处理
-                if (handleTalkTo(fullResponse.toString(), listener)) {
+                // 如果 bufferFilter 已捕获指令 JSON，直接用捕获的 JSON 分发执行
+                String capturedJson = bufferFilter.getCapturedJson();
+                if (capturedJson != null) {
+                    handleCapturedAction(capturedJson, fullResponse.toString(), listener);
                     return;
                 }
 
@@ -745,6 +737,23 @@ public class AcpClient extends AbstractAcpClient {
                 listener.onComplete(fullResponse);
             }
             return true;
+        }
+    }
+
+    /**
+     * 根据捕获的 JSON 中的 action 类型分发执行对应的业务逻辑。
+     * 在 turn 结束后调用，替代原来的 if-return 重解析链。
+     */
+    private void handleCapturedAction(String capturedJson, String fullResponse, AcpResponseListener listener) {
+        if (capturedJson.contains("dispatch_subagent")) {
+            handleSubAgentDispatch(fullResponse, listener);
+        } else if (capturedJson.contains("schedule_task") || capturedJson.contains("manage_schedule")) {
+            handleScheduleAction(fullResponse, listener);
+        } else if (capturedJson.contains("talk_to")) {
+            handleTalkTo(fullResponse, listener);
+        } else {
+            logger.warn("捕获了未知 action 的 JSON: {}", capturedJson);
+            listener.onComplete(fullResponse);
         }
     }
 

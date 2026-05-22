@@ -11,7 +11,7 @@ public class MemoryConfig {
     private int extractIntervalTurns = 5;
     private int indexMaxLines = 200;
     private int maxEntriesPerProject = 30;
-    private int maxEntriesGlobal = 20;
+
     private int projectExpireDays = 30;
     private int subClientTimeout = 120;
 
@@ -38,8 +38,7 @@ public class MemoryConfig {
     public int getMaxEntriesPerProject() { return maxEntriesPerProject; }
     public void setMaxEntriesPerProject(int maxEntriesPerProject) { this.maxEntriesPerProject = maxEntriesPerProject; }
 
-    public int getMaxEntriesGlobal() { return maxEntriesGlobal; }
-    public void setMaxEntriesGlobal(int maxEntriesGlobal) { this.maxEntriesGlobal = maxEntriesGlobal; }
+
 
     public int getProjectExpireDays() { return projectExpireDays; }
     public void setProjectExpireDays(int projectExpireDays) { this.projectExpireDays = projectExpireDays; }

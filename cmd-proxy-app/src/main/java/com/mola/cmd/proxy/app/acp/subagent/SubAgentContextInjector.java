@@ -109,6 +109,7 @@ public class SubAgentContextInjector {
         result.append("{\"agent\":\"").append(validNames.get(0)).append("\",\"title\":\"简短任务名\",\"prompt\":\"具体任务描述\"}]}\n");
         result.append("其中 title 是任务的简短名称（2~6个字），用于在执行过程中区分同一 agent 的不同任务。\n");
         result.append("tasks 数组中可以包含多个任务，同一个 agent 也可以派发多个不同任务，它们会各自启动独立实例并行执行。\n\n");
+        result.append("重要：输出上述指令 JSON 后，必须立即结束当前回复，不要在指令 JSON 之后继续输出任何文字。系统会自动执行指令并将结果返回给你。\n\n");
 
         return result.toString();
     }

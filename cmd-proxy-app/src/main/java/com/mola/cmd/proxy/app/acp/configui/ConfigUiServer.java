@@ -40,7 +40,7 @@ public class ConfigUiServer {
 
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(2));
+        server.setExecutor(Executors.newFixedThreadPool(4));
 
         // 静态页面
         server.createContext("/", this::handleIndex);

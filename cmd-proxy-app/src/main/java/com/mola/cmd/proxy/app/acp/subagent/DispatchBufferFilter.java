@@ -12,8 +12,8 @@ import org.slf4j.LoggerFactory;
  * <p>
  * 状态机：
  * <pre>
- * NORMAL → 检测到 dispatch 前缀 → BUFFERING → JSON 完整且是 dispatch → CAPTURED
- *                                            → 确认不是 dispatch    → flush 缓冲区，回到 NORMAL
+ * NORMAL → 检测到 { → BUFFERING → JSON 完整且是已知 action → CAPTURED
+ *                                → 确认不是已知 action    → flush 缓冲区，回到 NORMAL
  * </pre>
  * <p>
  * 使用方式：每个 sendPrompt 调用创建一个实例，在 agent_message_chunk 中
@@ -46,8 +46,8 @@ public class DispatchBufferFilter {
 
     private State state = State.NORMAL;
     private final StringBuilder buffer = new StringBuilder();
-    /** 标记是否成功捕获了 dispatch JSON（turn 结束后由 AcpClient 检查） */
-    private boolean captured = false;
+    /** 存储捕获的指令 JSON 原文（turn 结束后由 AcpClient 直接使用） */
+    private String capturedJson = null;
 
     /**
      * @param listener 下游 listener
@@ -177,7 +177,7 @@ public class DispatchBufferFilter {
             if (isJsonComplete(content)) {
                 // 确认是已知 action JSON，吞掉不推送
                 logger.info("缓冲区捕获 action JSON，长度={}", content.length());
-                captured = true;
+                capturedJson = content;
                 state = State.NORMAL;
                 buffer.setLength(0);
                 return true;
@@ -239,7 +239,7 @@ public class DispatchBufferFilter {
      * turn 结束时调用。如果还有未 flush 的缓冲区内容，推送给用户。
      */
     public void flush() {
-        if (buffer.length() > 0 && !captured) {
+        if (buffer.length() > 0 && capturedJson == null) {
             flushBuffer();
         }
         buffer.setLength(0);
@@ -247,9 +247,18 @@ public class DispatchBufferFilter {
     }
 
     /**
-     * 是否成功捕获了 dispatch JSON（即 JSON 被吞掉没推给用户）。
+     * 是否成功捕获了指令 JSON（即 JSON 被吞掉没推给用户）。
      */
     public boolean isCaptured() {
-        return captured;
+        return capturedJson != null;
+    }
+
+    /**
+     * 获取捕获的指令 JSON 原文。
+     *
+     * @return 捕获的 JSON 字符串，未捕获时返回 null
+     */
+    public String getCapturedJson() {
+        return capturedJson;
     }
 }
