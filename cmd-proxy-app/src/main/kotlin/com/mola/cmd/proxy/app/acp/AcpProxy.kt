@@ -84,6 +84,71 @@ object AcpProxy {
             globalRobotRegistry, registry, robotToGroupIdMap
         )
 
+        // 注册 crossTalkTo callback 通道（建立到 MolaChat 的 RPC 连接）
+        CmdReceiver.register("crossTalkTo", "crossTalkTo") { param ->
+            // dummy handler：MolaChat 不会 send crossTalkTo 到 cmd-proxy
+            // 注册的目的是建立 RPC 连接，使 CmdReceiver.callback() 有可用的 consumer
+            mutableMapOf<String, String>("result" to "ok")
+        }
+
+        // 注册 crossTalkToDeliver 命令处理器（接收 MolaChat 转发的跨 chatter 消息）
+        CmdReceiver.register("crossTalkToDeliver", cmdGroupList, "接收跨chatter的talkTo消息") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            try {
+                // MolaChat 侧将参数打包为单个 JSON 字符串放在 args[0]
+                val jsonStr = params.cmdArgs[0]
+                val json = com.alibaba.fastjson.JSON.parseObject(jsonStr)
+                val senderChatterId = json.getString("senderChatterId") ?: ""
+                val senderRobotName = json.getString("senderRobotName") ?: ""
+                val targetRobotName = json.getString("targetRobotName") ?: ""
+                val content = json.getString("content") ?: ""
+                val depth = json.getIntValue("depth")
+
+                // 通过 targetRobotName 从 robotToGroupIdMap 精确找到目标 client
+                val targetGroupId = robotToGroupIdMap[targetRobotName]
+                val targetClient = if (targetGroupId != null) registry.getClient(targetGroupId) else null
+                val targetRobot = targetClient?.robotParam
+
+                if (targetClient == null || targetRobot == null) {
+                    log.warn("crossTalkToDeliver 目标不存在: targetRobotName={}", targetRobotName)
+                    resultMap["result"] = "目标 robot '$targetRobotName' 不存在或未启动"
+                    resultMap["success"] = "false"
+                    return@register resultMap
+                }
+
+                // 构造 TalkToMessage（sender 带上 chatterId 前缀，方便回复时路由）
+                val senderFullName = "$senderChatterId:$senderRobotName"
+                val message = com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage(
+                    senderFullName, content, depth + 1
+                )
+
+                // 投递到本地 inbox 或直接发送
+                if (targetClient.state == com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient.State.READY) {
+                    talkToDispatcher.pushIncomingMessageCard(targetClient, message)
+                    targetClient.send(message.buildPrompt(), null)
+                    log.info("crossTalkToDeliver 直接投递: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
+                    resultMap["result"] = "已直接投递"
+                    resultMap["success"] = "true"
+                } else {
+                    val delivered = talkToDispatcher.offerToInbox(targetRobot.name, message)
+                    if (delivered) {
+                        log.info("crossTalkToDeliver 入队: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
+                        resultMap["result"] = "目标忙碌，已放入 inbox"
+                        resultMap["success"] = "true"
+                    } else {
+                        log.warn("crossTalkToDeliver inbox 已满: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
+                        resultMap["result"] = "目标 inbox 已满"
+                        resultMap["success"] = "false"
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("crossTalkToDeliver 处理失败", e)
+                resultMap["result"] = "处理异常: ${e.message}"
+                resultMap["success"] = "false"
+            }
+            resultMap
+        }
+
         // 冷加载：启动时为每个groupId预创建client
         for (groupId in cmdGroupList) {
             try {
@@ -813,6 +878,28 @@ object AcpProxy {
         robotToGroupIdMap.clear()
 
         log.info("ACP 服务已停止")
+    }
+
+    /**
+     * 从 crossTalkToDeliver 命令参数中找到目标 client。
+     * MolaChat 通过 CmdSender.send(cmdName, targetGroupId, args) 路由到正确的 group，
+     * 但 CmdReceiver 的 handler 是按 cmdGroupList 注册的，需要从 groupRobotMap 中匹配。
+     */
+    private fun findClientForDelivery(
+        params: com.mola.cmd.proxy.client.param.CmdInvokeParam,
+        groupRobotMap: Map<String, AcpRobotParam>
+    ): AcpClient? {
+        // CmdReceiver 的 invoke 会通过 routeTag 路由到正确的 group
+        // 但 handler 内部无法直接获取 group 信息，需要通过 cmdArgs 中的信息反查
+        // 实际上 MolaChat send 时指定了 targetGroupId，RPC 框架会路由到对应 group 的 provider
+        // 这里遍历所有 client 找到匹配的（单 cmd-proxy 实例内 robot 数量有限，性能无问题）
+        for ((groupId, robot) in groupRobotMap) {
+            if (robot == null) continue
+            val client = registry.getClient(groupId) ?: continue
+            // 返回第一个匹配的 client（单 chatter 场景下每个 robot 只有一个 client）
+            return client
+        }
+        return null
     }
 
 }

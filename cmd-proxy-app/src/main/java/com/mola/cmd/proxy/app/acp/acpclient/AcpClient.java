@@ -720,10 +720,14 @@ public class AcpClient extends AbstractAcpClient {
         if (request == null) return false;
 
         String senderName = robotParam != null ? robotParam.getName() : groupId;
+        // 从 groupId 中提取 chatterId（groupId = sort(chatterId, acpId).join("")）
+        String senderChatterId = extractChatterId();
         logger.info("检测到 talkTo 指令: {} → {}", senderName, request.getTarget());
 
         try {
-            String resultText = talkToDispatcher.deliver(request, senderName);
+            java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
+                    robotParam != null ? robotParam.getContacts() : null;
+            String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
             // 在发送方前端推送 talkTo 卡片
             listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
             sendPrompt(resultText, null, listener);
@@ -866,5 +870,27 @@ public class AcpClient extends AbstractAcpClient {
 
     public List<Path> getMcpConfigPaths() {
         return Collections.unmodifiableList(mcpConfigPaths);
+    }
+
+    /**
+     * 从 groupId 中提取 chatterId。
+     * groupId = sort(chatterId, acpId).join("")，acpId 以 "acp-" 开头。
+     * 通过去掉 acpId 部分得到 chatterId。
+     */
+    private String extractChatterId() {
+        if (groupId == null || groupId.isEmpty()) return "";
+        // acpId 格式: "acp-" + robotName.replace(" ", "_")
+        String acpId = "";
+        if (robotParam != null && robotParam.getName() != null) {
+            acpId = "acp-" + robotParam.getName().replace(" ", "_").replace("\u3000", "_");
+        }
+        if (acpId.isEmpty()) return groupId;
+        // groupId 是 sort(chatterId, acpId) 后拼接的，去掉 acpId 部分就是 chatterId
+        if (groupId.startsWith(acpId)) {
+            return groupId.substring(acpId.length());
+        } else if (groupId.endsWith(acpId)) {
+            return groupId.substring(0, groupId.length() - acpId.length());
+        }
+        return groupId;
     }
 }

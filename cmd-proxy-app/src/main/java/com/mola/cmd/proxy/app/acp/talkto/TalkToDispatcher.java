@@ -7,12 +7,18 @@ import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
+import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
+import com.mola.cmd.proxy.client.provider.CmdReceiver;
+import com.mola.cmd.proxy.client.resp.CmdResponseContent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -132,13 +138,45 @@ public class TalkToDispatcher {
 
     /**
      * 执行消息投递。
-     * 目标 READY 时直接投递，非 READY 时放入 inbox。
+     * 根据 target 在通讯录中的配置判断走本地投递还是跨 chatter 投递。
      *
-     * @param request    解析出的 talkTo 请求
-     * @param senderName 发送方 robot 名称
+     * @param request         解析出的 talkTo 请求
+     * @param senderName      发送方 robot 名称
+     * @param senderChatterId 发送方 chatterId（跨 chatter 时需要）
+     * @param contacts        发送方 robot 的通讯录配置
      * @return 执行结果文本，作为 follow-up prompt 回注发送方
      */
-    public String deliver(TalkToRequest request, String senderName) {
+    public String deliver(TalkToRequest request, String senderName, String senderChatterId, List<ContactRef> contacts) {
+        String target = request.getTarget();
+
+        // 查找通讯录中是否有该 target 的远程配置
+        ContactRef remoteContact = findRemoteContact(target, contacts);
+        if (remoteContact != null) {
+            return deliverCrossChatter(remoteContact, request, senderName, senderChatterId);
+        }
+
+        // 如果 target 包含冒号（"chatterId:robotName" 格式），说明是跨 chatter 回复场景
+        // 即使通讯录中没有配置，也走跨 chatter 投递
+        if (target.contains(":")) {
+            int colonIdx = target.indexOf(':');
+            String targetChatterId = target.substring(0, colonIdx).trim();
+            String targetRobotName = target.substring(colonIdx + 1).trim();
+            if (!targetChatterId.isEmpty() && !targetRobotName.isEmpty()) {
+                ContactRef adhocRemote = new ContactRef(targetRobotName, "");
+                adhocRemote.setChatterId(targetChatterId);
+                adhocRemote.setRemote(true);
+                return deliverCrossChatter(adhocRemote, request, senderName, senderChatterId);
+            }
+        }
+
+        // 本地投递
+        return deliverLocal(request, senderName);
+    }
+
+    /**
+     * 本地消息投递（原有逻辑）。
+     */
+    private String deliverLocal(TalkToRequest request, String senderName) {
         String target = request.getTarget();
         String content = request.getContent();
         int depth = request.getDepth();
@@ -147,7 +185,7 @@ public class TalkToDispatcher {
         if (depth >= MAX_DEPTH) {
             logger.warn("talkTo 深度超限: sender={}, target={}, depth={}", senderName, target, depth);
             return "[talkTo 结果]\n发送失败：消息传递深度超过上限（" + MAX_DEPTH + "），可能存在循环。已终止发送。";
-      }
+        }
 
         // 2. 防循环：短时间重复检测
         String dedupKey = senderName + "→" + target + ":" + content.hashCode();
@@ -206,6 +244,92 @@ public class TalkToDispatcher {
                         + "你可以稍后再试，或使用 dispatch_subagent 创建独立子进程执行。";
             }
         }
+    }
+
+    // ==================== 跨 Chatter 投递 ====================
+
+    /**
+     * 跨 chatter 消息投递（火烧即忘）。
+     * 通过 CmdReceiver.callback 推送到 MolaChat 网关。
+     */
+    private String deliverCrossChatter(ContactRef remoteContact, TalkToRequest request,
+                                       String senderName, String senderChatterId) {
+        String target = remoteContact.getName();
+        String targetChatterId = remoteContact.getChatterId();
+        String content = request.getContent();
+        int depth = request.getDepth();
+
+        // 1. 防循环：深度检查
+        if (depth >= MAX_DEPTH) {
+            logger.warn("crossTalkTo 深度超限: sender={}, target={}, depth={}", senderName, target, depth);
+            return "[talkTo 结果]\n发送失败：消息传递深度超过上限（" + MAX_DEPTH + "），可能存在循环。已终止发送。";
+        }
+
+        // 2. 防循环：短时间重复检测
+        String dedupKey = senderName + "→" + target + "@" + targetChatterId + ":" + content.hashCode();
+        Long lastSent = recentMessages.get(dedupKey);
+        long now = System.currentTimeMillis();
+        if (lastSent != null && (now - lastSent) < DEDUP_WINDOW_MS) {
+            logger.warn("crossTalkTo 短时间重复: key={}", dedupKey);
+            return "[talkTo 结果]\n发送失败：短时间内向 " + target + " 发送了相同内容，已阻止重复发送。";
+        }
+
+        // 3. 记录发送记录
+        recentMessages.put(dedupKey, now);
+        cleanExpiredDedup();
+
+        // 4. 通过 CmdReceiver.callback 推送到 MolaChat 网关（火烧即忘）
+        try {
+            Map<String, String> resultMap = new HashMap<>();
+            resultMap.put("targetChatterId", targetChatterId);
+            resultMap.put("targetRobotName", target);
+            resultMap.put("senderChatterId", senderChatterId);
+            resultMap.put("senderRobotName", senderName);
+            resultMap.put("content", content);
+            resultMap.put("depth", String.valueOf(depth));
+
+            CmdResponseContent response = new CmdResponseContent(
+                    UUID.randomUUID().toString(), resultMap
+            );
+            CmdReceiver.INSTANCE.callback("crossTalkTo", "crossTalkTo", response);
+
+            logger.info("crossTalkTo 已发送: {} → {}@{}", senderName, target, targetChatterId);
+            return "[talkTo 结果]\n已成功将消息发送给 " + target
+                    + "（跨服务器）。对方会处理你的请求，你可以继续当前工作。";
+        } catch (Exception e) {
+            logger.error("crossTalkTo callback 发送失败", e);
+            return "[talkTo 结果]\n发送失败：网关通信异常 - " + e.getMessage();
+        }
+    }
+
+    /**
+     * 从通讯录中查找远程联系人配置。
+     *
+     * @param targetName 目标 robot 名称
+     * @param contacts   发送方的通讯录
+     * @return 远程联系人配置，未找到或非远程时返回 null
+     */
+    private ContactRef findRemoteContact(String targetName, List<ContactRef> contacts) {
+        if (contacts == null) return null;
+        for (ContactRef contact : contacts) {
+            if (contact.isRemote() && targetName.equals(contact.getName())) {
+                return contact;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 将消息放入目标 robot 的 inbox（供 crossTalkToDeliver 命令处理器调用）。
+     *
+     * @param robotName 目标 robot 名称
+     * @param message   待投递的消息
+     * @return true 入队成功，false inbox 已满
+     */
+    public boolean offerToInbox(String robotName, TalkToMessage message) {
+        LinkedBlockingQueue<TalkToMessage> inbox = inboxes.computeIfAbsent(
+                robotName, k -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
+        return inbox.offer(message);
     }
 
     // ==================== Inbox 管理 ====================

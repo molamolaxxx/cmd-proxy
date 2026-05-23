@@ -212,9 +212,17 @@ function addSubAgent(){dlgSubAgents.push({name:'',description:''});renderSubAgen
 
 function renderContacts(){
 var c=document.getElementById('dContactList');
-c.innerHTML=dlgContacts.map(function(s,i){return '<div class="list-item"><input type="text" placeholder="Robot名称" value="'+esc(s.name||'')+'" onchange="dlgContacts['+i+'].name=this.value"><input type="text" placeholder="备注" value="'+esc(s.remark||'')+'" onchange="dlgContacts['+i+'].remark=this.value"><button class="btn btn-danger btn-sm" onclick="dlgContacts.splice('+i+',1);renderContacts()"><span class="material-icons">close</span></button></div>'}).join('');
+c.innerHTML=dlgContacts.map(function(s,i){
+var isRemote=s.isRemote||false;
+var row='<div class="list-item"><label style="display:flex;align-items:center;gap:4px;min-width:60px"><input type="checkbox" '+(isRemote?'checked':'')+' onchange="dlgContacts['+i+'].isRemote=this.checked;renderContacts()">远程</label>';
+row+='<input type="text" placeholder="Robot名称" value="'+esc(s.name||'')+'" onchange="dlgContacts['+i+'].name=this.value">';
+if(isRemote){row+='<input type="text" placeholder="目标ChatterId（必填）" value="'+esc(s.chatterId||'')+'" onchange="dlgContacts['+i+'].chatterId=this.value">';}
+row+='<input type="text" placeholder="备注'+(isRemote?'（远程必填）':'')+'" value="'+esc(s.remark||'')+'" onchange="dlgContacts['+i+'].remark=this.value">';
+row+='<button class="btn btn-danger btn-sm" onclick="dlgContacts.splice('+i+',1);renderContacts()"><span class="material-icons">close</span></button></div>';
+return row;
+}).join('');
 }
-function addContact(){dlgContacts.push({name:'',remark:''});renderContacts()}
+function addContact(){dlgContacts.push({name:'',remark:'',isRemote:false,chatterId:''});renderContacts()}
 
 function saveRobot(){
 var name=document.getElementById('dName').value.trim();
@@ -244,7 +252,16 @@ dreamMinHours:parseInt(document.getElementById('dMemDreamH').value)||24,
 dreamMinSessions:parseInt(document.getElementById('dMemDreamS').value)||5};
 }else{robot.memory={enabled:false}}
 robot.subAgents=dlgSubAgents.filter(function(s){return s.name&&s.name.trim()});
-robot.contacts=dlgContacts.filter(function(s){return s.name&&s.name.trim()});
+robot.contacts=dlgContacts.filter(function(s){
+if(!s.name||!s.name.trim())return false;
+if(s.isRemote&&(!s.chatterId||!s.chatterId.trim())){showSnackbar('远程联系人 "'+s.name+'" 必须填写目标ChatterId');return false;}
+if(s.isRemote&&(!s.remark||!s.remark.trim())){showSnackbar('远程联系人 "'+s.name+'" 必须填写备注');return false;}
+return true;
+});
+// 校验通讯录中不允许重名
+var contactNames=robot.contacts.map(function(c){return c.name.trim()});
+var dupName=contactNames.find(function(n,i){return contactNames.indexOf(n)!==i});
+if(dupName){showSnackbar('通讯录中存在重名: "'+dupName+'"');return;}
 if(editIdx>=0){config.robots[editIdx]=robot}else{config.robots.push(robot)}
 closeDialog('robotDialog');render();
 showSnackbar(editIdx>=0?'Robot 已更新':'Robot 已添加');

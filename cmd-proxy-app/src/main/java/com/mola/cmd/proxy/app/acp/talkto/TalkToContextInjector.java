@@ -54,17 +54,29 @@ public class TalkToContextInjector {
         for (ContactRef contact : contacts) {
             if (contact.getName() == null || contact.getName().isEmpty()) continue;
             if (contact.getName().equals(selfName)) continue;
-            if (!robotRegistry.containsKey(contact.getName())) {
-                logger.warn("通讯录引用 '{}' 在 robot 注册表中不存在，跳过", contact.getName());
-                continue;
+
+            if (contact.isRemote()) {
+                // 跨 chatter 联系人：不做本地 registry 校验，直接展示（remark 必填）
+                sb.append("- ").append(contact.getName());
+                if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
+                    sb.append(": ").append(contact.getRemark());
+                }
+                sb.append("\n");
+                validCount++;
+            } else {
+                // 本地联系人：需要在 registry 中存在
+                if (!robotRegistry.containsKey(contact.getName())) {
+                    logger.warn("通讯录引用 '{}' 在 robot 注册表中不存在，跳过", contact.getName());
+                    continue;
+                }
+                sb.append("- ").append(contact.getName());
+                String description = resolveDescription(contact, robotRegistry.get(contact.getName()));
+                if (description != null && !description.isEmpty()) {
+                    sb.append(": ").append(description);
+                }
+                sb.append("\n");
+                validCount++;
             }
-            sb.append("- ").append(contact.getName());
-            String description = resolveDescription(contact, robotRegistry.get(contact.getName()));
-            if (description != null && !description.isEmpty()) {
-                sb.append(": ").append(description);
-            }
-            sb.append("\n");
-            validCount++;
         }
 
         if (validCount == 0) return "";
