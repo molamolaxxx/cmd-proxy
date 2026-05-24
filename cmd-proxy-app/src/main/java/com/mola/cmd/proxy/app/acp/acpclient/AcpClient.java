@@ -422,79 +422,78 @@ public class AcpClient extends AbstractAcpClient {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
-        // 注入当前时间上下文
-        String timeContext = String.format("[Current Time: %s]\n[Workspace: %s]\n",
-                ZonedDateTime.now().format(
-                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")),
-                workspacePath);
+        // 判断是否为 session 内首次 turn：首次 turn 注入完整上下文前缀，后续 turn 只带时间+用户输入
+        // 这样历史 turn 内容稳定不变，有利于 LLM provider 的 prompt prefix caching
+        boolean isFirstTurn = (historyManager.getTurnCount() == initialTurnCount);
 
-        // 注入记忆上下文
-        String memoryContext = "";
-        if (memoryManager != null) {
-            try {
-                memoryContext = memoryManager.buildMemoryPrompt(workspacePath);
-            } catch (Exception e) {
-                logger.warn("构建记忆上下文失败，跳过", e);
+        StringBuilder fullTextBuilder = new StringBuilder();
+
+        if (isFirstTurn) {
+            // 注入子 Agent 上下文
+            if (subAgentContextInjector != null && robotParam != null
+                    && robotParam.hasSubAgents() && globalRobotRegistry != null) {
+                try {
+                    String subAgentContext = subAgentContextInjector.buildContext(
+                            robotParam.getSubAgents(), globalRobotRegistry, robotParam.getName());
+                    if (!subAgentContext.isEmpty()) fullTextBuilder.append(subAgentContext).append("\n");
+                } catch (Exception e) {
+                    logger.warn("构建子 Agent 上下文失败，跳过", e);
+                }
+            }
+
+            // 注入定时任务上下文
+            if (scheduleContextInjector != null) {
+                try {
+                    boolean scheduleEnabled = robotParam == null || robotParam.isScheduleEnabled();
+                    String scheduleContext = scheduleContextInjector.buildContext(scheduleEnabled, options.isScheduleExecution());
+                    if (!scheduleContext.isEmpty()) fullTextBuilder.append(scheduleContext).append("\n");
+                } catch (Exception e) {
+                    logger.warn("构建定时任务上下文失败，跳过", e);
+                }
+            }
+
+            // 注入 TalkTo 通讯录上下文
+            if (talkToContextInjector != null && robotParam != null
+                    && robotParam.hasContacts() && globalRobotRegistry != null) {
+                try {
+                    String talkToContext = talkToContextInjector.buildContext(
+                            robotParam.getContacts(), globalRobotRegistry, robotParam.getName());
+                    if (!talkToContext.isEmpty()) fullTextBuilder.append(talkToContext).append("\n");
+                } catch (Exception e) {
+                    logger.warn("构建 TalkTo 上下文失败，跳过", e);
+                }
+            }
+
+            // 注入记忆上下文
+            if (memoryManager != null) {
+                try {
+                    String memoryContext = memoryManager.buildMemoryPrompt(workspacePath);
+                    if (!memoryContext.isEmpty()) fullTextBuilder.append(memoryContext).append("\n");
+                } catch (Exception e) {
+                    logger.warn("构建记忆上下文失败，跳过", e);
+                }
             }
         }
 
-        // 注入子 Agent 上下文
-        String subAgentContext = "";
-        if (subAgentContextInjector != null && robotParam != null
-                && robotParam.hasSubAgents() && globalRobotRegistry != null) {
-            try {
-                subAgentContext = subAgentContextInjector.buildContext(
-                        robotParam.getSubAgents(), globalRobotRegistry, robotParam.getName());
-            } catch (Exception e) {
-                logger.warn("构建子 Agent 上下文失败，跳过", e);
-            }
-        }
-
-        // 注入定时任务上下文
-        String scheduleContext = "";
-        if (scheduleContextInjector != null) {
-            try {
-                boolean scheduleEnabled = robotParam == null || robotParam.isScheduleEnabled();
-                scheduleContext = scheduleContextInjector.buildContext(scheduleEnabled, options.isScheduleExecution());
-            } catch (Exception e) {
-                logger.warn("构建定时任务上下文失败，跳过", e);
-            }
-        }
-
-        // 注入 TalkTo 通讯录上下文
-        String talkToContext = "";
-        if (talkToContextInjector != null && robotParam != null
-                && robotParam.hasContacts() && globalRobotRegistry != null) {
-            try {
-                talkToContext = talkToContextInjector.buildContext(
-                        robotParam.getContacts(), globalRobotRegistry, robotParam.getName());
-            } catch (Exception e) {
-                logger.warn("构建 TalkTo 上下文失败，跳过", e);
-            }
-        }
-
-        // 构建文件路径上下文
-        String fileContext = "";
+        // 文件路径每次都带（用户可能每次 turn 附带不同文件）
         if (filePaths != null && !filePaths.isEmpty()) {
             StringBuilder fb = new StringBuilder("[Attached Files]\n");
             for (String path : filePaths) {
                 fb.append("- ").append(path).append("\n");
             }
-            fileContext = fb.toString();
+            fullTextBuilder.append(fb).append("\n");
         }
 
-        JsonArray prompt = new JsonArray();
+        // 时间上下文每次都带（定时任务等场景需要精确时间）
+        String timeContext = String.format("[Current Time: %s]\n[Workspace: %s]\n",
+                ZonedDateTime.now().format(
+                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")),
+                workspacePath);
+        fullTextBuilder.append(timeContext).append(userInput);
 
+        JsonArray prompt = new JsonArray();
         JsonObject textBlock = new JsonObject();
         textBlock.addProperty("type", "text");
-        // 拼接顺序：子Agent上下文 → 定时任务上下文 → 通讯录上下文 → 记忆 → 文件路径 → 时间 → 用户输入
-        StringBuilder fullTextBuilder = new StringBuilder();
-        if (!subAgentContext.isEmpty()) fullTextBuilder.append(subAgentContext).append("\n");
-        if (!scheduleContext.isEmpty()) fullTextBuilder.append(scheduleContext).append("\n");
-        if (!talkToContext.isEmpty()) fullTextBuilder.append(talkToContext).append("\n");
-        if (!memoryContext.isEmpty()) fullTextBuilder.append(memoryContext).append("\n");
-        if (!fileContext.isEmpty()) fullTextBuilder.append(fileContext).append("\n");
-        fullTextBuilder.append(timeContext).append(userInput);
         textBlock.addProperty("text", fullTextBuilder.toString());
         prompt.add(textBlock);
         params.add("prompt", prompt);
