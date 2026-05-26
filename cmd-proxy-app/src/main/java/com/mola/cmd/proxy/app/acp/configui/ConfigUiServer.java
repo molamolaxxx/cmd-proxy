@@ -21,8 +21,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.cert.X509Certificate;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -312,13 +311,40 @@ public class ConfigUiServer {
                 }
             }
 
-            // 原子替换
-            Files.move(tmpFile, jarPath, StandardCopyOption.REPLACE_EXISTING);
+            boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
+            if (isWindows) {
+                // Windows下无法原地替换运行中的JAR，先写到.new.jar，再通过脚本异步替换
+                Path newJar = jarPath.resolveSibling(".cmd-proxy-update.new.jar");
+                Files.move(tmpFile, newJar, StandardCopyOption.REPLACE_EXISTING);
 
-            updateProgress = 100;
-            updateStatus = "done";
-            updateMessage = "更新完成，重启后生效";
-            logger.info("JAR 更新完成: {}", jarPath);
+                Path scriptFile = jarPath.resolveSibling(".cmd-proxy-update-replace.bat");
+                try (PrintWriter pw = new PrintWriter(Files.newBufferedWriter(scriptFile))) {
+                    pw.println("@echo off");
+                    pw.println("set OLD=" + jarPath.toAbsolutePath());
+                    pw.println("set NEW=" + newJar.toAbsolutePath());
+                    pw.println("set SELF=" + scriptFile.toAbsolutePath());
+                    pw.println(":wait");
+                    pw.println("ping 127.0.0.1 -n 2 >nul");
+                    pw.println("move /Y \"%NEW%\" \"%OLD%\" >nul 2>&1");
+                    pw.println("if errorlevel 1 goto wait");
+                    pw.println("del \"%SELF%\"");
+                }
+                Runtime.getRuntime().exec(
+                        new String[]{"cmd.exe", "/c", "start", "/min", "",
+                                scriptFile.toAbsolutePath().toString()});
+
+                updateProgress = 100;
+                updateStatus = "done";
+                updateMessage = "更新已准备完成，关闭程序后自动替换并重启";
+                logger.info("JAR 更新脚本已创建: {}", scriptFile);
+            } else {
+                Files.move(tmpFile, jarPath, StandardCopyOption.REPLACE_EXISTING);
+
+                updateProgress = 100;
+                updateStatus = "done";
+                updateMessage = "更新完成，重启后生效";
+                logger.info("JAR 更新完成: {}", jarPath);
+            }
 
         } catch (Exception e) {
             logger.error("JAR 更新失败", e);

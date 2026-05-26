@@ -539,6 +539,11 @@ public class AcpClient extends AbstractAcpClient {
                     stopReason = msg.getAsJsonObject("result").get("stopReason").getAsString();
                 }
                 logger.info("ACP prompt turn 结束, stopReason={}, msg = {}", stopReason, trimmed);
+
+                // 排空迟到 chunk（OpenCode ACP bug workaround）
+                // sleep 让管道里迟到的数据到位，然后一次抽干 reader 缓冲区
+                drainLateChunks(fullResponse, bufferFilter, listener, toolTitleCache);
+
                 historyManager.addAssistantMessage(fullResponse.toString());
                 historyManager.flushTurn(sessionId);
 
@@ -564,56 +569,7 @@ public class AcpClient extends AbstractAcpClient {
 
             // session/update
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
-                JsonObject updateParams = msg.getAsJsonObject("params");
-                if (updateParams == null) continue;
-                JsonObject update = updateParams.getAsJsonObject("update");
-                if (update == null) continue;
-
-                String updateType = update.has("sessionUpdate")
-                        ? update.get("sessionUpdate").getAsString() : "";
-
-                if ("agent_message_chunk".equals(updateType)) {
-                    JsonObject content = update.getAsJsonObject("content");
-                    if (content != null && content.has("text")) {
-                        String text = content.get("text").getAsString();
-                        fullResponse.append(text);
-                        // 通过缓冲过滤器推送，dispatch JSON 会被拦截
-                        bufferFilter.accept(text);
-                    }
-                } else if ("tool_call".equals(updateType) || "tool_call_update".equals(updateType)) {
-                    String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
-                    String title = update.has("title") ? update.get("title").getAsString() : "";
-                    String status = update.has("status") ? update.get("status").getAsString() : "pending";
-                    // title 缓存：首次有值时存入，后续为空时回填
-                    if (!title.isEmpty()) {
-                        toolTitleCache.put(toolCallId, title);
-                    } else {
-                        title = toolTitleCache.getOrDefault(toolCallId, "");
-                    }
-                    // 打印 update 摘要（排除 rawInput/rawOutput，避免日志过大）
-                    JsonObject updateLog = update.deepCopy();
-                    updateLog.remove("rawInput");
-                    updateLog.remove("rawOutput");
-                    logger.info("工具调用: {}", updateLog);
-                    if ("completed".equals(status)) {
-                        JsonObject rawInput = update.has("rawInput") ? update.getAsJsonObject("rawInput") : null;
-                        JsonObject rawOutput = update.has("rawOutput") ? update.getAsJsonObject("rawOutput") : null;
-                        historyManager.addToolMessage(toolCallId, title, status, rawInput, rawOutput);
-                        // 访问强化：检测 Agent 是否读取了记忆明细文件
-                        detectMemoryAccess(rawInput);
-                    }
-                    listener.onToolCall(toolCallId, title, status, update);
-                } else if ("usage_update".equals(updateType)) {
-                    if (update.has("used") && update.has("size")) {
-                        double used = update.get("used").getAsDouble();
-                        double size = update.get("size").getAsDouble();
-                        if (size > 0) {
-                            contextUsagePercentage = (used / size) * 100;
-                        }
-                    }
-                } else {
-                    logger.warn("ACP IN session/update 输出未匹配任何处理分支, msg={}", msg);
-                }
+                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache);
             } else {
                 double usage = agentProvider.extractContextUsage(msg);
                 if (usage >= 0) {
@@ -621,6 +577,100 @@ public class AcpClient extends AbstractAcpClient {
                 } else {
                     logger.warn("ACP 输出未匹配任何处理分支, msg={}", msg);
                 }
+            }
+        }
+    }
+
+    /**
+     * 处理 session/update 通知。
+     * 主循环和 drain 阶段共用此方法。
+     */
+    private void processSessionUpdate(JsonObject msg, StringBuilder fullResponse,
+                                       DispatchBufferFilter bufferFilter, AcpResponseListener listener,
+                                       Map<String, String> toolTitleCache) {
+        JsonObject updateParams = msg.getAsJsonObject("params");
+        if (updateParams == null) return;
+        JsonObject update = updateParams.getAsJsonObject("update");
+        if (update == null) return;
+
+        String updateType = update.has("sessionUpdate")
+                ? update.get("sessionUpdate").getAsString() : "";
+
+        if ("agent_message_chunk".equals(updateType)) {
+            JsonObject content = update.getAsJsonObject("content");
+            if (content != null && content.has("text")) {
+                String text = content.get("text").getAsString();
+                fullResponse.append(text);
+                bufferFilter.accept(text);
+            }
+        } else if ("tool_call".equals(updateType) || "tool_call_update".equals(updateType)) {
+            String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
+            String title = update.has("title") ? update.get("title").getAsString() : "";
+            String status = update.has("status") ? update.get("status").getAsString() : "pending";
+            if (!title.isEmpty()) {
+                toolTitleCache.put(toolCallId, title);
+            } else {
+                title = toolTitleCache.getOrDefault(toolCallId, "");
+            }
+            JsonObject updateLog = update.deepCopy();
+            updateLog.remove("rawInput");
+            updateLog.remove("rawOutput");
+            logger.info("工具调用: {}", updateLog);
+            if ("completed".equals(status)) {
+                JsonObject rawInput = update.has("rawInput") ? update.getAsJsonObject("rawInput") : null;
+                JsonObject rawOutput = update.has("rawOutput") ? update.getAsJsonObject("rawOutput") : null;
+                historyManager.addToolMessage(toolCallId, title, status, rawInput, rawOutput);
+                detectMemoryAccess(rawInput);
+            }
+            listener.onToolCall(toolCallId, title, status, update);
+        } else if ("usage_update".equals(updateType)) {
+            if (update.has("used") && update.has("size")) {
+                double used = update.get("used").getAsDouble();
+                double size = update.get("size").getAsDouble();
+                if (size > 0) {
+                    contextUsagePercentage = (used / size) * 100;
+                }
+            }
+        } else if ("agent_thought_chunk".equals(updateType)) {
+            // 不处理思考
+        } else {
+            logger.warn("ACP IN session/update 输出未匹配任何处理分支, msg={}", msg);
+        }
+    }
+
+    /**
+     * 排空迟到 chunk（OpenCode ACP bug workaround：session/update 通知可能在
+     * end_turn RPC response 之后送达）。
+     * sleep 让管道里迟到的数据到位，然后一次性抽干 reader 缓冲区。
+     */
+    private void drainLateChunks(StringBuilder fullResponse, DispatchBufferFilter bufferFilter,
+                                  AcpResponseListener listener, Map<String, String> toolTitleCache)
+            throws IOException {
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        while (reader.ready()) {
+            String line = reader.readLine();
+            if (line == null) break;
+
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("{")) continue;
+
+            JsonObject msg;
+            try {
+                msg = JsonParser.parseString(trimmed).getAsJsonObject();
+            } catch (JsonSyntaxException e) {
+                continue;
+            }
+
+            if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
+                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache);
+            } else if (msg.has("method") && "session/request_permission".equals(msg.get("method").getAsString())) {
+                autoAllowPermission(msg);
             }
         }
     }

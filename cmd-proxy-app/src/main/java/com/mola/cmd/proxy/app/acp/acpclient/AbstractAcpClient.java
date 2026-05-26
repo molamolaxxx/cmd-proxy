@@ -256,6 +256,7 @@ public abstract class AbstractAcpClient implements Closeable {
 
             // prompt response — turn 结束
             if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+                drainLateChunksSync(fullResponse);
                 return fullResponse.toString();
             }
 
@@ -346,6 +347,39 @@ public abstract class AbstractAcpClient implements Closeable {
             return content.get("text").getAsString();
         }
         return null;
+    }
+
+    /**
+     * 排空迟到 chunk（同步版，供 doSendPromptSync 使用）。
+     * sleep 让管道里迟到的数据到位，然后一次性抽干 reader 缓冲区。
+     */
+    private void drainLateChunksSync(StringBuilder fullResponse) throws IOException {
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        while (reader.ready()) {
+            String line = reader.readLine();
+            if (line == null) break;
+
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("{")) continue;
+
+            JsonObject msg;
+            try {
+                msg = JsonParser.parseString(trimmed).getAsJsonObject();
+            } catch (JsonSyntaxException e) {
+                continue;
+            }
+
+            String text = extractAgentMessageText(msg);
+            if (text != null) {
+                fullResponse.append(text);
+            }
+        }
     }
 
 

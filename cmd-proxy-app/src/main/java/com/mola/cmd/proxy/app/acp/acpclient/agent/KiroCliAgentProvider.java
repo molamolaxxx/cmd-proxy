@@ -16,14 +16,13 @@ import java.util.List;
 public class KiroCliAgentProvider implements AgentProvider {
 
     private static final String HOME = System.getProperty("user.home");
-    private static final String DEFAULT_COMMAND = HOME + "/.local/bin/kiro-cli";
     private static final String[] DEFAULT_ARGS = {"acp"};
 
     private final String command;
     private final String[] args;
 
     public KiroCliAgentProvider() {
-        this(DEFAULT_COMMAND, DEFAULT_ARGS);
+        this("kiro-cli", DEFAULT_ARGS);
     }
 
     public KiroCliAgentProvider(String command, String[] args) {
