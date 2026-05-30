@@ -105,6 +105,11 @@ public abstract class AbstractAcpClient implements Closeable {
     private void initializeWithRetry() throws IOException {
         int maxRetries = 5;
         for (int i = 0; i < maxRetries; i++) {
+            // 检查进程是否还活着
+            if (process != null && !process.isAlive()) {
+                int exitCode = process.exitValue();
+                throw new IOException("ACP 子进程已退出 (exitCode=" + exitCode + ")，无法 initialize。请检查 [ACP STDERR] 日志获取崩溃原因。");
+            }
             try {
                 initialize();
                 return;
@@ -160,6 +165,13 @@ public abstract class AbstractAcpClient implements Closeable {
         String extraPaths = home + "/.local/bin"
                 + File.pathSeparator + home + "/.cargo/bin"
                 + File.pathSeparator + "/usr/local/bin";
+        // Windows: 进程可能从精简环境启动（如服务/计划任务），PATH 不完整，从注册表读取完整 PATH
+        if (System.getProperty("os.name").toLowerCase().contains("win")) {
+            String regPath = readWindowsRegistryPath();
+            if (regPath != null && !regPath.isEmpty()) {
+                currentPath = regPath;
+            }
+        }
         if (!currentPath.contains(home + "/.local/bin")) {
             pb.environment().put("PATH", extraPaths + File.pathSeparator + currentPath);
         }
@@ -187,23 +199,33 @@ public abstract class AbstractAcpClient implements Closeable {
             }
         }
 
-        logger.info("启动 ACP 进程: {}", cmd);
+        logger.info("启动 ACP 进程: {}, PATH contains node: {}", cmd,
+                pb.environment().getOrDefault("PATH", "").contains("node"));
         process = pb.start();
         writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
 
-        // stderr 日志转发
+        // stderr 日志转发（用 INFO 级别，方便排查子进程崩溃原因）
         Thread stderrThread = new Thread(() -> {
             try (BufferedReader errReader = new BufferedReader(
                     new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = errReader.readLine()) != null) {
-                    logger.debug("[ACP STDERR] {}", line);
+                    logger.info("[ACP STDERR][{}] {}", groupId, line);
                 }
             } catch (IOException e) {
                 // 进程关闭时正常退出
             }
-        }, "acp-stderr-reader");
+            // 进程退出时记录 exit code
+            if (process != null) {
+                try {
+                    int exitCode = process.waitFor();
+                    logger.warn("[ACP STDERR][{}] 进程已退出, exitCode={}", groupId, exitCode);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }, "acp-stderr-" + groupId);
         stderrThread.setDaemon(true);
         stderrThread.start();
     }
@@ -454,4 +476,47 @@ public abstract class AbstractAcpClient implements Closeable {
     public String getWorkspacePath() { return workspacePath; }
     public double getContextUsagePercentage() { return contextUsagePercentage; }
     protected void setSessionId(String sessionId) { this.sessionId = sessionId; }
+
+    // ==================== Windows PATH 工具方法 ====================
+
+    /**
+     * 从 Windows 注册表读取系统级 + 用户级 PATH，合并返回。
+     * 解决从精简环境（服务/计划任务）启动时 PATH 不完整的问题。
+     */
+    private static String readWindowsRegistryPath() {
+        try {
+            String systemPath = queryRegistry(
+                    "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "Path");
+            String userPath = queryRegistry("HKCU\\Environment", "Path");
+            StringBuilder sb = new StringBuilder();
+            if (systemPath != null) sb.append(systemPath);
+            if (userPath != null) {
+                if (sb.length() > 0) sb.append(File.pathSeparator);
+                sb.append(userPath);
+            }
+            return sb.length() > 0 ? sb.toString() : null;
+        } catch (Exception e) {
+            logger.warn("读取 Windows 注册表 PATH 失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private static String queryRegistry(String key, String valueName) throws IOException {
+        Process p = new ProcessBuilder("reg", "query", key, "/v", valueName)
+                .redirectErrorStream(true).start();
+        try (BufferedReader r = new BufferedReader(
+                new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                // 格式: "    Path    REG_SZ    C:\xxx;C:\yyy"  或 REG_EXPAND_SZ
+                if (line.contains("REG_SZ") || line.contains("REG_EXPAND_SZ")) {
+                    String[] parts = line.split("(REG_SZ|REG_EXPAND_SZ)", 2);
+                    if (parts.length == 2) {
+                        return parts[1].trim();
+                    }
+                }
+            }
+        }
+        return null;
+    }
 }
