@@ -83,19 +83,43 @@ public abstract class AbstractAcpClient implements Closeable {
     // ==================== 生命周期（模板方法） ====================
 
     /**
-     * 启动 ACP Client：启动子进程 → initialize → createSession
+     * 启动 ACP Client：启动子进程 → initialize（带重试）→ createSession
      */
     public void start() throws IOException {
         state.set(State.STARTING);
         try {
             startProcess();
-            initialize();
+            initializeWithRetry();
             createSession();
             state.set(State.READY);
             logger.info("ACP Client 就绪，sessionId={}, groupId={}", sessionId, groupId);
         } catch (IOException e) {
             state.set(State.ERROR);
             throw e;
+        }
+    }
+
+    /**
+     * 带重试的 initialize，应对子进程启动慢的场景（Windows 下 .cmd 包装、npx 首次下载等）。
+     */
+    private void initializeWithRetry() throws IOException {
+        int maxRetries = 5;
+        for (int i = 0; i < maxRetries; i++) {
+            try {
+                initialize();
+                return;
+            } catch (IOException e) {
+                if (i == maxRetries - 1) {
+                    throw e;
+                }
+                logger.warn("ACP initialize 失败 (第 {} 次重试): {}", i + 1, e.getMessage());
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("initialize 被中断", ie);
+                }
+            }
         }
     }
 

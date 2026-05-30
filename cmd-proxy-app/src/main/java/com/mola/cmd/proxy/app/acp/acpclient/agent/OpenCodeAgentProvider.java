@@ -22,7 +22,7 @@ public class OpenCodeAgentProvider implements AgentProvider {
 
     @Override
     public String getCommand() {
-        return "opencode";
+        return System.getProperty("os.name").toLowerCase().contains("win") ? "opencode.cmd" : "opencode";
     }
 
     @Override

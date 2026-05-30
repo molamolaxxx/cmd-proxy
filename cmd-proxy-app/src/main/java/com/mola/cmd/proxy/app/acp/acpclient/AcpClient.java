@@ -615,10 +615,15 @@ public class AcpClient extends AbstractAcpClient {
             JsonObject updateLog = update.deepCopy();
             updateLog.remove("rawInput");
             updateLog.remove("rawOutput");
+            updateLog.remove("_meta");
             logger.info("工具调用: {}", updateLog);
             if ("completed".equals(status)) {
-                JsonObject rawInput = update.has("rawInput") ? update.getAsJsonObject("rawInput") : null;
-                JsonObject rawOutput = update.has("rawOutput") ? update.getAsJsonObject("rawOutput") : null;
+                JsonElement rawInputEl = update.get("rawInput");
+                JsonElement rawOutputEl = update.get("rawOutput");
+                JsonObject rawInput = (rawInputEl != null && rawInputEl.isJsonObject())
+                        ? rawInputEl.getAsJsonObject() : null;
+                JsonObject rawOutput = (rawOutputEl != null && rawOutputEl.isJsonObject())
+                        ? rawOutputEl.getAsJsonObject() : null;
                 historyManager.addToolMessage(toolCallId, title, status, rawInput, rawOutput);
                 detectMemoryAccess(rawInput);
             }

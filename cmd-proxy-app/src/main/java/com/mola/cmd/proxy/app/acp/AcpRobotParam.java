@@ -66,6 +66,9 @@ public class AcpRobotParam {
         if ("OPENCODE".equalsIgnoreCase(agentProvider)) {
             return "img/opencode.png";
         }
+        if ("CLAUDE_AGENT_ACP".equalsIgnoreCase(agentProvider)) {
+            return "img/claude.png";
+        }
         return "img/kiro.png";
     }
 
@@ -91,8 +94,12 @@ public class AcpRobotParam {
 
     /**
      * 该 robot 是否开启了记忆。
+     * Claude Code 自带原生记忆，不启用 cmd-proxy 记忆模块。
      */
     public boolean isMemoryEnabled() {
+        if ("CLAUDE_AGENT_ACP".equalsIgnoreCase(agentProvider)) {
+            return false;
+        }
         return memory != null && memory.isEnabled();
     }
 

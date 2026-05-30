@@ -17,6 +17,7 @@ public class AgentProviderRouter {
     private AgentProviderRouter() {
         providers.put(AgentProviderType.KIRO_CLI, new KiroCliAgentProvider());
         providers.put(AgentProviderType.OPENCODE, new OpenCodeAgentProvider());
+        providers.put(AgentProviderType.CLAUDE_AGENT_ACP, new ClaudeAgentAcpProvider());
     }
 
     public static AgentProviderRouter getInstance() {
