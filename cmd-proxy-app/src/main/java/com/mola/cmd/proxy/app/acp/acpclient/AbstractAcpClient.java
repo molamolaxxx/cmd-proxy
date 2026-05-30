@@ -146,6 +146,23 @@ public abstract class AbstractAcpClient implements Closeable {
             pb.environment().putAll(extraEnv);
         }
 
+        // 按 robot 维度注入 HTTP 代理环境变量
+        if (robotParamRef != null && robotParamRef.isProxyEnabled()) {
+            String proxy = robotParamRef.getHttpProxy();
+            if (proxy != null && !proxy.trim().isEmpty()) {
+                String url = proxy.contains("://") ? proxy.trim() : "http://" + proxy.trim();
+                pb.environment().put("HTTP_PROXY", url);
+                pb.environment().put("http_proxy", url);
+                pb.environment().put("HTTPS_PROXY", url);
+                pb.environment().put("https_proxy", url);
+            }
+            String noProxy = robotParamRef.getNoProxy();
+            if (noProxy != null && !noProxy.trim().isEmpty()) {
+                pb.environment().put("NO_PROXY", noProxy.trim());
+                pb.environment().put("no_proxy", noProxy.trim());
+            }
+        }
+
         logger.info("启动 ACP 进程: {}", cmd);
         process = pb.start();
         writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));

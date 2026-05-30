@@ -21,6 +21,10 @@ public class AcpRobotParam {
     private List<ContactRef> contacts;
     private String model;
 
+    private boolean proxyEnabled;
+    private String httpProxy;
+    private String noProxy;
+
     public AcpRobotParam() {
     }
 
@@ -156,4 +160,13 @@ public class AcpRobotParam {
 
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
+
+    public boolean isProxyEnabled() { return proxyEnabled; }
+    public void setProxyEnabled(boolean proxyEnabled) { this.proxyEnabled = proxyEnabled; }
+
+    public String getHttpProxy() { return httpProxy; }
+    public void setHttpProxy(String httpProxy) { this.httpProxy = httpProxy; }
+
+    public String getNoProxy() { return noProxy; }
+    public void setNoProxy(String noProxy) { this.noProxy = noProxy; }
 }

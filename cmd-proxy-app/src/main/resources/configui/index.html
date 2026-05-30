@@ -156,7 +156,7 @@ var mem=(r.memory&&r.memory.enabled!==false)?'开启':'关闭';
 var disabled=r.enabled===false;
 var cardStyle=disabled?' style="opacity:0.6"':'';
 var badge=disabled?'<span style="margin-left:8px;font-size:12px;color:#9e9e9e;font-weight:400">已禁用</span>':'';
-return '<div class="card"'+cardStyle+'><div class="card-header"><h2>'+esc(r.name||'未命名')+badge+'</h2><div class="robot-actions"><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div></div></div></div>'
+return '<div class="card"'+cardStyle+'><div class="card-header"><h2>'+esc(r.name||'未命名')+badge+'</h2><div class="robot-actions"><button class="btn btn-secondary btn-sm" onclick="refreshRobot(\''+esc(r.name)+'\')" title="刷新此Robot"><span class="material-icons">refresh</span></button><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div><div><b>HTTP代理:</b> '+(r.proxyEnabled?(r.httpProxy||'未配置地址'):'关闭')+'</div></div></div></div>'
 }).join('');
 }
 
@@ -178,6 +178,9 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-row"><div class="field-group"><label>工作目录 *</label><input type="text" id="dWorkDir" value="'+esc(r.workDir)+'"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker()" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
 '<div class="grid-2"><div class="field-group"><label>Agent 后端</label><select id="dProvider"><option value="KIRO_CLI"'+(r.agentProvider!=='OPENCODE'?' selected':'')+'>Kiro CLI</option><option value="OPENCODE"'+(r.agentProvider==='OPENCODE'?' selected':'')+'>OpenCode</option></select></div><div class="field-group"><label>头像 URL</label><input type="text" id="dAvatar" value="'+esc(r.avatar||'')+'"></div></div>'+
 '<div class="grid-2"><div class="field-group"><label>模型 (可选)</label><input type="text" id="dModel" value="'+esc(r.model||'')+'" placeholder="留空使用默认模型"></div><div></div></div>'+
+'<div class="section-title">代理设置 (可选)</div>'+
+'<div class="toggle-row"><div><div class="toggle-label">启用代理</div></div><label class="switch"><input type="checkbox" id="dProxyEnabled"'+(r.proxyEnabled?' checked':'')+' onchange="toggleProxyPanel()"><span class="slider"></span></label></div>'+
+'<div style="'+(r.proxyEnabled?'':'display:none')+'" id="proxyPanel"><div class="grid-2"><div class="field-group"><label>http_proxy</label><input type="text" id="dHttpProxy" value="'+esc(r.httpProxy||'')+'" placeholder="例: 106.54.193.10:22222"></div><div class="field-group"><label>no_proxy</label><input type="text" id="dNoProxy" value="'+esc(r.noProxy||'')+'" placeholder="例: localhost,127.0.0.1"></div></div></div>'+
 '<div class="section-title">功能开关</div>'+
 '<div class="toggle-row"><div><div class="toggle-label">启用该 Robot</div><div class="toggle-desc">禁用后不会启动服务</div></div><label class="switch"><input type="checkbox" id="dEnabled"'+(r.enabled!==false?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">自动刷新 Ability</div></div><label class="switch"><input type="checkbox" id="dAbility"'+(r.abilityAutoRefresh!==false?' checked':'')+'><span class="slider"></span></label></div>'+
@@ -204,6 +207,7 @@ document.getElementById('robotDialog').classList.add('show');
 }
 
 function toggleMemPanel(){document.getElementById('memPanel').style.display=document.getElementById('dMemEnabled').checked?'':'none'}
+function toggleProxyPanel(){document.getElementById('proxyPanel').style.display=document.getElementById('dProxyEnabled').checked?'':'none'}
 
 function renderSubAgents(){
 var c=document.getElementById('dSubList');
@@ -236,6 +240,9 @@ name:name,signature:document.getElementById('dSig').value.trim(),
 workDir:workDir,agentProvider:document.getElementById('dProvider').value,
 avatar:document.getElementById('dAvatar').value.trim(),
 model:document.getElementById('dModel').value.trim()||undefined,
+proxyEnabled:document.getElementById('dProxyEnabled').checked,
+httpProxy:document.getElementById('dHttpProxy').value.trim()||undefined,
+noProxy:document.getElementById('dNoProxy').value.trim()||undefined,
 enabled:document.getElementById('dEnabled').checked,
 abilityAutoRefresh:document.getElementById('dAbility').checked,
 onlySubAgent:document.getElementById('dOnlySub').checked,
@@ -307,6 +314,15 @@ var ok=await saveConfig(true);
 if(!ok)return;
 try{var r=await fetch('/api/refresh',{method:'POST'});var d=await r.json();
 if(d.ok)showSnackbar('配置已保存，服务已刷新');else showSnackbar('刷新失败:'+(d.error||''))}
+catch(e){showSnackbar('刷新失败:'+e.message)}
+}
+
+async function refreshRobot(name){
+if(!confirm('确定刷新 Robot「'+name+'」的服务？'))return;
+var ok=await saveConfig(true);
+if(!ok)return;
+try{var r=await fetch('/api/refresh-robot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});var d=await r.json();
+if(d.ok)showSnackbar('Robot「'+name+'」已刷新');else showSnackbar('刷新失败:'+(d.error||''))}
 catch(e){showSnackbar('刷新失败:'+e.message)}
 }
 

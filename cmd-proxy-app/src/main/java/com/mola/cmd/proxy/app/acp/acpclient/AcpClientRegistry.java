@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -95,10 +96,39 @@ public class AcpClientRegistry {
     }
 
     /**
+     * 查找指定 robotName 对应的所有 groupId。
+     */
+    public List<String> getGroupIdsByRobot(String robotName) {
+        List<String> result = new ArrayList<>();
+        for (Map.Entry<String, AcpClient> entry : clients.entrySet()) {
+            AcpClient client = entry.getValue();
+            if (client != null && client.getRobotParam() != null
+                    && robotName.equals(client.getRobotParam().getName())) {
+                result.add(entry.getKey());
+            }
+        }
+        return result;
+    }
+
+    /**
      * 获取指定 groupId 的 AcpClient（可能为 null）
      */
     public AcpClient getClient(String groupId) {
         return clients.get(groupId);
+    }
+
+    /**
+     * 关闭并移除指定 groupId 的 client。
+     */
+    public void closeByGroupId(String groupId) {
+        AcpClient client = clients.remove(groupId);
+        if (client != null) {
+            try {
+                client.close();
+            } catch (IOException e) {
+                logger.warn("关闭 AcpClient 失败, groupId={}", groupId, e);
+            }
+        }
     }
 
     /**

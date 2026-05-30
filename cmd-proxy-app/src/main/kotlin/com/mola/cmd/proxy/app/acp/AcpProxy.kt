@@ -881,6 +881,89 @@ object AcpProxy {
     }
 
     /**
+     * 按 robot 维度热重载：只重建指定 robot 的 ACP 进程，不影响其他 robot。
+     */
+    fun reloadRobot(robotName: String, robot: AcpRobotParam, chatterIds: List<String>) {
+        log.info("开始 robot 级热重载: robot={}, enabled={}, onlySubAgent={}",
+            robotName, robot.isEnabled, robot.isOnlySubAgent)
+
+        // 1. 找到该 robot 的所有旧 groupId，逐一关闭
+        val oldGroupIds = registry.getGroupIdsByRobot(robotName)
+        for (groupId in oldGroupIds) {
+            registry.closeByGroupId(groupId)
+            memoryManagers.remove(groupId)
+            abilityServices.remove(groupId)
+            log.info("robot '{}' 旧 client 已关闭, groupId={}", robotName, groupId)
+        }
+
+        // 2. 更新全局 robot 注册表
+        globalRobotRegistry[robotName] = robot
+
+        // 3. 如果启用且非 onlySubAgent，重建所有 groupId 的 client
+        if (robot.isEnabled && !robot.isOnlySubAgent) {
+            val acpId = "acp-" + robot.name.replace(" ", "_")
+                .replace("\u3000", "_")
+
+            val newGroupIds = chatterIds.map { chatterId ->
+                listOf(chatterId, acpId).sorted().joinToString("")
+            }
+
+            for (groupId in newGroupIds) {
+                try {
+                    registry.createSession(groupId, robot.workDir, robot)
+                    val client = registry.getClient(groupId) ?: continue
+
+                    initMemoryForClient(groupId, client, robot)
+                    initAbilityReflection(groupId, client, robot)
+                    initSubAgentDispatcher(groupId, client, robot)
+                    initScheduleSupport(groupId, client, robot)
+                    initTalkToSupport(groupId, client, robot)
+
+                    // 更新 robotToGroupIdMap（取第一个新 groupId）
+                    robotToGroupIdMap.putIfAbsent(robotName, groupId)
+
+                    log.info("robot '{}' 新 client 已创建, groupId={}", robotName, groupId)
+                } catch (e: Exception) {
+                    log.error("robot '{}' client 重建失败, groupId={}", robotName, groupId, e)
+                }
+            }
+        } else {
+            // 被禁用或是 onlySubAgent：不启动 client，只做 ability 反思
+            if (robot.isEnabled && robot.isOnlySubAgent) {
+                val acpId = "acp-" + robot.name.replace(" ", "_")
+                    .replace("\u3000", "_")
+                val groupId = chatterIds.firstOrNull()?.let { chatterId ->
+                    listOf(chatterId, acpId).sorted().joinToString("")
+                }
+                if (groupId != null && robot.workDir.isNotBlank()) {
+                    initAbilityReflectionStandalone(groupId, robot)
+                }
+            }
+            // 清理该 robot 在 robotToGroupIdMap 中的记录
+            robotToGroupIdMap.remove(robotName)
+        }
+
+        // 4. 触发 acpSyncRobots 通知 MolaChat 更新 robot 信息
+        try {
+            val allRobots = globalRobotRegistry.values.filter { !it.isOnlySubAgent }
+            val robotsJson = JSON.toJSONString(allRobots)
+            val chatterIdsJson = JSON.toJSONString(chatterIds)
+            val resultMap = mutableMapOf<String, String?>()
+            resultMap["robots"] = robotsJson
+            resultMap["visibleChatterIds"] = chatterIdsJson
+            CmdReceiver.callback(
+                "acpSyncRobots", "acpSyncRobots",
+                CmdResponseContent(java.util.UUID.randomUUID().toString(), resultMap)
+            )
+            log.info("acpSyncRobots 回调已发送 (robot级重载后)")
+        } catch (e: Exception) {
+            log.error("acpSyncRobots 回调发送失败 (robot级重载)", e)
+        }
+
+        log.info("robot 级热重载完成: robot={}", robotName)
+    }
+
+    /**
      * 从 crossTalkToDeliver 命令参数中找到目标 client。
      * MolaChat 通过 CmdSender.send(cmdName, targetGroupId, args) 路由到正确的 group，
      * 但 CmdReceiver 的 handler 是按 cmdGroupList 注册的，需要从 groupRobotMap 中匹配。

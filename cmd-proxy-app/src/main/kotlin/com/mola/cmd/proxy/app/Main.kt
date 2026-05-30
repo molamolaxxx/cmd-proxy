@@ -163,7 +163,7 @@ private fun startConfigUiServer(config: JSONObject) {
     val port = configUi?.getIntValue("port") ?: 10528
     val actualPort = if (port <= 0) 10528 else port
     try {
-        val server = ConfigUiServer(actualPort) { reloadAcpServices() }
+        val server = ConfigUiServer(actualPort, { reloadAcpServices() }, { name -> reloadRobot(name) })
         server.start()
     } catch (e: Exception) {
         log.error("ConfigUI 启动失败, port={}", actualPort, e)
@@ -206,4 +206,39 @@ private fun reloadAcpServices() {
             reloading.set(false)
         }
     }, "acp-reload").start()
+}
+
+/**
+ * 按 robot 维度热重载：重新读取配置文件，只重建指定 robot 的 ACP 进程。
+ */
+private fun reloadRobot(robotName: String) {
+    try {
+        val file = File(System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json")
+        val content = file.readText(Charset.forName("UTF-8"))
+        if (content.isBlank()) {
+            log.warn("配置文件为空，跳过 robot 级重载")
+            return
+        }
+        val config: JSONObject = JSON.parseObject(content)
+
+        val robotsArray = config.getJSONArray("robots") ?: run {
+            log.warn("配置中无 robots，跳过 robot 级重载")
+            throw IllegalArgumentException("配置中无 robots 字段")
+        }
+        val chatterIdsArray = config.getJSONArray("chatterIds") ?: run {
+            log.warn("配置中无 chatterIds，跳过 robot 级重载")
+            throw IllegalArgumentException("配置中无 chatterIds 字段")
+        }
+
+        val allRobots = robotsArray.toJavaList(AcpRobotParam::class.java)
+        val robot = allRobots.firstOrNull { it.name == robotName }
+            ?: throw IllegalArgumentException("robot '$robotName' 在配置中不存在")
+
+        val chatterIds = chatterIdsArray.toJavaList(String::class.java)
+
+        AcpProxy.reloadRobot(robotName, robot, chatterIds)
+    } catch (e: Exception) {
+        log.error("robot 级热重载失败, robot={}", robotName, e)
+        throw e
+    }
 }

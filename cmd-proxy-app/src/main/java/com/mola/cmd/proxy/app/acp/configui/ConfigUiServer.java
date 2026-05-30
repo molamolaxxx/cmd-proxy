@@ -23,6 +23,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.cert.X509Certificate;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * 内嵌轻量 HTTP 服务，提供 ACP 配置管理页面。
@@ -37,6 +38,7 @@ public class ConfigUiServer {
 
     private final int port;
     private final Runnable refreshCallback;
+    private final Consumer<String> refreshRobotCallback;
     private HttpServer server;
     private ExecutorService executor;
 
@@ -49,10 +51,12 @@ public class ConfigUiServer {
     /**
      * @param port            监听端口
      * @param refreshCallback 刷新回调，保存配置后触发 ACP 服务重载
+     * @param refreshRobotCallback 按 robot 维度刷新的回调
      */
-    public ConfigUiServer(int port, Runnable refreshCallback) {
+    public ConfigUiServer(int port, Runnable refreshCallback, Consumer<String> refreshRobotCallback) {
         this.port = port;
         this.refreshCallback = refreshCallback;
+        this.refreshRobotCallback = refreshRobotCallback;
     }
 
     public void start() throws IOException {
@@ -65,6 +69,7 @@ public class ConfigUiServer {
         // REST API
         server.createContext("/api/config", this::handleConfig);
         server.createContext("/api/refresh", this::handleRefresh);
+        server.createContext("/api/refresh-robot", this::handleRefreshRobot);
         server.createContext("/api/browse-dir", this::handleBrowseDir);
         server.createContext("/api/update-jar", this::handleUpdateJar);
         server.createContext("/api/update-jar/status", this::handleUpdateJarStatus);
@@ -149,6 +154,28 @@ public class ConfigUiServer {
             sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
         } catch (Exception e) {
             logger.error("刷新 ACP 服务失败", e);
+            sendResponse(exchange, 500, "application/json",
+                    "{\"error\":\"" + e.getMessage().replace("\"", "'") + "\"}");
+        }
+    }
+
+    private void handleRefreshRobot(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            String body = readBody(exchange);
+            JSONObject json = JSON.parseObject(body);
+            String name = json.getString("name");
+            if (name == null || name.trim().isEmpty()) {
+                sendResponse(exchange, 400, "application/json", "{\"error\":\"name 不能为空\"}");
+                return;
+            }
+            refreshRobotCallback.accept(name.trim());
+            sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+        } catch (Exception e) {
+            logger.error("按 robot 刷新服务失败", e);
             sendResponse(exchange, 500, "application/json",
                     "{\"error\":\"" + e.getMessage().replace("\"", "'") + "\"}");
         }
