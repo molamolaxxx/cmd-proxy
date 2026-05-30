@@ -1,11 +1,13 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
 import com.google.gson.JsonObject;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -73,5 +75,13 @@ public class KiroCliAgentProvider implements AgentProvider {
             return params.get("contextUsagePercentage").getAsDouble();
         }
         return -1;
+    }
+
+    @Override
+    public List<String> getExtraArgs(AcpRobotParam robotParam) {
+        if (robotParam == null || robotParam.getModel() == null || robotParam.getModel().trim().isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        return Arrays.asList("--model", robotParam.getModel().trim());
     }
 }

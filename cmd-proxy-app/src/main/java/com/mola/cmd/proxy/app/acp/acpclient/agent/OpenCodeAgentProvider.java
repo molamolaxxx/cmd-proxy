@@ -1,9 +1,14 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * OpenCode 的 AgentProvider 实现。
@@ -45,5 +50,15 @@ public class OpenCodeAgentProvider implements AgentProvider {
     @Override
     public String getSkillsRelativePath() {
         return ".opencode/skills";
+    }
+
+    @Override
+    public Map<String, String> getExtraEnv(AcpRobotParam robotParam) {
+        if (robotParam == null || robotParam.getModel() == null || robotParam.getModel().trim().isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> env = new HashMap<>();
+        env.put("OPENCODE_CONFIG_CONTENT", "{\"model\":\"" + robotParam.getModel().trim() + "\"}");
+        return env;
     }
 }

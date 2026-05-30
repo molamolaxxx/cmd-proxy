@@ -99,7 +99,7 @@ public class AcpClient extends AbstractAcpClient {
      * 使用指定 AgentProvider 创建 AcpClient（包级私有，供未来扩展）。
      */
     AcpClient(AgentProvider agentProvider, String workspacePath, String groupId, AcpRobotParam robotParam) {
-        super(agentProvider, workspacePath, groupId);
+        super(agentProvider, workspacePath, groupId, robotParam);
         this.robotParam = robotParam;
         this.historyManager = new ConversationHistoryManager(
                 robotParam != null && !robotParam.getName().isEmpty()

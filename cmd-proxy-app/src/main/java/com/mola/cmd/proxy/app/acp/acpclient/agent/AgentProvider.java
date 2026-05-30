@@ -1,9 +1,12 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
 import com.google.gson.JsonObject;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Agent 提供者接口，抽象底层 agent CLI 的配置。
@@ -55,5 +58,27 @@ public interface AgentProvider {
      */
     default String getSkillsRelativePath() {
         return ".kiro/skills";
+    }
+
+    /**
+     * 根据 robot 配置返回额外的命令行参数。
+     * 如 Kiro CLI 通过 --model 参数指定模型。
+     *
+     * @param robotParam robot 配置，可能为 null
+     * @return 额外参数列表，空列表表示无额外参数
+     */
+    default List<String> getExtraArgs(AcpRobotParam robotParam) {
+        return Collections.emptyList();
+    }
+
+    /**
+     * 根据 robot 配置返回额外的环境变量。
+     * 如 OpenCode 通过 OPENCODE_CONFIG_CONTENT 注入模型配置。
+     *
+     * @param robotParam robot 配置，可能为 null
+     * @return 额外环境变量 map，空 map 表示无额外环境变量
+     */
+    default Map<String, String> getExtraEnv(AcpRobotParam robotParam) {
+        return Collections.emptyMap();
     }
 }

@@ -177,6 +177,7 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-group"><label>签名描述</label><input type="text" id="dSig" value="'+esc(r.signature||'')+'"></div>'+
 '<div class="field-row"><div class="field-group"><label>工作目录 *</label><input type="text" id="dWorkDir" value="'+esc(r.workDir)+'"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker()" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
 '<div class="grid-2"><div class="field-group"><label>Agent 后端</label><select id="dProvider"><option value="KIRO_CLI"'+(r.agentProvider!=='OPENCODE'?' selected':'')+'>Kiro CLI</option><option value="OPENCODE"'+(r.agentProvider==='OPENCODE'?' selected':'')+'>OpenCode</option></select></div><div class="field-group"><label>头像 URL</label><input type="text" id="dAvatar" value="'+esc(r.avatar||'')+'"></div></div>'+
+'<div class="grid-2"><div class="field-group"><label>模型 (可选)</label><input type="text" id="dModel" value="'+esc(r.model||'')+'" placeholder="留空使用默认模型"></div><div></div></div>'+
 '<div class="section-title">功能开关</div>'+
 '<div class="toggle-row"><div><div class="toggle-label">启用该 Robot</div><div class="toggle-desc">禁用后不会启动服务</div></div><label class="switch"><input type="checkbox" id="dEnabled"'+(r.enabled!==false?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">自动刷新 Ability</div></div><label class="switch"><input type="checkbox" id="dAbility"'+(r.abilityAutoRefresh!==false?' checked':'')+'><span class="slider"></span></label></div>'+
@@ -234,6 +235,7 @@ var robot=Object.assign({},orig,{
 name:name,signature:document.getElementById('dSig').value.trim(),
 workDir:workDir,agentProvider:document.getElementById('dProvider').value,
 avatar:document.getElementById('dAvatar').value.trim(),
+model:document.getElementById('dModel').value.trim()||undefined,
 enabled:document.getElementById('dEnabled').checked,
 abilityAutoRefresh:document.getElementById('dAbility').checked,
 onlySubAgent:document.getElementById('dOnlySub').checked,

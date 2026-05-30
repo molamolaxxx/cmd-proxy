@@ -19,6 +19,7 @@ public class AcpRobotParam {
     private boolean onlySubAgent;
     private boolean scheduleEnabled = false;
     private List<ContactRef> contacts;
+    private String model;
 
     public AcpRobotParam() {
     }
@@ -152,4 +153,7 @@ public class AcpRobotParam {
     public boolean hasContacts() {
         return contacts != null && !contacts.isEmpty();
     }
+
+    public String getModel() { return model; }
+    public void setModel(String model) { this.model = model; }
 }

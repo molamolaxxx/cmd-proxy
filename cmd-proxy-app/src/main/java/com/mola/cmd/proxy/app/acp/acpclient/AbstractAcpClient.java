@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
 import org.slf4j.Logger;
@@ -42,6 +43,7 @@ public abstract class AbstractAcpClient implements Closeable {
     protected final AgentProvider agentProvider;
     protected final String workspacePath;
     protected final String groupId;
+    protected final AcpRobotParam robotParamRef;
     protected final Gson gson = new GsonBuilder().create();
     protected final AtomicInteger idCounter = new AtomicInteger(0);
     protected final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
@@ -56,11 +58,19 @@ public abstract class AbstractAcpClient implements Closeable {
      * 使用指定 AgentProvider 创建（protected，供子类使用）。
      */
     protected AbstractAcpClient(AgentProvider agentProvider, String workspacePath, String groupId) {
+        this(agentProvider, workspacePath, groupId, null);
+    }
+
+    /**
+     * 使用指定 AgentProvider 和 robotParam 创建（protected，供子类使用）。
+     */
+    protected AbstractAcpClient(AgentProvider agentProvider, String workspacePath, String groupId, AcpRobotParam robotParam) {
         this.agentProvider = agentProvider;
         this.workspacePath = (workspacePath == null || workspacePath.trim().isEmpty())
                 ? System.getProperty("user.home")
                 : workspacePath;
         this.groupId = groupId;
+        this.robotParamRef = robotParam;
     }
 
     /**
@@ -112,6 +122,12 @@ public abstract class AbstractAcpClient implements Closeable {
         cmd.add(agentProvider.getCommand());
         cmd.addAll(Arrays.asList(agentProvider.getArgs()));
 
+        // 追加 provider 特定的额外参数（如 --model）
+        List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);
+        if (extraArgs != null && !extraArgs.isEmpty()) {
+            cmd.addAll(extraArgs);
+        }
+
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(false);
 
@@ -122,6 +138,12 @@ public abstract class AbstractAcpClient implements Closeable {
                 + File.pathSeparator + "/usr/local/bin";
         if (!currentPath.contains(home + "/.local/bin")) {
             pb.environment().put("PATH", extraPaths + File.pathSeparator + currentPath);
+        }
+
+        // 追加 provider 特定的额外环境变量（如 OPENCODE_CONFIG_CONTENT）
+        Map<String, String> extraEnv = agentProvider.getExtraEnv(robotParamRef);
+        if (extraEnv != null && !extraEnv.isEmpty()) {
+            pb.environment().putAll(extraEnv);
         }
 
         logger.info("启动 ACP 进程: {}", cmd);
