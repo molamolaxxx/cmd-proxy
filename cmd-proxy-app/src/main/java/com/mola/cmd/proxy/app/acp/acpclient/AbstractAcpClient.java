@@ -4,6 +4,7 @@ import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
+import com.mola.cmd.proxy.app.acp.common.PathResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -162,18 +163,15 @@ public abstract class AbstractAcpClient implements Closeable {
 
         String home = System.getProperty("user.home");
         String currentPath = pb.environment().getOrDefault("PATH", "");
-        String extraPaths = home + "/.local/bin"
-                + File.pathSeparator + home + "/.cargo/bin"
-                + File.pathSeparator + "/usr/local/bin";
         // Windows: 进程可能从精简环境启动（如服务/计划任务），PATH 不完整，从注册表读取完整 PATH
         if (System.getProperty("os.name").toLowerCase().contains("win")) {
             String regPath = readWindowsRegistryPath();
             if (regPath != null && !regPath.isEmpty()) {
-                currentPath = regPath;
+                pb.environment().put("PATH", regPath);
             }
-        }
-        if (!currentPath.contains(home + "/.local/bin")) {
-            pb.environment().put("PATH", extraPaths + File.pathSeparator + currentPath);
+        } else {
+            // Linux / macOS: 通过 login shell 获取完整 PATH，前置追加常用工具路径
+            pb.environment().put("PATH", PathResolver.enrichPath(home, currentPath));
         }
 
         // 追加 provider 特定的额外环境变量（如 OPENCODE_CONFIG_CONTENT）

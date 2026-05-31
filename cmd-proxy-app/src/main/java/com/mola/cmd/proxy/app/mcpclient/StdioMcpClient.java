@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.mcpclient;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.common.PathResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,15 +35,10 @@ public class StdioMcpClient extends McpClient {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(false);
 
-        // 补充用户级 bin 路径到 PATH
+        // 通过 login shell 获取完整 PATH，前置追加常用工具路径
         String home = System.getProperty("user.home");
         String currentPath = pb.environment().getOrDefault("PATH", "");
-        String extraPaths = home + "/.local/bin"
-                + File.pathSeparator + home + "/.cargo/bin"
-                + File.pathSeparator + "/usr/local/bin";
-        if (!currentPath.contains(home + "/.local/bin")) {
-            pb.environment().put("PATH", extraPaths + File.pathSeparator + currentPath);
-        }
+        pb.environment().put("PATH", PathResolver.enrichPath(home, currentPath));
 
         for (Map.Entry<String, String> entry : config.getEnv().entrySet()) {
             pb.environment().put(entry.getKey(), entry.getValue());
