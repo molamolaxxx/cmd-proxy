@@ -94,12 +94,9 @@ public class AcpRobotParam {
 
     /**
      * 该 robot 是否开启了记忆。
-     * Claude Code 自带原生记忆，不启用 cmd-proxy 记忆模块。
+     * Claude Code 自带原生记忆，默认不启用 cmd-proxy 记忆模块，但允许手动开启。
      */
     public boolean isMemoryEnabled() {
-        if ("CLAUDE_AGENT_ACP".equalsIgnoreCase(agentProvider)) {
-            return false;
-        }
         return memory != null && memory.isEnabled();
     }
 

@@ -339,8 +339,8 @@ public abstract class AbstractAcpClient implements Closeable {
                 continue;
             }
 
-            // prompt response — turn 结束
-            if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+            // prompt response — turn 结束（JSON-RPC Response 没有 method 字段，排除 Request 误匹配）
+            if (!msg.has("method") && msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
                 drainLateChunksSync(fullResponse);
                 return fullResponse.toString();
             }

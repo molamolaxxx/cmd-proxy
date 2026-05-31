@@ -532,8 +532,8 @@ public class AcpClient extends AbstractAcpClient {
                 continue;
             }
 
-            // prompt response
-            if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+            // prompt response（JSON-RPC Response 没有 method 字段，排除 Request 误匹配）
+            if (!msg.has("method") && msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
                 String stopReason = "unknown";
                 if (msg.has("result") && msg.getAsJsonObject("result").has("stopReason")) {
                     stopReason = msg.getAsJsonObject("result").get("stopReason").getAsString();
