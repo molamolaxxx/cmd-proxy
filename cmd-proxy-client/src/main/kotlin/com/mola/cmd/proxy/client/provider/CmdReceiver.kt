@@ -124,11 +124,11 @@ object CmdReceiver {
 
     fun register(cmdName: String, cmdGroupList: List<String>, description: String,
                  receiver: (param: CmdInvokeParam) -> Map<String, String?>) {
-        cmdGroupList.forEach { cmdGroup ->
+        for (cmdGroup in cmdGroupList) {
             start(cmdName, cmdGroup, description)
             if (receiverFuncMap.containsKey("$cmdName$cmdGroup")) {
                 log.warn("registerCallback already contains, key = $cmdName$cmdGroup")
-                return
+                continue
             }
             receiverFuncMap["$cmdName$cmdGroup"] = receiver
         }

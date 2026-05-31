@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.talkto;
 
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.common.DirectJsonOutputHelper;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import org.slf4j.Logger;
@@ -44,13 +45,14 @@ public class TalkToContextInjector {
         if (contacts == null || contacts.isEmpty()) return "";
 
         StringBuilder sb = new StringBuilder();
-        sb.append("\n[通讯录]\n");
-        sb.append("你可以通过 talk_to 指令向其他 robot 发送异步消息。");
+        sb.append("\n[Agent Team]\n");
+        sb.append("你是 Agent 团队的一员。你可以通过 talk_to 指令向团队中的其他 Agent 发送异步消息。");
         sb.append("消息发送后你不需要等待回复，可以继续当前工作。\n");
-        sb.append("目标 robot 忙碌时消息会排队，对方空闲后自动收到。\n\n");
+        sb.append("目标 Agent 忙碌时消息会排队，对方空闲后自动收到。\n\n");
 
-        sb.append("通讯录（仅供参考，你也可以向未列出的 robot 发送消息）：\n");
+        sb.append("你的团队成员（仅供参考，你也可以向未列出的 Agent 发送消息）：\n");
         int validCount = 0;
+        String firstContactName = null;
         for (ContactRef contact : contacts) {
             if (contact.getName() == null || contact.getName().isEmpty()) continue;
             if (contact.getName().equals(selfName)) continue;
@@ -62,6 +64,7 @@ public class TalkToContextInjector {
                     sb.append(": ").append(contact.getRemark());
                 }
                 sb.append("\n");
+                if (firstContactName == null) firstContactName = contact.getName();
                 validCount++;
             } else {
                 // 本地联系人：需要在 registry 中存在
@@ -75,19 +78,25 @@ public class TalkToContextInjector {
                     sb.append(": ").append(description);
                 }
                 sb.append("\n");
+                if (firstContactName == null) firstContactName = contact.getName();
                 validCount++;
             }
         }
 
         if (validCount == 0) return "";
 
-        sb.append("\n发送消息格式：\n");
-        sb.append("{\"action\":\"talk_to\",\"target\":\"robot名称\",\"content\":\"消息内容\"}\n\n");
-
-        sb.append("与 dispatch_subagent 的区别：\n");
+        sb.append("\n与 dispatch_subagent 的区别：\n");
         sb.append("- talk_to: 异步发送，不等待结果，目标在自己的上下文中处理\n");
-        sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n\n");
-        sb.append("重要：输出上述指令 JSON 后，必须立即结束当前回复，不要在指令 JSON 之后继续输出任何文字。系统会自动执行指令并将结果返回给你。\n");
+        sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n");
+        sb.append("\n");
+        sb.append("发送消息格式：\n");
+        sb.append("{\"action\":\"talk_to\",\"target\":\"")
+          .append(firstContactName != null ? firstContactName : "目标名称")
+          .append("\",\"content\":\"你的消息内容\"}\n");
+
+        DirectJsonOutputHelper.appendUsageWarning(sb,
+                "发送 talk_to 消息",
+                "拦截该 JSON 并将其路由到目标 Agent");
 
         return sb.toString();
     }

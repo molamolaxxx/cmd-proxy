@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.schedule;
 
+import com.mola.cmd.proxy.app.acp.common.DirectJsonOutputHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,7 +51,9 @@ public class ScheduleContextInjector {
 
         sb.append("schedule.type 支持：cron（标准5位cron表达式，周期性）、once（一次性，expr为ISO时间戳如2026-05-06T09:00:00，或相对时间如+30s/+30m/+2h/+1d）\n");
         sb.append("tasks 数组可包含多个任务，一次创建多个定时任务。\n\n");
-        sb.append("重要：输出上述指令 JSON 后，必须立即结束当前回复，不要在指令 JSON 之后继续输出任何文字。系统会自动执行指令并将结果返回给你。\n");
+        DirectJsonOutputHelper.appendUsageWarning(sb,
+                "管理定时任务",
+                "解析指令并执行对应的定时任务操作");
 
         return sb.toString();
     }

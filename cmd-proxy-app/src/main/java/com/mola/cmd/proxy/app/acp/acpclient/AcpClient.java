@@ -429,6 +429,13 @@ public class AcpClient extends AbstractAcpClient {
         StringBuilder fullTextBuilder = new StringBuilder();
 
         if (isFirstTurn) {
+            // ==================== 全局系统指令（直接输出 JSON 规则，覆盖所有 action 类型） ====================
+            fullTextBuilder.append("\n## 系统指令格式\n");
+            fullTextBuilder.append("当你需要触发系统操作（如 dispatch_subagent、talk_to、schedule_task 等）时，");
+            fullTextBuilder.append("请在回复中直接输出对应的 JSON 文本，");
+            fullTextBuilder.append("不要通过 Bash echo、Write 等任何工具来发送，也不要包裹在 ``` 代码块中。");
+            fullTextBuilder.append("输出 JSON 后立即结束回复，系统会自动拦截并处理。\n\n");
+
             // 注入子 Agent 上下文
             if (subAgentContextInjector != null && robotParam != null
                     && robotParam.hasSubAgents() && globalRobotRegistry != null) {

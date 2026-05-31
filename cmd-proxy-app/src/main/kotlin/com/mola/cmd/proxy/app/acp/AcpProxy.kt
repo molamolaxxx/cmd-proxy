@@ -91,63 +91,8 @@ object AcpProxy {
             mutableMapOf<String, String>("result" to "ok")
         }
 
-        // 注册 crossTalkToDeliver 命令处理器（接收 MolaChat 转发的跨 chatter 消息）
-        CmdReceiver.register("crossTalkToDeliver", cmdGroupList, "接收跨chatter的talkTo消息") { params ->
-            val resultMap = mutableMapOf<String, String>()
-            try {
-                // MolaChat 侧将参数打包为单个 JSON 字符串放在 args[0]
-                val jsonStr = params.cmdArgs[0]
-                val json = com.alibaba.fastjson.JSON.parseObject(jsonStr)
-                val senderChatterId = json.getString("senderChatterId") ?: ""
-                val senderRobotName = json.getString("senderRobotName") ?: ""
-                val targetRobotName = json.getString("targetRobotName") ?: ""
-                val content = json.getString("content") ?: ""
-                val depth = json.getIntValue("depth")
-
-                // 通过 targetRobotName 从 robotToGroupIdMap 精确找到目标 client
-                val targetGroupId = robotToGroupIdMap[targetRobotName]
-                val targetClient = if (targetGroupId != null) registry.getClient(targetGroupId) else null
-                val targetRobot = targetClient?.robotParam
-
-                if (targetClient == null || targetRobot == null) {
-                    log.warn("crossTalkToDeliver 目标不存在: targetRobotName={}", targetRobotName)
-                    resultMap["result"] = "目标 robot '$targetRobotName' 不存在或未启动"
-                    resultMap["success"] = "false"
-                    return@register resultMap
-                }
-
-                // 构造 TalkToMessage（sender 带上 chatterId 前缀，方便回复时路由）
-                val senderFullName = "$senderChatterId:$senderRobotName"
-                val message = com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage(
-                    senderFullName, content, depth + 1
-                )
-
-                // 投递到本地 inbox 或直接发送
-                if (targetClient.state == com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient.State.READY) {
-                    talkToDispatcher.pushIncomingMessageCard(targetClient, message)
-                    targetClient.send(message.buildPrompt(), null)
-                    log.info("crossTalkToDeliver 直接投递: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
-                    resultMap["result"] = "已直接投递"
-                    resultMap["success"] = "true"
-                } else {
-                    val delivered = talkToDispatcher.offerToInbox(targetRobot.name, message)
-                    if (delivered) {
-                        log.info("crossTalkToDeliver 入队: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
-                        resultMap["result"] = "目标忙碌，已放入 inbox"
-                        resultMap["success"] = "true"
-                    } else {
-                        log.warn("crossTalkToDeliver inbox 已满: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
-                        resultMap["result"] = "目标 inbox 已满"
-                        resultMap["success"] = "false"
-                    }
-                }
-            } catch (e: Exception) {
-                log.error("crossTalkToDeliver 处理失败", e)
-                resultMap["result"] = "处理异常: ${e.message}"
-                resultMap["success"] = "false"
-            }
-            resultMap
-        }
+        // 注册 cmdGroupList 维度的命令处理器
+        registerGroupCommands(cmdGroupList)
 
         // 冷加载：启动时为每个groupId预创建client
         for (groupId in cmdGroupList) {
@@ -209,7 +154,70 @@ object AcpProxy {
             }
         }
 
-        CmdReceiver.register("acpCancelPrompt", cmdGroupList, "取消ACP当前正在进行的prompt turn，groupId必填") { params ->
+        log.info("AcpProxy 命令注册完成")
+    }
+
+    /**
+     * 为指定 groupId 列表注册所有 cmdGroupList 维度的命令处理器。
+     * 此方法在 {@link #start} 和 {@link #reloadRobot} 中复用，
+     * 确保新启用的 robot 也能接受 MolaChat 的命令。
+     */
+    private fun registerGroupCommands(groupIds: List<String>) {
+        // 注册 crossTalkToDeliver 命令处理器（接收 MolaChat 转发的跨 chatter 消息）
+        CmdReceiver.register("crossTalkToDeliver", groupIds, "接收跨chatter的talkTo消息") { params ->
+            val resultMap = mutableMapOf<String, String>()
+            try {
+                val jsonStr = params.cmdArgs[0]
+                val json = com.alibaba.fastjson.JSON.parseObject(jsonStr)
+                val senderChatterId = json.getString("senderChatterId") ?: ""
+                val senderRobotName = json.getString("senderRobotName") ?: ""
+                val targetRobotName = json.getString("targetRobotName") ?: ""
+                val content = json.getString("content") ?: ""
+                val depth = json.getIntValue("depth")
+
+                val targetGroupId = robotToGroupIdMap[targetRobotName]
+                val targetClient = if (targetGroupId != null) registry.getClient(targetGroupId) else null
+                val targetRobot = targetClient?.robotParam
+
+                if (targetClient == null || targetRobot == null) {
+                    log.warn("crossTalkToDeliver 目标不存在: targetRobotName={}", targetRobotName)
+                    resultMap["result"] = "目标 robot '$targetRobotName' 不存在或未启动"
+                    resultMap["success"] = "false"
+                    return@register resultMap
+                }
+
+                val senderFullName = "$senderChatterId:$senderRobotName"
+                val message = com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage(
+                    senderFullName, content, depth + 1
+                )
+
+                if (targetClient.state == com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient.State.READY) {
+                    talkToDispatcher.pushIncomingMessageCard(targetClient, message)
+                    targetClient.send(message.buildPrompt(), null)
+                    log.info("crossTalkToDeliver 直接投递: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
+                    resultMap["result"] = "已直接投递"
+                    resultMap["success"] = "true"
+                } else {
+                    val delivered = talkToDispatcher.offerToInbox(targetRobot.name, message)
+                    if (delivered) {
+                        log.info("crossTalkToDeliver 入队: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
+                        resultMap["result"] = "目标忙碌，已放入 inbox"
+                        resultMap["success"] = "true"
+                    } else {
+                        log.warn("crossTalkToDeliver inbox 已满: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
+                        resultMap["result"] = "目标 inbox 已满"
+                        resultMap["success"] = "false"
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("crossTalkToDeliver 处理失败", e)
+                resultMap["result"] = "处理异常: ${e.message}"
+                resultMap["success"] = "false"
+            }
+            resultMap
+        }
+
+        CmdReceiver.register("acpCancelPrompt", groupIds, "取消ACP当前正在进行的prompt turn，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -227,7 +235,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpNewSession", cmdGroupList, "会话上下文清除，groupId必填") { params ->
+        CmdReceiver.register("acpNewSession", groupIds, "会话上下文清除，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -242,10 +250,8 @@ object AcpProxy {
                     return@register resultMap
                 }
 
-                // close() 内部会自动触发记忆提取
                 registry.createSession(groupId, null, null)
 
-                // 重新初始化记忆管理器
                 val newClient = registry.getClient(groupId)
                 if (newClient != null) {
                     initMemoryForClient(groupId, newClient, newClient.robotParam)
@@ -263,7 +269,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpSendMessage", cmdGroupList, "向ACP会话发送消息，groupId和message必填，files可选(数组，每个元素是{文件名:base64}的map)") { params ->
+        CmdReceiver.register("acpSendMessage", groupIds, "向ACP会话发送消息，groupId和message必填，files可选") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -296,7 +302,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpGetStatus", cmdGroupList, "获取ACP会话状态，groupId必填") { params ->
+        CmdReceiver.register("acpGetStatus", groupIds, "获取ACP会话状态，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -316,7 +322,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpGetContextUsage", cmdGroupList, "获取ACP会话上下文使用占比，groupId必填") { params ->
+        CmdReceiver.register("acpGetContextUsage", groupIds, "获取ACP会话上下文使用占比，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -332,7 +338,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpListSessions", cmdGroupList, "获取最近N个会话列表，groupId必填，limit可选(默认7)") { params ->
+        CmdReceiver.register("acpListSessions", groupIds, "获取最近N个会话列表，groupId必填，limit可选(默认7)") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -368,7 +374,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpRestoreSession", cmdGroupList, "恢复指定历史会话，groupId和sessionId必填") { params ->
+        CmdReceiver.register("acpRestoreSession", groupIds, "恢复指定历史会话，groupId和sessionId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -388,7 +394,6 @@ object AcpProxy {
                     return@register resultMap
                 }
 
-                // 如果目标 session 和当前 session 相同，直接报错
                 if (sessionId == client.sessionId) {
                     resultMap["result"] = "当前已是该会话，无需切换"
                     return@register resultMap
@@ -396,14 +401,12 @@ object AcpProxy {
 
                 registry.restoreSession(groupId, sessionId)
 
-                // 重新初始化 memory/ability/subAgent
                 val newClient = registry.getClient(groupId)
                 if (newClient != null) {
                     initMemoryForClient(groupId, newClient, newClient.robotParam)
                     initAbilityReflection(groupId, newClient, newClient.robotParam)
                     initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
 
-                    // 异步发送会话快照，让用户回忆聊天细节
                     Thread {
                         try {
                             replaySessionSnapshot(groupId, newClient)
@@ -421,7 +424,7 @@ object AcpProxy {
 
         // ==================== 记忆管理命令 ====================
 
-        CmdReceiver.register("acpMemoryList", cmdGroupList, "列出当前项目的所有记忆，groupId必填") { params ->
+        CmdReceiver.register("acpMemoryList", groupIds, "列出当前项目的所有记忆，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -457,7 +460,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpMemoryDelete", cmdGroupList, "删除指定记忆，groupId和memoryId必填") { params ->
+        CmdReceiver.register("acpMemoryDelete", groupIds, "删除指定记忆，groupId和memoryId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -490,7 +493,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpMemoryClean", cmdGroupList, "清理过期记忆，groupId必填") { params ->
+        CmdReceiver.register("acpMemoryClean", groupIds, "清理过期记忆，groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -518,7 +521,7 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpMemoryDream", cmdGroupList, "手动触发记忆整理（Memory Dream），groupId必填") { params ->
+        CmdReceiver.register("acpMemoryDream", groupIds, "手动触发记忆整理（Memory Dream），groupId必填") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -545,8 +548,6 @@ object AcpProxy {
             }
             resultMap
         }
-
-        log.info("AcpProxy 命令注册完成")
     }
 
     private val DISPATCH_MARKER = "dispatch_subagent"
@@ -927,6 +928,9 @@ object AcpProxy {
                     log.error("robot '{}' client 重建失败, groupId={}", robotName, groupId, e)
                 }
             }
+
+            // 为新 groupId 注册命令处理器，确保 MolaChat 能发送命令到此 robot
+            registerGroupCommands(newGroupIds)
         } else {
             // 被禁用或是 onlySubAgent：不启动 client，只做 ability 反思
             if (robot.isEnabled && robot.isOnlySubAgent) {
