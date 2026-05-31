@@ -810,15 +810,60 @@ public class AcpClient extends AbstractAcpClient {
      * 在 turn 结束后调用，替代原来的 if-return 重解析链。
      */
     private void handleCapturedAction(String capturedJson, String fullResponse, AcpResponseListener listener) {
-        if (capturedJson.contains("dispatch_subagent")) {
-            handleSubAgentDispatch(fullResponse, listener);
-        } else if (capturedJson.contains("schedule_task") || capturedJson.contains("manage_schedule")) {
-            handleScheduleAction(fullResponse, listener);
-        } else if (capturedJson.contains("talk_to")) {
-            handleTalkTo(fullResponse, listener);
+        boolean handled = false;
+        // 用 "action" 字段的精确值做路由，避免 content 内容中的关键词串台
+        if (capturedJson.contains("\"action\":\"dispatch_subagent\"")) {
+            handled = handleSubAgentDispatch(fullResponse, listener);
+        } else if (capturedJson.contains("\"action\":\"schedule_task\"")
+                || capturedJson.contains("\"action\":\"manage_schedule\"")) {
+            handled = handleScheduleAction(fullResponse, listener);
+        } else if (capturedJson.contains("\"action\":\"talk_to\"")) {
+            handled = handleTalkToDirect(capturedJson, fullResponse, listener);
         } else {
             logger.warn("捕获了未知 action 的 JSON: {}", capturedJson);
+        }
+
+        if (!handled) {
+            logger.warn("action 处理失败或未识别，回退到正常 complete, action={}",
+                    capturedJson.length() > 100 ? capturedJson.substring(0, 100) : capturedJson);
             listener.onComplete(fullResponse);
+        }
+    }
+
+    /**
+     * 直接使用已捕获的 JSON 处理 talk_to，避免从 fullResponse 中重新解析。
+     */
+    private boolean handleTalkToDirect(String capturedJson, String fullResponse, AcpResponseListener listener) {
+        if (talkToDispatcher == null) {
+            logger.warn("talkToDispatcher 为 null，无法处理 talk_to");
+            return false;
+        }
+
+        TalkToRequest request = talkToDispatcher.parseTalkToJson(capturedJson);
+        if (request == null) {
+            logger.warn("capturedJson 解析 talk_to 失败, json={}", capturedJson);
+            return false;
+        }
+
+        String senderName = robotParam != null ? robotParam.getName() : groupId;
+        String senderChatterId = extractChatterId();
+        logger.info("检测到 talkTo 指令(buffered): {} → {}", senderName, request.getTarget());
+
+        try {
+            java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
+                    robotParam != null ? robotParam.getContacts() : null;
+            String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
+            listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            sendPrompt(resultText, null, listener);
+            return true;
+        } catch (Exception e) {
+            logger.error("talkTo 处理失败", e);
+            try {
+                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null, listener);
+            } catch (IOException ioe) {
+                logger.error("发送 talkTo 错误结果失败", ioe);
+            }
+            return true; // 已处理（虽然失败），不 fallback
         }
     }
 

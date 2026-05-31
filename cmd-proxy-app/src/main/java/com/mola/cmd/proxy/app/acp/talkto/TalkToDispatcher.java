@@ -68,6 +68,47 @@ public class TalkToDispatcher {
     // ==================== 指令检测 ====================
 
     /**
+     * 直接从已捕获的 JSON 字符串解析 talk_to 请求（无需从 fullResponse 中重新搜索提取）。
+     *
+     * @param capturedJson DispatchBufferFilter 捕获的完整 JSON 字符串
+     * @return 解析出的请求，解析失败时返回 null
+     */
+    public TalkToRequest parseTalkToJson(String capturedJson) {
+        if (capturedJson == null || capturedJson.isEmpty()) {
+            logger.warn("parseTalkToJson: capturedJson 为 null 或空");
+            return null;
+        }
+        try {
+            logger.debug("parseTalkToJson: len={}, head={}, tail={}",
+                    capturedJson.length(),
+                    capturedJson.length() > 60 ? capturedJson.substring(0, 60) : capturedJson,
+                    capturedJson.length() > 60 ? capturedJson.substring(capturedJson.length() - 30) : capturedJson);
+            JsonObject obj = JsonParser.parseString(capturedJson).getAsJsonObject();
+
+            String action = obj.has("action") ? obj.get("action").getAsString() : "";
+            if (!"talk_to".equals(action)) return null;
+
+            String target = obj.has("target") ? obj.get("target").getAsString() : null;
+            String content = obj.has("content") ? obj.get("content").getAsString() : null;
+            int depth = obj.has("_depth") ? obj.get("_depth").getAsInt() : 0;
+
+            if (target == null || target.isEmpty() || content == null || content.isEmpty()) {
+                logger.warn("talk_to 指令缺少 target 或 content");
+                return null;
+            }
+
+            return new TalkToRequest(target, content, depth);
+        } catch (Exception e) {
+            // 详细诊断：打印 capturedJson 的首尾字符（含十六进制）
+            String head = capturedJson.length() > 80 ? capturedJson.substring(0, 80) : capturedJson;
+            String tail = capturedJson.length() > 80 ? capturedJson.substring(capturedJson.length() - 40) : "";
+            logger.warn("capturedJson 解析 talk_to 失败: {}, len={}, head=[{}], tail=[{}]",
+                    e.getMessage(), capturedJson.length(), head, tail);
+            return null;
+        }
+    }
+
+    /**
      * 从 LLM 输出中检测 talk_to 指令。
      *
      * @param fullResponse 主 Agent 当前累积的完整输出
