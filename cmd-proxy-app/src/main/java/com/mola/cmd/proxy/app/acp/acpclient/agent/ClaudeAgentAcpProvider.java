@@ -54,4 +54,9 @@ public class ClaudeAgentAcpProvider implements AgentProvider {
     public Map<String, String> getExtraEnv(AcpRobotParam robotParam) {
         return Collections.emptyMap();
     }
+
+    @Override
+    public boolean needsInlineImages() {
+        return true;
+    }
 }

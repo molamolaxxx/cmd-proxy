@@ -81,4 +81,12 @@ public interface AgentProvider {
     default Map<String, String> getExtraEnv(AcpRobotParam robotParam) {
         return Collections.emptyMap();
     }
+
+    /**
+     * 是否需要将图片以 base64 image block 内嵌到 prompt 中。
+     * 某些 agent 的 Read 工具不支持返回图片内容，需要在 prompt 层面直接传递。
+     */
+    default boolean needsInlineImages() {
+        return false;
+    }
 }

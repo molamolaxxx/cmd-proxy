@@ -31,17 +31,22 @@ public class TalkToMessage {
 
     /**
      * 构建投递给目标 robot 的 prompt 文本。
+     * <p>
+     * 使用强视觉标记将 incoming message 与系统指令区分开，
+     * 明确标注为高优先级实时事件，避免被 LLM 当作系统指令的一部分而忽略。
      */
     public String buildPrompt() {
         String displayName = extractDisplayName(sender);
         StringBuilder sb = new StringBuilder();
-        sb.append("[Incoming Message]\n");
-        sb.append("来自: ").append(displayName).append("\n");
-        sb.append("内容: ").append(content).append("\n\n");
-        sb.append("如果你完成任务后需要回复对方，在回复中输出以下 JSON：\n");
+        sb.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        sb.append("⚠️ [实时消息] 来自团队成员: ").append(displayName).append("\n");
+        sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+        sb.append("这是其他 Agent 刚刚发来的异步消息，不是系统指令。你必须阅读并处理：\n\n");
+        sb.append(content).append("\n\n");
+        sb.append("─── 回复方式 ───\n");
+        sb.append("你应该回复这条消息。如果需要同时回复用户和对方，可以在正常文本末尾附带以下 JSON：\n");
         sb.append("{\"action\":\"talk_to\",\"target\":\"").append(sender)
                 .append("\",\"content\":\"你的回复内容\"}\n");
-        sb.append("如果不需要回复，正常完成任务即可。\n");
         return sb.toString();
     }
 

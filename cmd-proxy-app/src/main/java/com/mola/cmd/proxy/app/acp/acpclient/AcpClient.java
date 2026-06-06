@@ -339,11 +339,20 @@ public class AcpClient extends AbstractAcpClient {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
+        // 记录本轮新上传的图片路径（用于 inline image block）
+        Set<String> previousFiles = new HashSet<>(historyManager.getFileAbsolutePaths());
         historyManager.saveFiles(sessionId, files);
+        Set<String> newImagePaths = new LinkedHashSet<>();
+        for (String path : historyManager.getFileAbsolutePaths()) {
+            if (!previousFiles.contains(path) && isImageFile(path)) {
+                newImagePaths.add(path);
+            }
+        }
+
         state.set(State.BUSY);
         executor.submit(() -> {
             try {
-                sendPrompt(userInput, historyManager.getFileAbsolutePaths(), globalListener, options);
+                sendPrompt(userInput, historyManager.getFileAbsolutePaths(), newImagePaths, globalListener, options);
                 state.set(State.READY);
                 // turn 结束后检查 inbox
                 checkAndDeliverInbox();
@@ -413,12 +422,12 @@ public class AcpClient extends AbstractAcpClient {
 
     // ==================== Prompt ====================
 
-    
+
     private void sendPrompt(String userInput, Collection<String> filePaths, AcpResponseListener listener) throws IOException {
-        sendPrompt(userInput, filePaths, listener, PromptOptions.defaults());
+        sendPrompt(userInput, filePaths, Collections.emptySet(), listener, PromptOptions.defaults());
     }
 
-    private void sendPrompt(String userInput, Collection<String> filePaths, AcpResponseListener listener, PromptOptions options) throws IOException {
+    private void sendPrompt(String userInput, Collection<String> filePaths, Collection<String> newImagePaths, AcpResponseListener listener, PromptOptions options) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
@@ -482,13 +491,19 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
-        // 文件路径每次都带（用户可能每次 turn 附带不同文件）
+        // 文件路径每次都带（Claude provider 排除图片路径，因为图片已内嵌为 image block）
         if (filePaths != null && !filePaths.isEmpty()) {
+            boolean skipImages = agentProvider.needsInlineImages();
             StringBuilder fb = new StringBuilder("[Attached Files]\n");
+            boolean hasFile = false;
             for (String path : filePaths) {
+                if (skipImages && isImageFile(path)) continue;
                 fb.append("- ").append(path).append("\n");
+                hasFile = true;
             }
-            fullTextBuilder.append(fb).append("\n");
+            if (hasFile) {
+                fullTextBuilder.append(fb).append("\n");
+            }
         }
 
         // 时间上下文每次都带（定时任务等场景需要精确时间）
@@ -503,6 +518,25 @@ public class AcpClient extends AbstractAcpClient {
         textBlock.addProperty("type", "text");
         textBlock.addProperty("text", fullTextBuilder.toString());
         prompt.add(textBlock);
+
+        // Claude provider: 将本轮新上传的图片作为 image content block 内嵌
+        if (agentProvider.needsInlineImages() && newImagePaths != null && !newImagePaths.isEmpty()) {
+            for (String imgPath : newImagePaths) {
+                try {
+                    byte[] imgBytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(imgPath));
+                    String base64Data = Base64.getEncoder().encodeToString(imgBytes);
+                    JsonObject imageBlock = new JsonObject();
+                    imageBlock.addProperty("type", "image");
+                    imageBlock.addProperty("data", base64Data);
+                    imageBlock.addProperty("mimeType", detectImageMediaType(imgPath));
+                    prompt.add(imageBlock);
+                    logger.info("已内嵌图片 image block: {}", imgPath);
+                } catch (IOException e) {
+                    logger.warn("读取图片文件失败，跳过内嵌: {}", imgPath, e);
+                }
+            }
+        }
+
         params.add("prompt", prompt);
 
         JsonObject request = buildRequest("session/prompt", params);
@@ -998,5 +1032,30 @@ public class AcpClient extends AbstractAcpClient {
             return groupId.substring(0, groupId.length() - acpId.length());
         }
         return groupId;
+    }
+
+    // ==================== 图片工具方法 ====================
+
+    private static final Set<String> IMAGE_EXTENSIONS = new HashSet<>(Arrays.asList(
+            "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"));
+
+    private static boolean isImageFile(String path) {
+        if (path == null) return false;
+        int dot = path.lastIndexOf('.');
+        if (dot < 0) return false;
+        return IMAGE_EXTENSIONS.contains(path.substring(dot + 1).toLowerCase());
+    }
+
+    private static String detectImageMediaType(String path) {
+        String ext = path.substring(path.lastIndexOf('.') + 1).toLowerCase();
+        switch (ext) {
+            case "jpg": case "jpeg": return "image/jpeg";
+            case "png": return "image/png";
+            case "gif": return "image/gif";
+            case "webp": return "image/webp";
+            case "bmp": return "image/bmp";
+            case "svg": return "image/svg+xml";
+            default: return "application/octet-stream";
+        }
     }
 }
