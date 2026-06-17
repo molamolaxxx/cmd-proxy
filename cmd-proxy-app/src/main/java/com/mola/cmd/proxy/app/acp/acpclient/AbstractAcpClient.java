@@ -289,9 +289,45 @@ public abstract class AbstractAcpClient implements Closeable {
     protected void sendJson(JsonObject json) throws IOException {
         String text = gson.toJson(json);
         logger.debug("acp输入 {}", text);
-        writer.write(text);
-        writer.newLine();
-        writer.flush();
+        synchronized (writer) {
+            writer.write(text);
+            writer.newLine();
+            writer.flush();
+        }
+    }
+
+    /**
+     * 在后台线程中写入 JSON 到子进程 stdin，立即返回不阻塞调用方。
+     * <p>
+     * 用于避免 Windows 管道死锁：当请求体很大时（如含 base64 图片），
+     * 同步写入可能因 stdin pipe 缓冲区满而阻塞，而此时如果子进程尝试向
+     * stdout 写入通知但 stdout pipe 也满（无人读取），则形成双向死锁。
+     * <p>
+     * 通过将写入放到独立线程，调用方可以立即开始读取 stdout，确保 stdout
+     * pipe 持续被消费，打破死锁条件。
+     *
+     * @param json 要发送的 JSON-RPC 消息
+     * @param writeError 用于捕获写入异常的容器，调用方可在读取循环中检查
+     */
+    protected void sendJsonInBackground(JsonObject json, java.util.concurrent.atomic.AtomicReference<IOException> writeError) {
+        String text = gson.toJson(json);
+        logger.debug("acp输入(async) {}", text);
+        Thread writeThread = new Thread(() -> {
+            try {
+                synchronized (writer) {
+                    writer.write(text);
+                    writer.newLine();
+                    writer.flush();
+                }
+            } catch (IOException e) {
+                logger.error("异步写入 stdin 失败", e);
+                if (writeError != null) {
+                    writeError.set(e);
+                }
+            }
+        }, "acp-stdin-write");
+        writeThread.setDaemon(true);
+        writeThread.start();
     }
 
     /**

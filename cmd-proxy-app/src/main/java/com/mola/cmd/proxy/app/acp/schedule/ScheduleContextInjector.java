@@ -36,7 +36,7 @@ public class ScheduleContextInjector {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("\n[定时任务]\n");
+        sb.append("\n<scheduled-tasks>\n");
         sb.append("你可以为用户设置和管理定时任务。\n\n");
 
         sb.append("设置任务（在回复中输出以下 JSON，独占一行，不要包裹在代码块中）：\n");
@@ -55,6 +55,7 @@ public class ScheduleContextInjector {
                 "管理定时任务",
                 "解析指令并执行对应的定时任务操作");
 
+        sb.append("</scheduled-tasks>\n");
         return sb.toString();
     }
 }

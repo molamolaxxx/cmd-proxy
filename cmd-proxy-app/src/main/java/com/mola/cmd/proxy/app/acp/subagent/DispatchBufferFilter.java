@@ -46,8 +46,8 @@ public class DispatchBufferFilter {
 
     private State state = State.NORMAL;
     private final StringBuilder buffer = new StringBuilder();
-    /** 存储捕获的指令 JSON 原文（turn 结束后由 AcpClient 直接使用） */
-    private String capturedJson = null;
+    /** 存储捕获的指令 JSON 原文列表（turn 结束后由 AcpClient 直接使用） */
+    private final java.util.List<String> capturedJsonList = new java.util.ArrayList<>();
 
     /**
      * @param listener 下游 listener
@@ -138,6 +138,7 @@ public class DispatchBufferFilter {
 
     /**
      * 检查缓冲区内容，决定下一步动作。
+     * 支持循环截取多个连续的 JSON 指令。
      *
      * @return true 如果已做出最终判断（flush 或 capture）
      */
@@ -173,13 +174,39 @@ public class DispatchBufferFilter {
                 || (talkToEnabled && content.contains(TALK_TO_TRIGGER));
 
         if (isKnownAction) {
-            // 检查 JSON 是否闭合（简单的花括号计数）
-            if (isJsonComplete(content)) {
-                // 确认是已知 action JSON，吞掉不推送
-                logger.info("缓冲区捕获 action JSON，长度={}", content.length());
-                capturedJson = content;
+            // 循环截取：可能有多个连续 JSON
+            int endIdx = findJsonEndIndex(content);
+            if (endIdx > 0) {
+                // 截取第一个完整 JSON
+                String firstJson = content.substring(0, endIdx);
+                logger.info("缓冲区捕获 action JSON，长度={}", firstJson.length());
+                capturedJsonList.add(firstJson);
+
+                // 处理剩余部分
+                String remaining = content.substring(endIdx).trim();
+                if (remaining.isEmpty()) {
+                    state = State.NORMAL;
+                    buffer.setLength(0);
+                    return true;
+                }
+
+                // 剩余部分以 { 开头，可能是下一个 action JSON，继续缓冲
+                if (remaining.startsWith("{")) {
+                    buffer.setLength(0);
+                    buffer.append(remaining);
+                    // 尝试递归检查：如果已完整则立即捕获，否则留在 BUFFERING 等后续 chunk
+                    if (checkBuffer()) {
+                        return true;
+                    }
+                    // 递归返回 false 说明 JSON 还没闭合，保持 BUFFERING 状态
+                    state = State.BUFFERING;
+                    return false;
+                }
+
+                // 剩余部分不是已知 action JSON，flush 掉
                 state = State.NORMAL;
                 buffer.setLength(0);
+                listener.onMessage(remaining);
                 return true;
             }
             // JSON 还没闭合，继续缓冲
@@ -191,25 +218,42 @@ public class DispatchBufferFilter {
         return true;
     }
 
+    private boolean containsKnownAction(String text) {
+        return text.contains(DISPATCH_TRIGGER)
+                || (scheduleEnabled && text.contains(SCHEDULE_TASK_TRIGGER))
+                || (scheduleEnabled && text.contains(MANAGE_SCHEDULE_TRIGGER))
+                || (talkToEnabled && text.contains(TALK_TO_TRIGGER));
+    }
+
     /**
      * 将缓冲区内容推送给用户，回到 NORMAL 状态。
      */
     private void flushBuffer() {
         if (buffer.length() > 0) {
-            listener.onMessage(buffer.toString());
+            String content = buffer.toString();
+            if (content.contains(TALK_TO_TRIGGER) || content.contains(DISPATCH_TRIGGER)) {
+                logger.warn("缓冲区含已知 action 关键词但仍被 flush! len={}, talkToEnabled={}, scheduleEnabled={}, jsonEndIdx={}, head=[{}]",
+                        content.length(), talkToEnabled, scheduleEnabled, findJsonEndIndex(content),
+                        content.length() > 120 ? content.substring(0, 120) : content);
+            }
+            listener.onMessage(content);
             buffer.setLength(0);
         }
         state = State.NORMAL;
     }
 
     /**
-     * 简单的 JSON 闭合检测：计数花括号和方括号。
+     * 找到第一个顶层 JSON 对象闭合的位置（} 的下一位）。
+     * 即 braces 从 1 首次归 0 时的位置。
+     *
+     * @return 第一个完整 JSON 的结束位置（exclusive），未闭合返回 -1
      */
-    private static boolean isJsonComplete(String text) {
+    private static int findJsonEndIndex(String text) {
         int braces = 0;
         int brackets = 0;
         boolean inString = false;
         boolean escaped = false;
+        boolean started = false;
 
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
@@ -227,19 +271,28 @@ public class DispatchBufferFilter {
             }
             if (inString) continue;
 
-            if (c == '{') braces++;
-            else if (c == '}') braces--;
-            else if (c == '[') brackets++;
-            else if (c == ']') brackets--;
+            if (c == '{') {
+                braces++;
+                started = true;
+            } else if (c == '}') {
+                braces--;
+                if (started && braces == 0 && brackets == 0) {
+                    return i + 1;
+                }
+            } else if (c == '[') {
+                brackets++;
+            } else if (c == ']') {
+                brackets--;
+            }
         }
-        return braces == 0 && brackets == 0 && text.contains("}");
+        return -1;
     }
 
     /**
      * turn 结束时调用。如果还有未 flush 的缓冲区内容，推送给用户。
      */
     public void flush() {
-        if (buffer.length() > 0 && capturedJson == null) {
+        if (buffer.length() > 0 && capturedJsonList.isEmpty()) {
             flushBuffer();
         }
         buffer.setLength(0);
@@ -250,15 +303,24 @@ public class DispatchBufferFilter {
      * 是否成功捕获了指令 JSON（即 JSON 被吞掉没推给用户）。
      */
     public boolean isCaptured() {
-        return capturedJson != null;
+        return !capturedJsonList.isEmpty();
     }
 
     /**
-     * 获取捕获的指令 JSON 原文。
+     * 获取捕获的第一个指令 JSON 原文（兼容单 JSON 场景）。
      *
-     * @return 捕获的 JSON 字符串，未捕获时返回 null
+     * @return 第一个捕获的 JSON 字符串，未捕获时返回 null
      */
     public String getCapturedJson() {
-        return capturedJson;
+        return capturedJsonList.isEmpty() ? null : capturedJsonList.get(0);
+    }
+
+    /**
+     * 获取捕获的所有指令 JSON 原文列表。
+     *
+     * @return 捕获的 JSON 字符串列表，未捕获时返回空列表
+     */
+    public java.util.List<String> getCapturedJsonList() {
+        return capturedJsonList;
     }
 }

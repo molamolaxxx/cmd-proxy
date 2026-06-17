@@ -305,7 +305,7 @@ public class SubAgentDispatcher implements Closeable {
      */
     public static String formatResults(List<SubAgentResult> results) {
         StringBuilder sb = new StringBuilder();
-        sb.append("[Sub-Agent Results]\n");
+        sb.append("<sub-agent-results>\n");
         sb.append("以下是子 Agent 的执行结果，请基于这些结果为用户提供综合回答。\n\n");
 
         for (SubAgentResult r : results) {
@@ -320,6 +320,7 @@ public class SubAgentDispatcher implements Closeable {
         }
 
         sb.append("请综合以上子 Agent 的结果，为用户提供完整、连贯的回答。\n");
+        sb.append("</sub-agent-results>\n");
         return sb.toString();
     }
 

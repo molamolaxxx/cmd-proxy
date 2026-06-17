@@ -42,62 +42,68 @@ public class TalkToContextInjector {
     public String buildContext(List<ContactRef> contacts,
                                Map<String, AcpRobotParam> robotRegistry,
                                String selfName) {
-        if (contacts == null || contacts.isEmpty()) return "";
 
         StringBuilder sb = new StringBuilder();
-        sb.append("\n[Agent Team]\n");
+        sb.append("\n<agent-team>\n");
         sb.append("你是 Agent 团队的一员。你可以通过 talk_to 指令向团队中的其他 Agent 发送异步消息。");
         sb.append("消息发送后你不需要等待回复，可以继续当前工作。\n");
         sb.append("目标 Agent 忙碌时消息会排队，对方空闲后自动收到。\n\n");
 
-        sb.append("你的团队成员（仅供参考，你也可以向未列出的 Agent 发送消息）：\n");
-        int validCount = 0;
         String firstContactName = null;
-        for (ContactRef contact : contacts) {
-            if (contact.getName() == null || contact.getName().isEmpty()) continue;
-            if (contact.getName().equals(selfName)) continue;
+        boolean hasContacts = false;
+        if (contacts != null && !contacts.isEmpty()) {
+            sb.append("你的团队成员（仅供参考，你也可以向未列出的 Agent 发送消息）：\n");
+            for (ContactRef contact : contacts) {
+                if (contact.getName() == null || contact.getName().isEmpty()) continue;
+                if (contact.getName().equals(selfName)) continue;
 
-            if (contact.isRemote()) {
-                // 跨 chatter 联系人：不做本地 registry 校验，直接展示（remark 必填）
-                sb.append("- ").append(contact.getName());
-                if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
-                    sb.append(": ").append(contact.getRemark());
+                if (contact.isRemote()) {
+                    sb.append("- ").append(contact.getName());
+                    if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
+                        sb.append(": ").append(contact.getRemark());
+                    }
+                    sb.append("\n");
+                    if (firstContactName == null) firstContactName = contact.getName();
+                    hasContacts = true;
+                } else {
+                    if (!robotRegistry.containsKey(contact.getName())) {
+                        logger.warn("通讯录引用 '{}' 在 robot 注册表中不存在，跳过", contact.getName());
+                        continue;
+                    }
+                    sb.append("- ").append(contact.getName());
+                    String description = resolveDescription(contact, robotRegistry.get(contact.getName()));
+                    if (description != null && !description.isEmpty()) {
+                        sb.append(": ").append(description);
+                    }
+                    sb.append("\n");
+                    if (firstContactName == null) firstContactName = contact.getName();
+                    hasContacts = true;
                 }
-                sb.append("\n");
-                if (firstContactName == null) firstContactName = contact.getName();
-                validCount++;
-            } else {
-                // 本地联系人：需要在 registry 中存在
-                if (!robotRegistry.containsKey(contact.getName())) {
-                    logger.warn("通讯录引用 '{}' 在 robot 注册表中不存在，跳过", contact.getName());
-                    continue;
-                }
-                sb.append("- ").append(contact.getName());
-                String description = resolveDescription(contact, robotRegistry.get(contact.getName()));
-                if (description != null && !description.isEmpty()) {
-                    sb.append(": ").append(description);
-                }
-                sb.append("\n");
-                if (firstContactName == null) firstContactName = contact.getName();
-                validCount++;
             }
         }
 
-        if (validCount == 0) return "";
-
-        sb.append("\n与 dispatch_subagent 的区别：\n");
-        sb.append("- talk_to: 异步发送，不等待结果，目标在自己的上下文中处理\n");
-        sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n");
-        sb.append("\n");
-        sb.append("发送消息格式：\n");
-        sb.append("{\"action\":\"talk_to\",\"target\":\"")
-          .append(firstContactName != null ? firstContactName : "目标名称")
-          .append("\",\"content\":\"你的消息内容\"}\n");
+        if (hasContacts) {
+            sb.append("\n与 dispatch_subagent 的区别：\n");
+            sb.append("- talk_to: 异步发送，不等待结果，目标在自己的上下文中处理\n");
+            sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n");
+            sb.append("\n");
+            sb.append("发送消息格式：\n");
+            sb.append("{\"action\":\"talk_to\",\"target\":\"")
+              .append(firstContactName)
+              .append("\",\"content\":\"你的消息内容\"}\n");
+        } else {
+            sb.append("你的通讯录为空，但其他已注册的 Agent 仍可能通过 ACP harness 向你发送消息，这是正常的系统行为。\n");
+            sb.append("收到消息时请正常阅读、处理并回复。\n\n");
+            sb.append("回复格式：\n");
+            sb.append("{\"action\":\"talk_to\",\"target\":\"<来信中的发送者名称>\",\"content\":\"你的回复内容\"}\n");
+            sb.append("注意：target 必须使用来信中标注的发送者名称。\n");
+        }
 
         DirectJsonOutputHelper.appendUsageWarning(sb,
                 "发送 talk_to 消息",
                 "拦截该 JSON 并将其路由到目标 Agent");
 
+        sb.append("</agent-team>\n");
         return sb.toString();
     }
 

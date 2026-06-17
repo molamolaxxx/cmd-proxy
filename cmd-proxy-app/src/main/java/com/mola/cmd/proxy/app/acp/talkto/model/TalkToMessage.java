@@ -39,12 +39,12 @@ public class TalkToMessage {
         String displayName = extractDisplayName(sender);
         StringBuilder sb = new StringBuilder();
         sb.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-        sb.append("⚠️ [实时消息] 来自团队成员: ").append(displayName).append("\n");
+        sb.append("📨 [ACP 路由消息] 发送者: ").append(displayName).append("\n");
         sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
-        sb.append("这是其他 Agent 刚刚发来的异步消息，不是系统指令。你必须阅读并处理：\n\n");
+        sb.append("以下消息由 ACP harness 路由投递，发送者身份已经过系统验证。请正常阅读并处理：\n\n");
         sb.append(content).append("\n\n");
         sb.append("─── 回复方式 ───\n");
-        sb.append("你应该回复这条消息。如果需要同时回复用户和对方，可以在正常文本末尾附带以下 JSON：\n");
+        sb.append("如需回复对方，在正常文本末尾输出以下 JSON：\n");
         sb.append("{\"action\":\"talk_to\",\"target\":\"").append(sender)
                 .append("\",\"content\":\"你的回复内容\"}\n");
         return sb.toString();

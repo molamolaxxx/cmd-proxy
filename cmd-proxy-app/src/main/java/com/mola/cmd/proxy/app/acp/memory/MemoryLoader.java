@@ -45,7 +45,7 @@ public class MemoryLoader {
                 .collect(Collectors.toList());
 
         StringBuilder sb = new StringBuilder();
-        sb.append("[记忆上下文]\n");
+        sb.append("<memory-context>\n");
         sb.append("你有以下跨 session 的长期记忆。每条包含概要和明细文件的绝对路径。\n");
         sb.append("⚠️ 记忆使用规则：\n");
         sb.append("- 概要仅用于判断「哪些记忆与当前问题相关」，不包含完整信息\n");
@@ -81,6 +81,7 @@ public class MemoryLoader {
                     fileStore.getIndexPath(workspacePath)));
         }
 
+        sb.append("</memory-context>\n");
         return sb.toString();
     }
     /**

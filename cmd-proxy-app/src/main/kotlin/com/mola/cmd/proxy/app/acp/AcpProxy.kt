@@ -406,6 +406,8 @@ object AcpProxy {
                     initMemoryForClient(groupId, newClient, newClient.robotParam)
                     initAbilityReflection(groupId, newClient, newClient.robotParam)
                     initSubAgentDispatcher(groupId, newClient, newClient.robotParam)
+                    initScheduleSupport(groupId, newClient, newClient.robotParam)
+                    initTalkToSupport(groupId, newClient, newClient.robotParam)
 
                     Thread {
                         try {

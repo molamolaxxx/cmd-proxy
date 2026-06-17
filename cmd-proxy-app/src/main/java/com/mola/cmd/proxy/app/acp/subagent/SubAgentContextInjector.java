@@ -83,7 +83,7 @@ public class SubAgentContextInjector {
 
         // 组装完整上下文
         StringBuilder result = new StringBuilder();
-        result.append("\n[Available Sub-Agents]\n");
+        result.append("\n<available-sub-agents>\n");
         result.append("你可以通过 dispatch_subagent 指令将任务委托给以下子 Agent。\n");
         result.append("当你判断某个子任务更适合由专业子 Agent 处理时，请使用此能力。\n");
         result.append("你可以同时派发多个子 Agent 并行执行。\n\n");
@@ -114,6 +114,7 @@ public class SubAgentContextInjector {
                 "派发子 Agent 任务",
                 "解析 tasks 并创建子 Agent 实例执行");
 
+        result.append("</available-sub-agents>\n");
         return result.toString();
     }
 

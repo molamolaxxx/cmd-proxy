@@ -29,6 +29,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -114,7 +115,7 @@ public class AcpClient extends AbstractAcpClient {
      */
     public AcpClient(String workspacePath, String groupId, AcpRobotParam robotParam) {
         this(AgentProviderRouter.getInstance().resolve(
-                robotParam != null ? robotParam.getAgentProvider() : null),
+                        robotParam != null ? robotParam.getAgentProvider() : null),
                 workspacePath, groupId, robotParam);
     }
 
@@ -168,166 +169,166 @@ public class AcpClient extends AbstractAcpClient {
 
     // ==================== 生命周期 ====================
 
-    
-        
-            @Override
-            protected void createSession() throws IOException {
-                // 指定恢复目标 sessionId（acpRestoreSession 场景）
-                if (targetRestoreSessionId != null) {
-                    try {
-                        loadSession(targetRestoreSessionId);
-                    } catch (IOException e) {
-                        if (tryKillConflictingProcess(e)) {
-                            logger.info("已终止占用进程，重试 session/load (restore), sessionId={}", targetRestoreSessionId);
-                            loadSession(targetRestoreSessionId);
-                        } else {
-                            throw e;
-                        }
-                    }
-                    historyManager.saveLastSessionId(targetRestoreSessionId);
-                    return;
-                }
 
-                // clearContext 场景下强制创建新会话，跳过历史恢复
-                if (!forceNewSession) {
-                    String latestSessionId = historyManager.findLatestSessionId();
-                    if (latestSessionId != null) {
+
+    @Override
+    protected void createSession() throws IOException {
+        // 指定恢复目标 sessionId（acpRestoreSession 场景）
+        if (targetRestoreSessionId != null) {
+            try {
+                loadSession(targetRestoreSessionId);
+            } catch (IOException e) {
+                if (tryKillConflictingProcess(e)) {
+                    logger.info("已终止占用进程，重试 session/load (restore), sessionId={}", targetRestoreSessionId);
+                    loadSession(targetRestoreSessionId);
+                } else {
+                    throw e;
+                }
+            }
+            historyManager.saveLastSessionId(targetRestoreSessionId);
+            return;
+        }
+
+        // clearContext 场景下强制创建新会话，跳过历史恢复
+        if (!forceNewSession) {
+            String latestSessionId = historyManager.findLatestSessionId();
+            if (latestSessionId != null) {
+                try {
+                    loadSession(latestSessionId);
+                    return;
+                } catch (IOException e) {
+                    // 如果是 "Session is active in another process"，尝试 kill 占用进程后重试
+                    if (tryKillConflictingProcess(e)) {
                         try {
+                            logger.info("已终止占用进程，重试 session/load, sessionId={}", latestSessionId);
                             loadSession(latestSessionId);
                             return;
-                        } catch (IOException e) {
-                            // 如果是 "Session is active in another process"，尝试 kill 占用进程后重试
-                            if (tryKillConflictingProcess(e)) {
-                                try {
-                                    logger.info("已终止占用进程，重试 session/load, sessionId={}", latestSessionId);
-                                    loadSession(latestSessionId);
-                                    return;
-                                } catch (IOException retryEx) {
-                                    logger.warn("终止占用进程后 session/load 仍然失败，回退到 session/new, sessionId={}", latestSessionId, retryEx);
-                                }
-                            } else {
-                                logger.warn("session/load 失败，回退到 session/new, sessionId={}", latestSessionId, e);
-                            }
-                            historyManager.reset();
+                        } catch (IOException retryEx) {
+                            logger.warn("终止占用进程后 session/load 仍然失败，回退到 session/new, sessionId={}", latestSessionId, retryEx);
                         }
+                    } else {
+                        logger.warn("session/load 失败，回退到 session/new, sessionId={}", latestSessionId, e);
                     }
+                    historyManager.reset();
                 }
-
-                newSession();
             }
+        }
 
-        private static final Pattern PID_PATTERN = Pattern.compile("PID\\s+(\\d+)");
+        newSession();
+    }
 
-        /**
-         * 检查异常是否为 "Session is active in another process" 错误，
-         * 如果是则尝试 kill 该进程。
-         *
-         * @return true 表示成功终止了占用进程，调用方可以重试 loadSession
-         */
-        private boolean tryKillConflictingProcess(IOException e) {
-            String message = e.getMessage();
-            if (message == null || !message.contains("Session is active in another process")) {
+    private static final Pattern PID_PATTERN = Pattern.compile("PID\\s+(\\d+)");
+
+    /**
+     * 检查异常是否为 "Session is active in another process" 错误，
+     * 如果是则尝试 kill 该进程。
+     *
+     * @return true 表示成功终止了占用进程，调用方可以重试 loadSession
+     */
+    private boolean tryKillConflictingProcess(IOException e) {
+        String message = e.getMessage();
+        if (message == null || !message.contains("Session is active in another process")) {
+            return false;
+        }
+        Matcher matcher = PID_PATTERN.matcher(message);
+        if (!matcher.find()) {
+            logger.warn("检测到会话被其他进程占用，但无法提取 PID: {}", message);
+            return false;
+        }
+        String pid = matcher.group(1);
+        logger.info("检测到会话被进程占用, PID={}, 尝试终止该进程", pid);
+        try {
+            ProcessBuilder pb = new ProcessBuilder("kill", "-9", pid);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            int exitCode = process.waitFor();
+            if (exitCode == 0) {
+                logger.info("成功终止占用进程, PID={}", pid);
+                // 等待一小段时间让资源释放
+                Thread.sleep(500);
+                return true;
+            } else {
+                logger.warn("终止进程失败, PID={}, exitCode={}", pid, exitCode);
                 return false;
             }
-            Matcher matcher = PID_PATTERN.matcher(message);
-            if (!matcher.find()) {
-                logger.warn("检测到会话被其他进程占用，但无法提取 PID: {}", message);
-                return false;
+        } catch (Exception ex) {
+            logger.warn("终止占用进程时发生异常, PID={}", pid, ex);
+            return false;
+        }
+    }
+
+
+    /**
+     * 通过 session/load 恢复历史会话。
+     * Agent 会通过 session/update 回放完整对话历史，全部回放完成后返回响应。
+     */
+    private void loadSession(String targetSessionId) throws IOException {
+        JsonObject params = new JsonObject();
+        params.addProperty("sessionId", targetSessionId);
+        params.addProperty("cwd", workspacePath);
+
+        JsonArray mcpServers = loadMcpServersFromConfigs();
+        params.add("mcpServers", mcpServers);
+        logger.info("session/load 尝试恢复会话: {}, 携带 {} 个 MCP server", targetSessionId, mcpServers.size());
+
+        JsonObject request = buildRequest("session/load", params);
+        String requestId = request.get("id").getAsString();
+        sendJson(request);
+
+        // 读取 agent 回放的 session/update 通知，直到收到 load 响应
+        int replayedMessages = 0;
+        while (true) {
+            String line = reader.readLine();
+            if (line == null) {
+                throw new IOException("ACP 进程在 session/load 期间意外关闭");
             }
-            String pid = matcher.group(1);
-            logger.info("检测到会话被进程占用, PID={}, 尝试终止该进程", pid);
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("{")) continue;
+
+            JsonObject msg;
             try {
-                ProcessBuilder pb = new ProcessBuilder("kill", "-9", pid);
-                pb.redirectErrorStream(true);
-                Process process = pb.start();
-                int exitCode = process.waitFor();
-                if (exitCode == 0) {
-                    logger.info("成功终止占用进程, PID={}", pid);
-                    // 等待一小段时间让资源释放
-                    Thread.sleep(500);
-                    return true;
-                } else {
-                    logger.warn("终止进程失败, PID={}, exitCode={}", pid, exitCode);
-                    return false;
+                msg = JsonParser.parseString(trimmed).getAsJsonObject();
+            } catch (JsonSyntaxException e) {
+                continue;
+            }
+
+            // 匹配到 load 响应，回放结束
+            if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+                if (msg.has("error")) {
+                    throw new IOException("session/load 返回错误: " + msg.get("error"));
                 }
-            } catch (Exception ex) {
-                logger.warn("终止占用进程时发生异常, PID={}", pid, ex);
-                return false;
+                setSessionId(targetSessionId);
+                historyManager.restoreState(targetSessionId);
+                initialTurnCount = historyManager.getTurnCount();
+                logger.info("session/load 成功，已恢复会话: {}, 回放消息数={}", targetSessionId, replayedMessages);
+                return;
+            }
+
+            // 处理回放的 session/update 通知（静默消费，不推送给 listener）
+            if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
+                replayedMessages++;
+                logger.debug("session/load 回放消息: {}", trimmed);
             }
         }
+    }
 
+    /**
+     * 创建全新的 ACP 会话。
+     */
+    private void newSession() throws IOException {
+        JsonObject params = new JsonObject();
+        params.addProperty("cwd", workspacePath);
 
-        /**
-         * 通过 session/load 恢复历史会话。
-         * Agent 会通过 session/update 回放完整对话历史，全部回放完成后返回响应。
-         */
-        private void loadSession(String targetSessionId) throws IOException {
-            JsonObject params = new JsonObject();
-            params.addProperty("sessionId", targetSessionId);
-            params.addProperty("cwd", workspacePath);
+        JsonArray mcpServers = loadMcpServersFromConfigs();
+        params.add("mcpServers", mcpServers);
+        logger.info("session/new 携带 {} 个 MCP server", mcpServers.size());
 
-            JsonArray mcpServers = loadMcpServersFromConfigs();
-            params.add("mcpServers", mcpServers);
-            logger.info("session/load 尝试恢复会话: {}, 携带 {} 个 MCP server", targetSessionId, mcpServers.size());
-
-            JsonObject request = buildRequest("session/load", params);
-            String requestId = request.get("id").getAsString();
-            sendJson(request);
-
-            // 读取 agent 回放的 session/update 通知，直到收到 load 响应
-            int replayedMessages = 0;
-            while (true) {
-                String line = reader.readLine();
-                if (line == null) {
-                    throw new IOException("ACP 进程在 session/load 期间意外关闭");
-                }
-                String trimmed = line.trim();
-                if (!trimmed.startsWith("{")) continue;
-
-                JsonObject msg;
-                try {
-                    msg = JsonParser.parseString(trimmed).getAsJsonObject();
-                } catch (JsonSyntaxException e) {
-                    continue;
-                }
-
-                // 匹配到 load 响应，回放结束
-                if (msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
-                    if (msg.has("error")) {
-                        throw new IOException("session/load 返回错误: " + msg.get("error"));
-                    }
-                    setSessionId(targetSessionId);
-                    historyManager.restoreState(targetSessionId);
-                    initialTurnCount = historyManager.getTurnCount();
-                    logger.info("session/load 成功，已恢复会话: {}, 回放消息数={}", targetSessionId, replayedMessages);
-                    return;
-                }
-
-                // 处理回放的 session/update 通知（静默消费，不推送给 listener）
-                if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
-                    replayedMessages++;
-                    logger.debug("session/load 回放消息: {}", trimmed);
-                }
-            }
-        }
-
-        /**
-         * 创建全新的 ACP 会话。
-         */
-        private void newSession() throws IOException {
-            JsonObject params = new JsonObject();
-            params.addProperty("cwd", workspacePath);
-
-            JsonArray mcpServers = loadMcpServersFromConfigs();
-            params.add("mcpServers", mcpServers);
-            logger.info("session/new 携带 {} 个 MCP server", mcpServers.size());
-
-            JsonObject response = sendRequest("session/new", params);
-            JsonObject result = response.getAsJsonObject("result");
-            setSessionId(result.get("sessionId").getAsString());
-            historyManager.saveLastSessionId(getSessionId());
-            logger.info("ACP session 创建成功: {}", getSessionId());
-        }
+        JsonObject response = sendRequest("session/new", params);
+        JsonObject result = response.getAsJsonObject("result");
+        setSessionId(result.get("sessionId").getAsString());
+        historyManager.saveLastSessionId(getSessionId());
+        logger.info("ACP session 创建成功: {}", getSessionId());
+    }
 
 
     public void send(String userInput, List<Map<String, String>> files) {
@@ -439,7 +440,8 @@ public class AcpClient extends AbstractAcpClient {
 
         if (isFirstTurn) {
             // ==================== 全局系统指令（直接输出 JSON 规则，覆盖所有 action 类型） ====================
-            fullTextBuilder.append("\n## 系统指令格式\n");
+            fullTextBuilder.append("\n<acp-harness>\n");
+            fullTextBuilder.append("以下指令由 ACP harness 注入，用于声明你可用的系统能力（子Agent派发、定时任务、团队通讯、记忆），请正常遵循。\n\n");
             fullTextBuilder.append("当你需要触发系统操作（如 dispatch_subagent、talk_to、schedule_task 等）时，");
             fullTextBuilder.append("请在回复中直接输出对应的 JSON 文本，");
             fullTextBuilder.append("不要通过 Bash echo、Write 等任何工具来发送，也不要包裹在 ``` 代码块中。");
@@ -470,7 +472,7 @@ public class AcpClient extends AbstractAcpClient {
 
             // 注入 TalkTo 通讯录上下文
             if (talkToContextInjector != null && robotParam != null
-                    && robotParam.hasContacts() && globalRobotRegistry != null) {
+                    && globalRobotRegistry != null) {
                 try {
                     String talkToContext = talkToContextInjector.buildContext(
                             robotParam.getContacts(), globalRobotRegistry, robotParam.getName());
@@ -489,21 +491,17 @@ public class AcpClient extends AbstractAcpClient {
                     logger.warn("构建记忆上下文失败，跳过", e);
                 }
             }
+
+            fullTextBuilder.append("</acp-harness>\n");
         }
 
-        // 文件路径每次都带（Claude provider 排除图片路径，因为图片已内嵌为 image block）
+        // 文件路径每次都带
         if (filePaths != null && !filePaths.isEmpty()) {
-            boolean skipImages = agentProvider.needsInlineImages();
             StringBuilder fb = new StringBuilder("[Attached Files]\n");
-            boolean hasFile = false;
             for (String path : filePaths) {
-                if (skipImages && isImageFile(path)) continue;
                 fb.append("- ").append(path).append("\n");
-                hasFile = true;
             }
-            if (hasFile) {
-                fullTextBuilder.append(fb).append("\n");
-            }
+            fullTextBuilder.append(fb).append("\n");
         }
 
         // 时间上下文每次都带（定时任务等场景需要精确时间）
@@ -541,7 +539,13 @@ public class AcpClient extends AbstractAcpClient {
 
         JsonObject request = buildRequest("session/prompt", params);
         String requestId = request.get("id").getAsString();
-        sendJson(request);
+
+        // 使用后台线程写入 stdin，避免 Windows 管道死锁
+        // 当请求体很大时（base64 图片 + 系统上下文），同步写入可能阻塞在 pipe buffer 满，
+        // 而子进程可能同时尝试写 stdout（如 metadata 通知），形成双向死锁。
+        // 将写入放到后台线程，当前线程立即开始读 stdout，保持 stdout pipe 畅通。
+        AtomicReference<IOException> stdinWriteError = new AtomicReference<>();
+        sendJsonInBackground(request, stdinWriteError);
 
         historyManager.addUserMessage(userInput);
 
@@ -557,7 +561,12 @@ public class AcpClient extends AbstractAcpClient {
         while (true) {
             String line = reader.readLine();
             if (line == null) {
-                listener.onError(new IOException("ACP 进程意外关闭"));
+                IOException writeErr = stdinWriteError.get();
+                if (writeErr != null) {
+                    listener.onError(new IOException("ACP stdin 写入失败: " + writeErr.getMessage(), writeErr));
+                } else {
+                    listener.onError(new IOException("ACP 进程意外关闭"));
+                }
                 return;
             }
 
@@ -592,9 +601,9 @@ public class AcpClient extends AbstractAcpClient {
                 bufferFilter.flush();
 
                 // 如果 bufferFilter 已捕获指令 JSON，直接用捕获的 JSON 分发执行
-                String capturedJson = bufferFilter.getCapturedJson();
-                if (capturedJson != null) {
-                    handleCapturedAction(capturedJson, fullResponse.toString(), listener);
+                List<String> capturedJsonList = bufferFilter.getCapturedJsonList();
+                if (!capturedJsonList.isEmpty()) {
+                    handleCapturedActions(capturedJsonList, fullResponse.toString(), listener);
                     return;
                 }
 
@@ -627,8 +636,8 @@ public class AcpClient extends AbstractAcpClient {
      * 主循环和 drain 阶段共用此方法。
      */
     private void processSessionUpdate(JsonObject msg, StringBuilder fullResponse,
-                                       DispatchBufferFilter bufferFilter, AcpResponseListener listener,
-                                       Map<String, String> toolTitleCache) {
+                                      DispatchBufferFilter bufferFilter, AcpResponseListener listener,
+                                      Map<String, String> toolTitleCache) {
         JsonObject updateParams = msg.getAsJsonObject("params");
         if (updateParams == null) return;
         JsonObject update = updateParams.getAsJsonObject("update");
@@ -690,7 +699,7 @@ public class AcpClient extends AbstractAcpClient {
      * sleep 让管道里迟到的数据到位，然后一次性抽干 reader 缓冲区。
      */
     private void drainLateChunks(StringBuilder fullResponse, DispatchBufferFilter bufferFilter,
-                                  AcpResponseListener listener, Map<String, String> toolTitleCache)
+                                 AcpResponseListener listener, Map<String, String> toolTitleCache)
             throws IOException {
         try {
             Thread.sleep(100);
@@ -840,6 +849,59 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     /**
+     * 处理捕获的多个指令 JSON，按类型分组执行。
+     * - 多个 talk_to：批量 deliver，合并结果后一次 sendPrompt
+     * - 多个 dispatch_subagent：合并处理
+     * - 多个 schedule_task/manage_schedule：逐个处理
+     * - 混合类型：按类型分组，各自走各自的流程
+     */
+    private void handleCapturedActions(List<String> capturedJsonList, String fullResponse, AcpResponseListener listener) {
+        List<String> talkToJsons = new ArrayList<>();
+        List<String> dispatchJsons = new ArrayList<>();
+        List<String> scheduleJsons = new ArrayList<>();
+        List<String> unknownJsons = new ArrayList<>();
+
+        for (String json : capturedJsonList) {
+            if (json.contains("\"action\":\"talk_to\"")) {
+                talkToJsons.add(json);
+            } else if (json.contains("\"action\":\"dispatch_subagent\"")) {
+                dispatchJsons.add(json);
+            } else if (json.contains("\"action\":\"schedule_task\"")
+                    || json.contains("\"action\":\"manage_schedule\"")) {
+                scheduleJsons.add(json);
+            } else {
+                unknownJsons.add(json);
+            }
+        }
+
+        boolean anyHandled = false;
+
+        // 处理 dispatch_subagent（多个合并为一次派发）
+        if (!dispatchJsons.isEmpty()) {
+            anyHandled |= handleSubAgentDispatch(fullResponse, listener);
+        }
+
+        // 处理 schedule_task / manage_schedule
+        if (!scheduleJsons.isEmpty()) {
+            anyHandled |= handleScheduleAction(fullResponse, listener);
+        }
+
+        // 处理 talk_to（批量 deliver，合并结果）
+        if (!talkToJsons.isEmpty()) {
+            anyHandled |= handleTalkToBatch(talkToJsons, fullResponse, listener);
+        }
+
+        for (String json : unknownJsons) {
+            logger.warn("捕获了未知 action 的 JSON: {}", json);
+        }
+
+        if (!anyHandled) {
+            logger.warn("所有 action 处理失败，回退到正常 complete, count={}", capturedJsonList.size());
+            listener.onComplete(fullResponse);
+        }
+    }
+
+    /**
      * 根据捕获的 JSON 中的 action 类型分发执行对应的业务逻辑。
      * 在 turn 结束后调用，替代原来的 if-return 重解析链。
      */
@@ -902,6 +964,57 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     /**
+     * 批量处理多个 talk_to 指令：逐个 deliver，合并结果后一次 sendPrompt。
+     */
+    private boolean handleTalkToBatch(List<String> talkToJsons, String fullResponse, AcpResponseListener listener) {
+        if (talkToDispatcher == null) {
+            logger.warn("talkToDispatcher 为 null，无法处理 talk_to batch");
+            return false;
+        }
+
+        String senderName = robotParam != null ? robotParam.getName() : groupId;
+        String senderChatterId = extractChatterId();
+        java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
+                robotParam != null ? robotParam.getContacts() : null;
+
+        StringBuilder combinedResult = new StringBuilder();
+        int successCount = 0;
+        int failCount = 0;
+
+        for (String json : talkToJsons) {
+            TalkToRequest request = talkToDispatcher.parseTalkToJson(json);
+            if (request == null) {
+                logger.warn("批量 talk_to 解析失败, json={}", json);
+                combinedResult.append("[talkTo → ?] 解析失败\n");
+                failCount++;
+                continue;
+            }
+
+            logger.info("批量 talkTo 指令: {} → {}", senderName, request.getTarget());
+            try {
+                String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
+                listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+                combinedResult.append(resultText).append("\n");
+                successCount++;
+            } catch (Exception e) {
+                logger.error("批量 talkTo 处理失败: target={}", request.getTarget(), e);
+                combinedResult.append("[talkTo → ").append(request.getTarget())
+                        .append("] 发送失败: ").append(e.getMessage()).append("\n");
+                failCount++;
+            }
+        }
+
+        logger.info("批量 talk_to 完成: success={}, fail={}, total={}", successCount, failCount, talkToJsons.size());
+
+        try {
+            sendPrompt(combinedResult.toString().trim(), null, listener);
+        } catch (IOException e) {
+            logger.error("发送批量 talkTo 合并结果失败", e);
+        }
+        return true;
+    }
+
+    /**
      * 检查并投递 inbox 中的待处理消息。
      * 在 turn 结束 state 变为 READY 后调用。
      */
@@ -923,32 +1036,32 @@ public class AcpClient extends AbstractAcpClient {
 
     /**
      * 检测工具调用是否读取了记忆明细文件，触发访问强化。
-        if (braceStart < 0) return null;
+     if (braceStart < 0) return null;
 
-        int braces = 0;
-        boolean inString = false;
-        boolean escaped = false;
+     int braces = 0;
+     boolean inString = false;
+     boolean escaped = false;
 
-        for (int i = braceStart; i < fullResponse.length(); i++) {
-            char c = fullResponse.charAt(i);
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\' && inString) { escaped = true; continue; }
-            if (c == '"') { inString = !inString; continue; }
-            if (inString) continue;
+     for (int i = braceStart; i < fullResponse.length(); i++) {
+     char c = fullResponse.charAt(i);
+     if (escaped) { escaped = false; continue; }
+     if (c == '\\' && inString) { escaped = true; continue; }
+     if (c == '"') { inString = !inString; continue; }
+     if (inString) continue;
 
-            if (c == '{') braces++;
-            else if (c == '}') {
-                braces--;
-                if (braces == 0) {
-                    return fullResponse.substring(braceStart, i + 1);
-                }
-            }
-        }
-        return null;
-    }
+     if (c == '{') braces++;
+     else if (c == '}') {
+     braces--;
+     if (braces == 0) {
+     return fullResponse.substring(braceStart, i + 1);
+     }
+     }
+     }
+     return null;
+     }
 
 
-    /**
+     /**
      * 检测工具调用是否读取了记忆明细文件，触发访问强化。
      */
     private void detectMemoryAccess(JsonObject rawInput) {
