@@ -21,6 +21,8 @@ public class AcpRobotParam {
     private List<ContactRef> contacts;
     private String model;
 
+    private static volatile boolean globalProxyEnabled = true;
+
     private boolean proxyEnabled;
     private String httpProxy;
     private String noProxy;
@@ -168,9 +170,14 @@ public class AcpRobotParam {
     public boolean isProxyEnabled() { return proxyEnabled; }
     public void setProxyEnabled(boolean proxyEnabled) { this.proxyEnabled = proxyEnabled; }
 
+    public boolean isEffectiveProxyEnabled() { return globalProxyEnabled && proxyEnabled; }
+
     public String getHttpProxy() { return httpProxy; }
     public void setHttpProxy(String httpProxy) { this.httpProxy = httpProxy; }
 
     public String getNoProxy() { return noProxy; }
     public void setNoProxy(String noProxy) { this.noProxy = noProxy; }
+
+    public static boolean isGlobalProxyEnabled() { return globalProxyEnabled; }
+    public static void setGlobalProxyEnabled(boolean v) { globalProxyEnabled = v; }
 }

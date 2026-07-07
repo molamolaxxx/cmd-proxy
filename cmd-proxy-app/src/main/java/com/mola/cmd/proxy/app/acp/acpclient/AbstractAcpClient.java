@@ -181,7 +181,7 @@ public abstract class AbstractAcpClient implements Closeable {
         }
 
         // 按 robot 维度注入 HTTP 代理环境变量
-        if (robotParamRef != null && robotParamRef.isProxyEnabled()) {
+        if (robotParamRef != null && robotParamRef.isEffectiveProxyEnabled()) {
             String proxy = robotParamRef.getHttpProxy();
             if (proxy != null && !proxy.trim().isEmpty()) {
                 String url = proxy.contains("://") ? proxy.trim() : "http://" + proxy.trim();

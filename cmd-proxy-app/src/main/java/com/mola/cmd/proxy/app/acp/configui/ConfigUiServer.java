@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.configui;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
@@ -63,6 +64,9 @@ public class ConfigUiServer {
         server = HttpServer.create(new InetSocketAddress(port), 0);
         executor = Executors.newFixedThreadPool(4);
         server.setExecutor(executor);
+
+        // 启动时从配置文件加载全局代理开关
+        loadGlobalProxyEnabled();
 
         // 静态页面
         server.createContext("/", this::handleIndex);
@@ -141,6 +145,10 @@ public class ConfigUiServer {
         String formatted = JSON.toJSONString(json, SerializerFeature.PrettyFormat, SerializerFeature.SortField);
         Path path = Paths.get(CONFIG_PATH);
         Files.write(path, formatted.getBytes(StandardCharsets.UTF_8));
+
+        // 同步全局代理开关
+        syncGlobalProxyEnabled(json);
+
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
     }
 
@@ -232,6 +240,27 @@ public class ConfigUiServer {
         OutputStream os = exchange.getResponseBody();
         os.write(bytes);
         os.close();
+    }
+
+    // ========== 全局代理开关 ==========
+
+    private void loadGlobalProxyEnabled() {
+        try {
+            Path path = Paths.get(CONFIG_PATH);
+            if (Files.exists(path)) {
+                String raw = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+                JSONObject json = JSON.parseObject(raw);
+                syncGlobalProxyEnabled(json);
+            }
+        } catch (Exception e) {
+            logger.warn("加载全局代理开关失败，保持默认值 true", e);
+        }
+    }
+
+    private void syncGlobalProxyEnabled(JSONObject json) {
+        Boolean val = json.getBoolean("globalProxyEnabled");
+        AcpRobotParam.setGlobalProxyEnabled(val == null || val);
+        logger.info("全局代理开关已同步: {}", AcpRobotParam.isGlobalProxyEnabled());
     }
 
     private String readBody(HttpExchange exchange) throws IOException {
