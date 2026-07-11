@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.subagent;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.McpConfigLoader;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
@@ -40,9 +41,9 @@ public class SubAgentAcpClient extends AbstractAcpClient {
     private Consumer<String> progressCallback;
 
     public SubAgentAcpClient(String workspacePath, String groupId,
-                             int timeoutSeconds, String agentProviderType) {
-        super(AgentProviderRouter.getInstance().resolve(agentProviderType),
-              workspacePath, groupId);
+                             int timeoutSeconds, AcpRobotParam robotParam) {
+        super(AgentProviderRouter.getInstance().resolve(robotParam.getAgentProvider()),
+              workspacePath, groupId, robotParam);
         this.timeoutSeconds = timeoutSeconds;
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(workspacePath);
         this.executor = Executors.newSingleThreadExecutor(r -> {

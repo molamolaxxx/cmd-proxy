@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryAction;
@@ -36,7 +37,7 @@ public class MemoryExtractor {
 
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
-    private final String agentProvider;
+    private final AcpRobotParam robotParam;
 
     /** 单线程提取队列，串行执行所有提取任务 */
     private final ExecutorService extractQueue = new ThreadPoolExecutor(
@@ -53,10 +54,10 @@ public class MemoryExtractor {
     /** 上次提取时的历史消息数量，用于增量提取 */
     private final AtomicInteger lastExtractedSize = new AtomicInteger(0);
 
-    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore, String agentProvider) {
+    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
         this.config = config;
         this.fileStore = fileStore;
-        this.agentProvider = agentProvider;
+        this.robotParam = robotParam;
     }
 
     /**
@@ -115,7 +116,7 @@ public class MemoryExtractor {
         String groupId = "memory_extractor__" + workspacePath.hashCode();
 
         try (MemoryAcpClient client = new MemoryAcpClient(
-                workspacePath, groupId, config.getSubClientTimeout(), agentProvider)) {
+                workspacePath, groupId, config.getSubClientTimeout(), robotParam)) {
             client.start();
             String response = client.sendPromptSync(prompt);
             logger.info("记忆提取子 Client 返回, 长度={}", response.length());
@@ -280,7 +281,7 @@ public class MemoryExtractor {
         List<String> skills = new ArrayList<>();
         try {
             String skillsRelPath = AgentProviderRouter.getInstance()
-                    .resolve(agentProvider).getSkillsRelativePath();
+                    .resolve(robotParam.getAgentProvider()).getSkillsRelativePath();
             Path skillsDir = Paths.get(workspacePath, skillsRelPath);
             if (!Files.exists(skillsDir) || !Files.isDirectory(skillsDir)) {
                 return skills;

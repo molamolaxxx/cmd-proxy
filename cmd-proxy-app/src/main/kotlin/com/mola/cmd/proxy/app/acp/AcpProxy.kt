@@ -671,8 +671,7 @@ object AcpProxy {
         if (robot == null || !robot.isMemoryEnabled) return
 
         val memCfg = robot.memory
-        val agentProvider = robot.agentProvider ?: "KIRO_CLI"
-        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg, agentProvider, robot.name) }
+        val mgr = memoryManagers.getOrPut(groupId) { MemoryManager(memCfg, robot) }
         client.setMemoryManager(mgr)
         setupTurnCallback(client, memCfg, mgr)
     }
@@ -705,14 +704,13 @@ object AcpProxy {
         if (robot == null || robot.name.isBlank()) return
         if (!robot.isAbilityAutoRefresh) return
 
-        val agentProvider = robot.agentProvider ?: "KIRO_CLI"
         val timeoutSeconds = if (robot.isMemoryEnabled) robot.memory.subClientTimeout else 120
         val mcpConfigPaths = client.mcpConfigPaths
         val memoryManager: MemoryManager? = if (robot.isMemoryEnabled) memoryManagers[groupId] else null
 
         val service = abilityServices.getOrPut(groupId) {
             AbilityReflectionService(
-                robot.name, client.workspacePath, agentProvider,
+                robot.name, client.workspacePath, robot,
                 timeoutSeconds, mcpConfigPaths, memoryManager
             )
         }
@@ -736,7 +734,7 @@ object AcpProxy {
 
         val service = abilityServices.getOrPut(groupId) {
             AbilityReflectionService(
-                robot.name, workDir, agentProvider,
+                robot.name, workDir, robot,
                 timeoutSeconds, mcpConfigPaths, null
             )
         }
@@ -775,7 +773,7 @@ object AcpProxy {
         for (name in allowedNames) {
             val targetRobot = globalRobotRegistry[name] ?: continue
             if (targetRobot.isMemoryEnabled) {
-                val memMgr = MemoryManager(targetRobot.memory, targetRobot.agentProvider ?: "KIRO_CLI", targetRobot.name)
+                val memMgr = MemoryManager(targetRobot.memory, targetRobot)
                 subAgentMemoryMap[name] = memMgr
             }
         }
@@ -992,4 +990,3 @@ object AcpProxy {
     }
 
 }
-

@@ -29,6 +29,27 @@ public interface AgentProvider {
     String[] getArgs();
 
     /**
+     * 是否提供备用启动命令。主命令启动或初始化失败时，客户端会自动尝试备用命令。
+     */
+    default boolean hasFallbackCommand() {
+        return false;
+    }
+
+    /**
+     * 备用启动命令，仅当 {@link #hasFallbackCommand()} 为 true 时调用。
+     */
+    default String getFallbackCommand() {
+        throw new UnsupportedOperationException("No fallback command configured");
+    }
+
+    /**
+     * 备用启动命令参数。
+     */
+    default String[] getFallbackArgs() {
+        return new String[0];
+    }
+
+    /**
      * 获取 MCP 配置文件路径列表，按优先级从低到高排列。
      *
      * @param workspacePath 当前工作目录

@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.MemoryManagerBridge;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
@@ -25,17 +26,13 @@ public class MemoryManager implements MemoryManagerBridge {
     private final MemoryFileStore fileStore;
     private final MemoryDreamer dreamer;
 
-    public MemoryManager(MemoryConfig config, String agentProvider) {
-        this(config, agentProvider, null);
-    }
-
-    public MemoryManager(MemoryConfig config, String agentProvider, String robotName) {
+    public MemoryManager(MemoryConfig config, AcpRobotParam robotParam) {
         this.config = config;
-        String effectiveRobotName = config.isRobotScope() ? robotName : null;
+        String effectiveRobotName = config.isRobotScope() ? robotParam.getName() : null;
         this.fileStore = new MemoryFileStore(config.getBaseDir(), effectiveRobotName);
         this.loader = new MemoryLoader(fileStore, config);
-        this.extractor = new MemoryExtractor(config, fileStore, agentProvider);
-        this.dreamer = new MemoryDreamer(config, fileStore, agentProvider);
+        this.extractor = new MemoryExtractor(config, fileStore, robotParam);
+        this.dreamer = new MemoryDreamer(config, fileStore, robotParam);
     }
 
     // ==================== MemoryManagerBridge 实现 ====================

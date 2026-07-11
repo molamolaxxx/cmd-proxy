@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.ability;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
 import org.slf4j.Logger;
@@ -27,8 +28,9 @@ public class AbilityReflectionAcpClient extends AbstractAcpClient {
     });
 
     public AbilityReflectionAcpClient(String workspacePath, String groupId,
-                                      int timeoutSeconds, String agentProviderType) {
-        super(AgentProviderRouter.getInstance().resolve(agentProviderType), workspacePath, groupId);
+                                      int timeoutSeconds, AcpRobotParam robotParam) {
+        super(AgentProviderRouter.getInstance().resolve(robotParam.getAgentProvider()),
+                workspacePath, groupId, robotParam);
         this.timeoutSeconds = timeoutSeconds;
     }
 

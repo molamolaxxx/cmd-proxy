@@ -225,7 +225,7 @@ public class SubAgentDispatcher implements Closeable {
 
         try (SubAgentAcpClient client = new SubAgentAcpClient(
                 workDir, groupId, defaultTimeoutSeconds,
-                targetRobot.getAgentProvider())) {
+                targetRobot)) {
 
             activeClients.add(client);
 

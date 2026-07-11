@@ -20,8 +20,7 @@ public class AcpRobotParam {
     private boolean scheduleEnabled = false;
     private List<ContactRef> contacts;
     private String model;
-
-    private static volatile boolean globalProxyEnabled = true;
+    private String apiKey;
 
     private boolean proxyEnabled;
     private String httpProxy;
@@ -70,6 +69,9 @@ public class AcpRobotParam {
         }
         if ("CLAUDE_AGENT_ACP".equalsIgnoreCase(agentProvider)) {
             return "img/claude.png";
+        }
+        if ("CODEX_ACP".equalsIgnoreCase(agentProvider)) {
+            return "img/codex.png";
         }
         return "img/kiro.png";
     }
@@ -167,17 +169,15 @@ public class AcpRobotParam {
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
 
+    public String getApiKey() { return apiKey; }
+    public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+
     public boolean isProxyEnabled() { return proxyEnabled; }
     public void setProxyEnabled(boolean proxyEnabled) { this.proxyEnabled = proxyEnabled; }
-
-    public boolean isEffectiveProxyEnabled() { return globalProxyEnabled && proxyEnabled; }
 
     public String getHttpProxy() { return httpProxy; }
     public void setHttpProxy(String httpProxy) { this.httpProxy = httpProxy; }
 
     public String getNoProxy() { return noProxy; }
     public void setNoProxy(String noProxy) { this.noProxy = noProxy; }
-
-    public static boolean isGlobalProxyEnabled() { return globalProxyEnabled; }
-    public static void setGlobalProxyEnabled(boolean v) { globalProxyEnabled = v; }
 }

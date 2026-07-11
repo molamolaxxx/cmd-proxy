@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.memory.model.*;
 import com.mola.cmd.proxy.app.acp.memory.prompt.DreamPromptTemplate;
 import org.slf4j.Logger;
@@ -27,7 +28,7 @@ public class MemoryDreamer {
 
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
-    private final String agentProvider;
+    private final AcpRobotParam robotParam;
 
     private final ExecutorService dreamQueue = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -40,10 +41,10 @@ public class MemoryDreamer {
             new ThreadPoolExecutor.DiscardOldestPolicy()
     );
 
-    public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore, String agentProvider) {
+    public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
         this.config = config;
         this.fileStore = fileStore;
-        this.agentProvider = agentProvider;
+        this.robotParam = robotParam;
     }
 
     /**
@@ -96,7 +97,7 @@ public class MemoryDreamer {
             try (MemoryAcpClient client = new MemoryAcpClient(
                     workspacePath, groupId,
                     config.getSubClientTimeout() * 2,  // 整理比提取更耗时
-                    agentProvider)) {
+                    robotParam)) {
                 client.start();
                 response = client.sendPromptSync(prompt);
             }

@@ -55,6 +55,9 @@ public abstract class AbstractAcpClient implements Closeable {
     protected String sessionId;
     protected volatile double contextUsagePercentage = -1;
 
+    /** initialize 后暂存的 OAuth methodId，用于 session/new 失败时的认证回退 */
+    private String pendingOAuthMethodId;
+
     /**
      * 使用指定 AgentProvider 创建（protected，供子类使用）。
      */
@@ -85,18 +88,60 @@ public abstract class AbstractAcpClient implements Closeable {
 
     /**
      * 启动 ACP Client：启动子进程 → initialize（带重试）→ createSession
+     * <p>
+     * Codex-ACP OAuth 场景（无 apiKey）：先尝试直接 session/new（依赖已缓存 token），
+     * 失败后回退走 OAuth 认证（首次登录，需浏览器交互，URL 在 stderr 日志中）。
      */
     public void start() throws IOException {
         state.set(State.STARTING);
         try {
-            startProcess();
-            initializeWithRetry();
-            createSession();
+            startProcessAndInitialize();
+            try {
+                createSession();
+            } catch (IOException e) {
+                if (pendingOAuthMethodId != null) {
+                    logger.info("session/new 失败，回退到 OAuth 认证 (methodId={})，请查看 stderr 日志中的登录 URL", pendingOAuthMethodId);
+                    authenticate(pendingOAuthMethodId);
+                    try {
+                        Thread.sleep(5000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                    createSession();
+                } else {
+                    throw e;
+                }
+            }
             state.set(State.READY);
             logger.info("ACP Client 就绪，sessionId={}, groupId={}", sessionId, groupId);
         } catch (IOException e) {
             state.set(State.ERROR);
             throw e;
+        }
+    }
+
+    /**
+     * 启动并初始化 ACP 进程。Provider 声明备用命令时，主命令不可用或初始化失败会自动回退。
+     */
+    private void startProcessAndInitialize() throws IOException {
+        try {
+            startProcess();
+            initializeWithRetry();
+        } catch (IOException primaryError) {
+            if (!agentProvider.hasFallbackCommand()) {
+                throw primaryError;
+            }
+            logger.warn("ACP 主启动命令失败，尝试备用命令 {}: {}",
+                    agentProvider.getFallbackCommand(), primaryError.getMessage());
+            closeCurrentProcess();
+            pendingOAuthMethodId = null;
+            try {
+                startProcess(true);
+                initializeWithRetry();
+            } catch (IOException fallbackError) {
+                fallbackError.addSuppressed(primaryError);
+                throw fallbackError;
+            }
         }
     }
 
@@ -138,19 +183,30 @@ public abstract class AbstractAcpClient implements Closeable {
     public void close() throws IOException {
         state.set(State.CLOSED);
         logger.info("关闭 AbstractAcpClient, groupId={}", groupId);
+        closeCurrentProcess();
+    }
+
+    private void closeCurrentProcess() {
         try { if (writer != null) writer.close(); } catch (IOException e) { /* ignore */ }
         try { if (reader != null) reader.close(); } catch (IOException e) { /* ignore */ }
         if (process != null && process.isAlive()) {
             process.destroy();
         }
+        writer = null;
+        reader = null;
+        process = null;
     }
 
     // ==================== 协议步骤 ====================
 
     protected void startProcess() throws IOException {
+        startProcess(false);
+    }
+
+    private void startProcess(boolean useFallbackCommand) throws IOException {
         List<String> cmd = new ArrayList<>();
-        cmd.add(agentProvider.getCommand());
-        cmd.addAll(Arrays.asList(agentProvider.getArgs()));
+        cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand() : agentProvider.getCommand());
+        cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs() : agentProvider.getArgs()));
 
         // 追加 provider 特定的额外参数（如 --model）
         List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);
@@ -181,7 +237,7 @@ public abstract class AbstractAcpClient implements Closeable {
         }
 
         // 按 robot 维度注入 HTTP 代理环境变量
-        if (robotParamRef != null && robotParamRef.isEffectiveProxyEnabled()) {
+        if (robotParamRef != null && robotParamRef.isProxyEnabled()) {
             String proxy = robotParamRef.getHttpProxy();
             if (proxy != null && !proxy.trim().isEmpty()) {
                 String url = proxy.contains("://") ? proxy.trim() : "http://" + proxy.trim();
@@ -199,14 +255,15 @@ public abstract class AbstractAcpClient implements Closeable {
 
         logger.info("启动 ACP 进程: {}, PATH contains node: {}", cmd,
                 pb.environment().getOrDefault("PATH", "").contains("node"));
-        process = pb.start();
-        writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-        reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+        Process startedProcess = pb.start();
+        process = startedProcess;
+        writer = new BufferedWriter(new OutputStreamWriter(startedProcess.getOutputStream(), StandardCharsets.UTF_8));
+        reader = new BufferedReader(new InputStreamReader(startedProcess.getInputStream(), StandardCharsets.UTF_8));
 
         // stderr 日志转发（用 INFO 级别，方便排查子进程崩溃原因）
         Thread stderrThread = new Thread(() -> {
             try (BufferedReader errReader = new BufferedReader(
-                    new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+                    new InputStreamReader(startedProcess.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = errReader.readLine()) != null) {
                     logger.info("[ACP STDERR][{}] {}", groupId, line);
@@ -215,13 +272,11 @@ public abstract class AbstractAcpClient implements Closeable {
                 // 进程关闭时正常退出
             }
             // 进程退出时记录 exit code
-            if (process != null) {
-                try {
-                    int exitCode = process.waitFor();
-                    logger.warn("[ACP STDERR][{}] 进程已退出, exitCode={}", groupId, exitCode);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
+            try {
+                int exitCode = startedProcess.waitFor();
+                logger.warn("[ACP STDERR][{}] 进程已退出, exitCode={}", groupId, exitCode);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }, "acp-stderr-" + groupId);
         stderrThread.setDaemon(true);
@@ -243,6 +298,60 @@ public abstract class AbstractAcpClient implements Closeable {
         JsonObject response = sendRequest("initialize", params);
         JsonObject result = response.getAsJsonObject("result");
         logger.info("ACP initialize 完成: {}", result);
+
+        // Codex-ACP 兼容：如果 init 响应包含 authMethods，按策略处理认证
+        if (result != null && result.has("authMethods") && result.get("authMethods").isJsonArray()) {
+            String methodId = resolveAuthMethodId(result.getAsJsonArray("authMethods"));
+            if (methodId != null) {
+                authenticate(methodId);
+            }
+        }
+    }
+
+    /**
+     * 从 authMethods 中选择认证方式。
+     * - 有 apiKey → 返回 api-key 类 methodId，立即认证
+     * - 无 apiKey → 暂存 OAuth methodId 到 pendingOAuthMethodId，返回 null（不立即认证）
+     */
+    private String resolveAuthMethodId(JsonArray authMethods) {
+        boolean hasApiKey = robotParamRef != null
+                && robotParamRef.getApiKey() != null
+                && !robotParamRef.getApiKey().trim().isEmpty();
+
+        String apiKeyMethod = null;
+        String oauthMethod = null;
+
+        for (JsonElement el : authMethods) {
+            if (!el.isJsonObject()) continue;
+            JsonObject method = el.getAsJsonObject();
+            String id = method.has("id") ? method.get("id").getAsString() : "";
+            if ("api-key".equals(id) || "openai-api-key".equals(id) || "codex-api-key".equals(id)) {
+                if (apiKeyMethod == null) apiKeyMethod = id;
+            } else if ("chatgpt".equals(id) || "chat-gpt".equals(id)) {
+                if (oauthMethod == null) oauthMethod = id;
+            }
+        }
+
+        if (hasApiKey && apiKeyMethod != null) {
+            return apiKeyMethod;
+        }
+
+        // 无 apiKey：暂存 OAuth methodId，等 session/new 失败时再走
+        if (oauthMethod != null) {
+            pendingOAuthMethodId = oauthMethod;
+            logger.info("未配置 apiKey，暂存 OAuth methodId={}，先尝试直接 session/new", oauthMethod);
+        }
+        return null;
+    }
+
+    /**
+     * 执行 ACP authenticate（Codex-ACP 协议要求）。
+     */
+    protected void authenticate(String methodId) throws IOException {
+        JsonObject params = new JsonObject();
+        params.addProperty("methodId", methodId);
+        JsonObject response = sendRequest("authenticate", params);
+        logger.info("ACP authenticate 完成, methodId={}", methodId);
     }
 
     // ==================== JSON-RPC 工具方法 ====================

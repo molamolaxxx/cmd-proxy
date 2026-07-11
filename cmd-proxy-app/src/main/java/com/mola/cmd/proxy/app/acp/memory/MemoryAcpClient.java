@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
 import org.slf4j.Logger;
@@ -31,8 +32,9 @@ public class MemoryAcpClient extends AbstractAcpClient {
         return t;
     });
 
-    public MemoryAcpClient(String workspacePath, String groupId, int timeoutSeconds, String agentProviderType) {
-        super(AgentProviderRouter.getInstance().resolve(agentProviderType), workspacePath, groupId);
+    public MemoryAcpClient(String workspacePath, String groupId, int timeoutSeconds, AcpRobotParam robotParam) {
+        super(AgentProviderRouter.getInstance().resolve(robotParam.getAgentProvider()),
+                workspacePath, groupId, robotParam);
         this.timeoutSeconds = timeoutSeconds;
     }
 

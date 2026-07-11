@@ -1,7 +1,9 @@
 package com.mola.cmd.proxy.app.acp.ability;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
+import com.mola.cmd.proxy.app.acp.acpclient.McpConfigLoader;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager;
 import org.slf4j.Logger;
@@ -42,7 +44,7 @@ public class AbilityReflectionService {
 
     private final String robotName;
     private final String workspacePath;
-    private final String agentProvider;
+    private final AcpRobotParam robotParam;
     private final int timeoutSeconds;
     private final List<Path> mcpConfigPaths;
     /** 记忆管理器，可为 null（未启用记忆时） */
@@ -60,13 +62,13 @@ public class AbilityReflectionService {
     );
 
     public AbilityReflectionService(String robotName, String workspacePath,
-                                    String agentProvider,
+                                    AcpRobotParam robotParam,
                                     int timeoutSeconds,
                                     List<Path> mcpConfigPaths,
                                     MemoryManager memoryManager) {
         this.robotName = robotName;
         this.workspacePath = workspacePath;
-        this.agentProvider = agentProvider;
+        this.robotParam = robotParam;
         this.timeoutSeconds = timeoutSeconds;
         this.mcpConfigPaths = mcpConfigPaths != null ? mcpConfigPaths : Collections.emptyList();
         this.memoryManager = memoryManager;
@@ -152,7 +154,7 @@ public class AbilityReflectionService {
 
             String response;
             try (AbilityReflectionAcpClient client = new AbilityReflectionAcpClient(
-                    workspacePath, groupId, timeoutSeconds, agentProvider)) {
+                    workspacePath, groupId, timeoutSeconds, robotParam)) {
                 client.start();
                 response = client.sendPromptSync(prompt);
             }
@@ -218,7 +220,7 @@ public class AbilityReflectionService {
      */
     private String computeSkillsHash() {
         String skillsRelPath = AgentProviderRouter.getInstance()
-                .resolve(agentProvider).getSkillsRelativePath();
+                .resolve(robotParam.getAgentProvider()).getSkillsRelativePath();
         Path skillsDir = Paths.get(workspacePath, skillsRelPath);
         if (!Files.exists(skillsDir) || !Files.isDirectory(skillsDir)) {
             return "empty";
@@ -264,25 +266,8 @@ public class AbilityReflectionService {
     // ==================== MCP 配置解析 ====================
 
     private List<String> loadMcpServerNames() {
-        List<String> names = new ArrayList<>();
-        for (Path configPath : mcpConfigPaths) {
-            if (!Files.exists(configPath)) continue;
-            try {
-                String content = new String(Files.readAllBytes(configPath), StandardCharsets.UTF_8);
-                JsonObject root = JsonParser.parseString(content).getAsJsonObject();
-                JsonObject servers = root.getAsJsonObject("mcpServers");
-                if (servers == null) continue;
-                for (Map.Entry<String, JsonElement> entry : servers.entrySet()) {
-                    JsonObject serverObj = entry.getValue().getAsJsonObject();
-                    if (serverObj.has("disabled") && serverObj.get("disabled").getAsBoolean()) continue;
-                    if (!names.contains(entry.getKey())) {
-                        names.add(entry.getKey());
-                    }
-                }
-            } catch (Exception e) {
-                logger.warn("读取 MCP 配置失败: {}", configPath, e);
-            }
-        }
+        // 与 ACP session/new 使用同一解析器，统一支持 JSON 和 Codex TOML 配置。
+        List<String> names = new ArrayList<>(McpConfigLoader.loadServerNames(mcpConfigPaths));
         Collections.sort(names);
         return names;
     }

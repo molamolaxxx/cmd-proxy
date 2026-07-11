@@ -8,7 +8,8 @@ public enum AgentProviderType {
 
     KIRO_CLI,
     OPENCODE,
-    CLAUDE_AGENT_ACP;
+    CLAUDE_AGENT_ACP,
+    CODEX_ACP;
 
     /**
      * 从字符串解析，不区分大小写，无法匹配时返回默认值 KIRO_CLI。
