@@ -39,7 +39,7 @@ public class MemoryManager implements MemoryManagerBridge {
 
     @Override
     public String buildMemoryPrompt(String workspacePath) {
-        if (!config.isEnabled()) return "";
+        if (!config.isReadEnabled()) return "";
         try {
             // 检查是否需要自动整理
             checkAndTriggerDream(workspacePath);
@@ -52,19 +52,19 @@ public class MemoryManager implements MemoryManagerBridge {
 
     @Override
     public void submitExtract(String workspacePath, List<ContextMessage> history) {
-        if (!config.isEnabled() || history == null || history.isEmpty()) return;
+        if (!config.isWriteEnabled() || history == null || history.isEmpty()) return;
         extractor.submitExtract(workspacePath, history);
     }
 
     @Override
     public void submitExtractFull(String workspacePath, List<ContextMessage> history) {
-        if (!config.isEnabled() || history == null || history.isEmpty()) return;
+        if (!config.isWriteEnabled() || history == null || history.isEmpty()) return;
         extractor.submitExtractFull(workspacePath, history);
     }
 
     @Override
     public void incrementSessionCount(String workspacePath) {
-        if (!config.isEnabled()) return;
+        if (!config.isWriteEnabled()) return;
         try {
             fileStore.incrementDreamSessionCount(workspacePath);
         } catch (Exception e) {
@@ -74,7 +74,7 @@ public class MemoryManager implements MemoryManagerBridge {
 
     @Override
     public void onMemoryAccessed(String workspacePath, String filePath) {
-        if (!config.isEnabled() || filePath == null) return;
+        if (!config.isWriteEnabled() || filePath == null) return;
         try {
             fileStore.touchMemory(workspacePath, filePath);
         } catch (Exception e) {
@@ -137,7 +137,7 @@ public class MemoryManager implements MemoryManagerBridge {
      * 供能力反思等子系统使用。
      */
     public String buildMemorySummary(String workspacePath) {
-        if (!config.isEnabled()) return "";
+        if (!config.isReadEnabled()) return "";
         try {
             return loader.buildMemorySummary(workspacePath);
         } catch (Exception e) {
@@ -150,7 +150,7 @@ public class MemoryManager implements MemoryManagerBridge {
      * 手动触发记忆整理（供 acpMemoryDream 命令调用）。
      */
     public void triggerDream(String workspacePath) {
-        if (!config.isEnabled()) return;
+        if (!config.isWriteEnabled()) return;
         dreamer.submitDream(workspacePath);
     }
 

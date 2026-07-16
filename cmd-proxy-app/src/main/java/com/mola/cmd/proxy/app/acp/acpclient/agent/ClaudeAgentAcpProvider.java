@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
+import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 
 import java.nio.file.Path;
@@ -58,5 +59,46 @@ public class ClaudeAgentAcpProvider implements AgentProvider {
     @Override
     public boolean needsInlineImages() {
         return true;
+    }
+
+    @Override
+    public CompactionSignal detectCompactionSignal(JsonObject msg) {
+        if (msg == null || !"session/update".equals(getString(msg, "method"))) {
+            return CompactionSignal.NONE;
+        }
+
+        JsonObject params = msg.getAsJsonObject("params");
+        JsonObject update = params != null ? params.getAsJsonObject("update") : null;
+        if (update == null) {
+            return CompactionSignal.NONE;
+        }
+
+        String updateType = getString(update, "sessionUpdate");
+        // 当前 claude-agent-acp 将 SDK 的 compact_boundary 转为 usage_update。
+        // Client 仅在之前收到 STARTED 时把它认定为压缩完成。
+        if ("usage_update".equals(updateType)) {
+            return CompactionSignal.CONTEXT_USAGE_REFRESHED;
+        }
+        if (!"agent_message_chunk".equals(updateType)) {
+            return CompactionSignal.NONE;
+        }
+
+        JsonObject content = update.getAsJsonObject("content");
+        String text = content != null ? getString(content, "text").trim() : "";
+        if ("Compacting...".equals(text)) {
+            return CompactionSignal.STARTED;
+        }
+        if ("Compacting completed.".equals(text)) {
+            return CompactionSignal.COMPLETED;
+        }
+        if (text.startsWith("Compacting failed")) {
+            return CompactionSignal.FAILED;
+        }
+        return CompactionSignal.NONE;
+    }
+
+    private String getString(JsonObject object, String member) {
+        return object != null && object.has(member) && !object.get(member).isJsonNull()
+                ? object.get(member).getAsString() : "";
     }
 }

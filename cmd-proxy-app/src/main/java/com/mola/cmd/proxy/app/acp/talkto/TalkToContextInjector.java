@@ -48,6 +48,9 @@ public class TalkToContextInjector {
         sb.append("你是 Agent 团队的一员。你可以通过 talk_to 指令向团队中的其他 Agent 发送异步消息。");
         sb.append("消息发送后你不需要等待回复，可以继续当前工作。\n");
         sb.append("目标 Agent 忙碌时消息会排队，对方空闲后自动收到。\n\n");
+        sb.append("重要运行时约束：发出 talk_to 后，不要使用 Bash、PowerShell、Python 或其他脚本通过 wait、sleep、while 循环、轮询文件/日志/进程状态等方式等待对方回复。"
+                + "这类等待会占用当前 turn；在等待脚本结束前，已入队的 Agent 消息无法被处理。\n\n");
+        sb.append("补充语义：talk_to 的“已发送”或“已入队”仅表示路由层已接收消息，不表示接收方已处理，也不表示你会在当前 turn 内获得回复。\n\n");
 
         String firstContactName = null;
         boolean hasContacts = false;

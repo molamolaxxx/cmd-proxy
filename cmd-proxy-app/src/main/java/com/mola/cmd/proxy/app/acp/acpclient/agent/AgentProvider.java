@@ -19,6 +19,23 @@ import java.util.Map;
 public interface AgentProvider {
 
     /**
+     * Provider 对上下文压缩生命周期的标准化描述。
+     * <p>
+     * ACP 本身没有统一的 context-compaction 事件；不同 provider 会通过
+     * session/update 文本、自定义 notification 或 usage 更新表达该状态。
+     */
+    enum CompactionSignal {
+        NONE,
+        STARTED,
+        COMPLETED,
+        FAILED,
+        /**
+         * 压缩后刷新上下文用量。仅当此前收到 {@link #STARTED} 时，Client 才应将其视为完成。
+         */
+        CONTEXT_USAGE_REFRESHED
+    }
+
+    /**
      * agent 可执行命令路径，如 ~/.local/bin/kiro-cli
      */
     String getCommand();
@@ -71,6 +88,19 @@ public interface AgentProvider {
      */
     default double extractContextUsage(JsonObject msg) {
         return -1;
+    }
+
+    /**
+     * 从完整 ACP JSON-RPC 消息中识别上下文压缩生命周期事件。
+     * <p>
+     * 必须接收完整消息而不是仅接收 session/update 的 update 字段：部分 provider
+     * （例如 Kiro）使用自定义 JSON-RPC notification 发送压缩状态。
+     *
+     * @param msg 完整的 JSON-RPC 消息
+     * @return 识别出的压缩信号；不支持或无关消息返回 {@link CompactionSignal#NONE}
+     */
+    default CompactionSignal detectCompactionSignal(JsonObject msg) {
+        return CompactionSignal.NONE;
     }
 
     /**

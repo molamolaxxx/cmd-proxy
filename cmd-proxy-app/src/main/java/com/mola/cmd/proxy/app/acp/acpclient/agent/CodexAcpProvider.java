@@ -29,6 +29,7 @@ public class CodexAcpProvider implements AgentProvider {
 
     private static final Gson GSON = new Gson();
     private static final String NPX_PACKAGE = "@agentclientprotocol/codex-acp";
+    private static final String HOME = System.getProperty("user.home");
 
     @Override
     public String getCommand() {
@@ -57,14 +58,16 @@ public class CodexAcpProvider implements AgentProvider {
 
     @Override
     public List<Path> getMcpConfigPaths(String workspacePath) {
-        if (workspacePath == null || workspacePath.trim().isEmpty()) {
-            return Collections.emptyList();
-        }
-        // Codex 的项目级 MCP 配置位于 <workspace>/.codex/config.toml。
-        // 显式传入 ACP，避免依赖 codex-acp/App Server 对项目配置层的隐式加载，
-        // 并保证 session/load 恢复时仍会重新挂载这些 MCP server。
+        // 先加载全局配置；McpConfigLoader 会按 server 名去重，保留先加载的配置。
+        // 这使同名的项目级配置不会在 ACP 会话中重复注册。
         List<Path> paths = new ArrayList<>();
-        paths.add(Paths.get(workspacePath, ".codex", "config.toml"));
+        paths.add(Paths.get(HOME, ".codex", "config.toml"));
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            // Codex 的项目级 MCP 配置位于 <workspace>/.codex/config.toml。
+            // 显式传入 ACP，避免依赖 codex-acp/App Server 对项目配置层的隐式加载，
+            // 并保证 session/load 恢复时仍会重新挂载这些 MCP server。
+            paths.add(Paths.get(workspacePath, ".codex", "config.toml"));
+        }
         return paths;
     }
 
@@ -76,6 +79,39 @@ public class CodexAcpProvider implements AgentProvider {
     @Override
     public String getSkillsRelativePath() {
         return ".agents/skills";
+    }
+
+    @Override
+    public CompactionSignal detectCompactionSignal(JsonObject msg) {
+        if (!isSessionUpdate(msg)) {
+            return CompactionSignal.NONE;
+        }
+
+        JsonObject update = msg.getAsJsonObject("params").getAsJsonObject("update");
+        if (!"agent_message_chunk".equals(getString(update, "sessionUpdate"))) {
+            return CompactionSignal.NONE;
+        }
+
+        JsonObject content = update.getAsJsonObject("content");
+        String text = content != null ? getString(content, "text").trim() : "";
+        if ("*Context compacted to fit the model's context window.*".equals(text)
+                || "Context compacted.".equals(text)) {
+            return CompactionSignal.COMPLETED;
+        }
+        return CompactionSignal.NONE;
+    }
+
+    private boolean isSessionUpdate(JsonObject msg) {
+        if (msg == null || !"session/update".equals(getString(msg, "method"))) {
+            return false;
+        }
+        JsonObject params = msg.getAsJsonObject("params");
+        return params != null && params.getAsJsonObject("update") != null;
+    }
+
+    private String getString(JsonObject object, String member) {
+        return object != null && object.has(member) && !object.get(member).isJsonNull()
+                ? object.get(member).getAsString() : "";
     }
 
     @Override

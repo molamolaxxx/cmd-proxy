@@ -29,6 +29,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -95,6 +96,12 @@ public class AcpClient extends AbstractAcpClient {
 
     /** session 加载完成时的 turn 数，用于 close 时判断是否有新对话 */
     private int initialTurnCount;
+
+    /** Codex/Claude/Kiro 压缩完成后置为 true，下一次 prompt 完整重注入 ACP harness。 */
+    private final AtomicBoolean acpHarnessReinjectionPending = new AtomicBoolean(false);
+
+    /** 当前 provider 是否已报告上下文压缩开始。 */
+    private boolean compactionInProgress;
 
     /**
      * 使用指定 AgentProvider 创建 AcpClient（包级私有，供未来扩展）。
@@ -432,13 +439,19 @@ public class AcpClient extends AbstractAcpClient {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
-        // 判断是否为 session 内首次 turn：首次 turn 注入完整上下文前缀，后续 turn 只带时间+用户输入
-        // 这样历史 turn 内容稳定不变，有利于 LLM provider 的 prompt prefix caching
+        // 首轮注入完整上下文；provider 压缩上下文后，也在下一次 prompt 完整重注入。
+        // 正常后续 turn 仍只带时间+用户输入，保留 prompt prefix caching 的收益。
         boolean isFirstTurn = (historyManager.getTurnCount() == initialTurnCount);
+        boolean reInjectAfterCompaction = acpHarnessReinjectionPending.getAndSet(false);
+        boolean shouldInjectFullAcpHarness = isFirstTurn || reInjectAfterCompaction;
 
         StringBuilder fullTextBuilder = new StringBuilder();
 
-        if (isFirstTurn) {
+        if (shouldInjectFullAcpHarness) {
+            if (reInjectAfterCompaction) {
+                logger.info("上下文压缩后完整重注入 ACP harness, provider={}, sessionId={}, turn={}",
+                        agentProvider.getName(), sessionId, historyManager.getTurnCount());
+            }
             // ==================== 全局系统指令（直接输出 JSON 规则，覆盖所有 action 类型） ====================
             fullTextBuilder.append("\n<acp-harness>\n");
             fullTextBuilder.append("以下指令由 ACP harness 注入，用于声明你可用的系统能力（子Agent派发、定时任务、团队通讯、记忆），请正常遵循。\n\n");
@@ -582,6 +595,8 @@ public class AcpClient extends AbstractAcpClient {
                 continue;
             }
 
+            AgentProvider.CompactionSignal compactionSignal = observeCompactionSignal(msg);
+
             // prompt response（JSON-RPC Response 没有 method 字段，排除 Request 误匹配）
             if (!msg.has("method") && msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
                 String stopReason = "unknown";
@@ -624,6 +639,9 @@ public class AcpClient extends AbstractAcpClient {
                 double usage = agentProvider.extractContextUsage(msg);
                 if (usage >= 0) {
                     contextUsagePercentage = usage;
+                } else if (compactionSignal != AgentProvider.CompactionSignal.NONE) {
+                    // Kiro 的压缩状态属于自定义 notification，不是标准 session/update。
+                    // 信号已处理，无需再记录为未匹配输出。
                 } else {
                     logger.warn("ACP 输出未匹配任何处理分支, msg={}", msg);
                 }
@@ -694,6 +712,51 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     /**
+     * 消费 provider 专用的上下文压缩事件，并在完成时安排下一次 prompt 的完整 Harness 重注入。
+     */
+    private AgentProvider.CompactionSignal observeCompactionSignal(JsonObject msg) {
+        if (msg.has("method")
+                && "_kiro.dev/compaction/status".equals(msg.get("method").getAsString())) {
+            // Kiro 的扩展文档未固定公开 payload schema。保留完整报文日志，既便于
+            // 验证 status 字段映射，也能在出现 sessionId 迁移时及时发现。
+            logger.info("Kiro 上下文压缩通知: {}", msg);
+        }
+        AgentProvider.CompactionSignal signal = agentProvider.detectCompactionSignal(msg);
+        switch (signal) {
+            case STARTED:
+                compactionInProgress = true;
+                logger.info("Agent 开始压缩上下文, provider={}, sessionId={}",
+                        agentProvider.getName(), sessionId);
+                break;
+            case COMPLETED:
+                compactionInProgress = false;
+                acpHarnessReinjectionPending.set(true);
+                logger.info("Agent 已完成上下文压缩；下一次 prompt 将完整重注入 ACP harness, provider={}, sessionId={}",
+                        agentProvider.getName(), sessionId);
+                break;
+            case FAILED:
+                compactionInProgress = false;
+                logger.warn("Agent 上下文压缩失败, provider={}, sessionId={}",
+                        agentProvider.getName(), sessionId);
+                break;
+            case CONTEXT_USAGE_REFRESHED:
+                // Claude adapter 的 compact_boundary 被转换为 usage_update。普通 usage_update
+                // 不触发重注入，只有已看到 Compaction STARTED 才代表压缩完成。
+                if (compactionInProgress) {
+                    compactionInProgress = false;
+                    acpHarnessReinjectionPending.set(true);
+                    logger.info("Agent 压缩后的上下文用量已刷新；下一次 prompt 将完整重注入 ACP harness, provider={}, sessionId={}",
+                            agentProvider.getName(), sessionId);
+                }
+                break;
+            case NONE:
+            default:
+                break;
+        }
+        return signal;
+    }
+
+    /**
      * 排空迟到 chunk（OpenCode ACP bug workaround：session/update 通知可能在
      * end_turn RPC response 之后送达）。
      * sleep 让管道里迟到的数据到位，然后一次性抽干 reader 缓冲区。
@@ -721,6 +784,8 @@ public class AcpClient extends AbstractAcpClient {
             } catch (JsonSyntaxException e) {
                 continue;
             }
+
+            observeCompactionSignal(msg);
 
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
                 processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache);

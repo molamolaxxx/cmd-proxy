@@ -78,6 +78,52 @@ public class KiroCliAgentProvider implements AgentProvider {
     }
 
     @Override
+    public CompactionSignal detectCompactionSignal(JsonObject msg) {
+        if (msg == null || !"_kiro.dev/compaction/status".equals(getString(msg, "method"))) {
+            return CompactionSignal.NONE;
+        }
+
+        JsonObject params = msg.getAsJsonObject("params");
+        // Kiro 的扩展文档只约定该 notification 用于报告压缩进度，未固定公开
+        // payload schema。兼容已知的 status/state/phase/result 字段，并保留原始
+        // notification 日志，方便在不同 CLI 版本中收紧判断。
+        String status = firstNonEmpty(
+                getString(params, "status"),
+                getString(params, "state"),
+                getString(params, "phase"),
+                getString(params, "result"))
+                .toLowerCase(java.util.Locale.ROOT);
+
+        if ("started".equals(status) || "starting".equals(status)
+                || "in_progress".equals(status) || "compacting".equals(status)) {
+            return CompactionSignal.STARTED;
+        }
+        if ("completed".equals(status) || "complete".equals(status)
+                || "success".equals(status) || "succeeded".equals(status)) {
+            return CompactionSignal.COMPLETED;
+        }
+        if ("failed".equals(status) || "failure".equals(status)
+                || "error".equals(status)) {
+            return CompactionSignal.FAILED;
+        }
+        return CompactionSignal.NONE;
+    }
+
+    private String getString(JsonObject object, String member) {
+        return object != null && object.has(member) && !object.get(member).isJsonNull()
+                ? object.get(member).getAsString() : "";
+    }
+
+    private String firstNonEmpty(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isEmpty()) {
+                return value;
+            }
+        }
+        return "";
+    }
+
+    @Override
     public List<String> getExtraArgs(AcpRobotParam robotParam) {
         if (robotParam == null || robotParam.getModel() == null || robotParam.getModel().trim().isEmpty()) {
             return java.util.Collections.emptyList();

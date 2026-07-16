@@ -2,11 +2,12 @@ package com.mola.cmd.proxy.app.acp.memory.model;
 
 /**
  * 记忆系统配置，对应 robot 级别的 "memory" 字段。
- * 每个 robot 可独立配置，未配置时 enabled=false。
+ * 每个 robot 可独立配置。readEnabled 控制读取召回，writeEnabled 控制提取写入，互不制约。
  */
 public class MemoryConfig {
 
-    private boolean enabled = false;
+    private boolean readEnabled = true;
+    private boolean writeEnabled = true;
     private String baseDir = System.getProperty("user.home") + "/.cmd-proxy/memory";
     private int extractIntervalTurns = 5;
     private int indexMaxLines = 200;
@@ -23,8 +24,14 @@ public class MemoryConfig {
     private int dreamMinHours = 24;
     private int dreamMinSessions = 5;
 
-    public boolean isEnabled() { return enabled; }
-    public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    public boolean isReadEnabled() { return readEnabled; }
+    public void setReadEnabled(boolean readEnabled) { this.readEnabled = readEnabled; }
+
+    public boolean isWriteEnabled() { return writeEnabled; }
+    public void setWriteEnabled(boolean writeEnabled) { this.writeEnabled = writeEnabled; }
+
+    /** 读或写任一开启则视为记忆系统启用 */
+    public boolean isEnabled() { return readEnabled || writeEnabled; }
 
     public String getBaseDir() { return baseDir; }
     public void setBaseDir(String baseDir) { this.baseDir = baseDir; }

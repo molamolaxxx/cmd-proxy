@@ -98,10 +98,11 @@ public class ConversationHistoryManager {
     }
 
     /**
-     * 将文件 base64 内容写入会话的 files 目录，并记录绝对路径。
+     * 将文件内容写入会话的 files 目录，并记录绝对路径。
+     * 支持两种模式：value 为 URL 时通过 HTTP 下载，否则按 base64 解码。
      *
      * @param sessionId 当前会话 ID
-     * @param files     文件列表，每个 Map 的 key 为文件名，value 为文件的 base64 内容
+     * @param files     文件列表，每个 Map 的 key 为文件名，value 为下载URL或base64内容
      */
     public void saveFiles(String sessionId, List<Map<String, String>> files) {
         if (files == null || files.isEmpty() || sessionId == null) return;
@@ -111,17 +112,84 @@ public class ConversationHistoryManager {
             for (Map<String, String> fileMap : files) {
                 for (Map.Entry<String, String> entry : fileMap.entrySet()) {
                     String fileName = entry.getKey();
-                    String base64Content = entry.getValue();
-                    if (fileName == null || fileName.isEmpty() || base64Content == null) continue;
+                    String content = entry.getValue();
+                    if (fileName == null || fileName.isEmpty() || content == null) continue;
                     Path filePath = filesDir.resolve(fileName);
-                    byte[] decoded = Base64.getDecoder().decode(base64Content);
-                    Files.write(filePath, decoded);
-                    fileAbsolutePaths.add(filePath.toAbsolutePath().toString());
-                    logger.info("文件已保存: {}", filePath.toAbsolutePath());
+                    byte[] fileBytes;
+                    if (content.startsWith("http://") || content.startsWith("https://")) {
+                        fileBytes = downloadFile(content);
+                    } else {
+                        fileBytes = Base64.getDecoder().decode(content);
+                    }
+                    if (fileBytes != null) {
+                        Files.write(filePath, fileBytes);
+                        fileAbsolutePaths.add(filePath.toAbsolutePath().toString());
+                        logger.info("文件已保存: {}", filePath.toAbsolutePath());
+                    }
                 }
             }
         } catch (IOException e) {
             logger.error("文件保存失败, sessionId={}", sessionId, e);
+        }
+    }
+
+    private byte[] downloadFile(String url) {
+        try {
+            java.net.URI uri = encodeUri(url);
+            java.net.HttpURLConnection conn;
+            if (url.startsWith("https://")) {
+                javax.net.ssl.HttpsURLConnection httpsConn =
+                        (javax.net.ssl.HttpsURLConnection) uri.toURL().openConnection();
+                httpsConn.setSSLSocketFactory(getTrustAllSslSocketFactory());
+                httpsConn.setHostnameVerifier((hostname, session) -> true);
+                conn = httpsConn;
+            } else {
+                conn = (java.net.HttpURLConnection) uri.toURL().openConnection();
+            }
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(60000);
+            conn.setRequestMethod("GET");
+            int responseCode = conn.getResponseCode();
+            if (responseCode != 200) {
+                logger.error("文件下载失败, url={}, responseCode={}", url, responseCode);
+                return null;
+            }
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int len;
+                while ((len = is.read(buffer)) != -1) {
+                    baos.write(buffer, 0, len);
+                }
+                return baos.toByteArray();
+            }
+        } catch (Exception e) {
+            logger.error("文件下载异常, url={}", url, e);
+      return null;
+        }
+    }
+
+    private java.net.URI encodeUri(String rawUrl) throws Exception {
+        java.net.URL parsed = new java.net.URL(rawUrl);
+        java.net.URI uri = new java.net.URI(parsed.getProtocol(), null, parsed.getHost(),
+                parsed.getPort(), parsed.getPath(), parsed.getQuery(), null);
+        return new java.net.URI(uri.toASCIIString());
+    }
+
+    private static javax.net.ssl.SSLSocketFactory getTrustAllSslSocketFactory() {
+        try {
+            javax.net.ssl.TrustManager[] trustAll = new javax.net.ssl.TrustManager[]{
+                    new javax.net.ssl.X509TrustManager() {
+                        public java.security.cert.X509Certificate[] getAcceptedIssuers() { return null; }
+                        public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
+                        public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
+                    }
+            };
+            javax.net.ssl.SSLContext sc = javax.net.ssl.SSLContext.getInstance("TLS");
+            sc.init(null, trustAll, new java.security.SecureRandom());
+            return sc.getSocketFactory();
+        } catch (Exception e) {
+            throw new RuntimeException("初始化 TrustAll SSLSocketFactory 失败", e);
         }
     }
 
