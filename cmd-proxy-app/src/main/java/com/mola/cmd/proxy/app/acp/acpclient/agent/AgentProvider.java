@@ -134,6 +134,19 @@ public interface AgentProvider {
     }
 
     /**
+     * 获取 ACP session 创建或恢复后需要立即应用的配置项。
+     * <p>
+     * 返回值会通过标准 {@code session/set_config_option} 请求逐项设置，适用于
+     * 需要在 session 级别选择模型、推理强度等配置的 Agent。
+     *
+     * @param robotParam robot 配置，可能为 null
+     * @return configId 到配置值的映射，空 map 表示无需设置
+     */
+    default Map<String, String> getInitialSessionConfigOptions(AcpRobotParam robotParam) {
+        return Collections.emptyMap();
+    }
+
+    /**
      * 是否需要将图片以 base64 image block 内嵌到 prompt 中。
      * 某些 agent 的 Read 工具不支持返回图片内容，需要在 prompt 层面直接传递。
      */

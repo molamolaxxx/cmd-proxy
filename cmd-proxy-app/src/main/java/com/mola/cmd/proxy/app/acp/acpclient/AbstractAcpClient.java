@@ -112,6 +112,7 @@ public abstract class AbstractAcpClient implements Closeable {
                     throw e;
                 }
             }
+            applyInitialSessionConfigOptions();
             state.set(State.READY);
             logger.info("ACP Client 就绪，sessionId={}, groupId={}", sessionId, groupId);
         } catch (IOException e) {
@@ -178,6 +179,66 @@ public abstract class AbstractAcpClient implements Closeable {
      * 子类实现各自的 session/new 逻辑（如是否加载 MCP servers）。
      */
     protected abstract void createSession() throws IOException;
+
+    /**
+     * 在 session/new 或 session/load 完成后应用 Provider 声明的 session 配置。
+     * <p>
+     * 配置失败时直接中止启动，避免 robot 配置的模型与实际运行模型不一致。
+     */
+    private void applyInitialSessionConfigOptions() throws IOException {
+        Map<String, String> configOptions =
+                agentProvider.getInitialSessionConfigOptions(robotParamRef);
+        if (configOptions == null || configOptions.isEmpty()) {
+            return;
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IOException("无法应用 ACP session 配置：sessionId 为空");
+        }
+
+        for (Map.Entry<String, String> entry : configOptions.entrySet()) {
+            String configId = entry.getKey();
+            String requestedValue = entry.getValue();
+            if (configId == null || configId.trim().isEmpty()
+                    || requestedValue == null || requestedValue.trim().isEmpty()) {
+                continue;
+            }
+
+            JsonObject params = new JsonObject();
+            params.addProperty("sessionId", sessionId);
+            params.addProperty("configId", configId.trim());
+            params.addProperty("value", requestedValue.trim());
+
+            JsonObject response = sendRequest("session/set_config_option", params);
+            String appliedValue = extractAppliedConfigValue(response, configId.trim());
+            if (appliedValue == null) {
+                throw new IOException("ACP session 配置响应中缺少 configId=" + configId);
+            }
+            logger.info("ACP session 配置成功, provider={}, configId={}, requested={}, applied={}, sessionId={}",
+                    agentProvider.getName(), configId.trim(), requestedValue.trim(), appliedValue, sessionId);
+        }
+    }
+
+    /**
+     * 从 session/set_config_option 的完整 configOptions 响应中读取实际生效值。
+     */
+    private String extractAppliedConfigValue(JsonObject response, String configId) {
+        JsonObject result = response != null ? response.getAsJsonObject("result") : null;
+        JsonArray options = result != null ? result.getAsJsonArray("configOptions") : null;
+        if (options == null) {
+            return null;
+        }
+        for (JsonElement element : options) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject option = element.getAsJsonObject();
+            if (option.has("id") && configId.equals(option.get("id").getAsString())
+                    && option.has("currentValue") && !option.get("currentValue").isJsonNull()) {
+                return option.get("currentValue").getAsString();
+            }
+        }
+        return null;
+    }
 
     @Override
     public void close() throws IOException {

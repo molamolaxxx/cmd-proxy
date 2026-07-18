@@ -32,10 +32,30 @@ public class MemoryAcpClient extends AbstractAcpClient {
         return t;
     });
 
-    public MemoryAcpClient(String workspacePath, String groupId, int timeoutSeconds, AcpRobotParam robotParam) {
+    public MemoryAcpClient(String workspacePath, String groupId, int timeoutSeconds,
+                           AcpRobotParam robotParam, String memoryModel) {
         super(AgentProviderRouter.getInstance().resolve(robotParam.getAgentProvider()),
-                workspacePath, groupId, robotParam);
+                workspacePath, groupId, buildEffectiveParam(robotParam, memoryModel));
         this.timeoutSeconds = timeoutSeconds;
+        String effectiveModel = (memoryModel != null && !memoryModel.trim().isEmpty())
+                ? memoryModel.trim() : (robotParam.getModel() != null ? robotParam.getModel() : "default");
+        logger.info("Memory子Client使用模型: {} ({})", effectiveModel,
+                (memoryModel != null && !memoryModel.trim().isEmpty()) ? "记忆专用" : "继承主Robot");
+    }
+
+    private static AcpRobotParam buildEffectiveParam(AcpRobotParam original, String memoryModel) {
+        if (memoryModel == null || memoryModel.trim().isEmpty()) {
+            return original;
+        }
+        AcpRobotParam override = new AcpRobotParam();
+        override.setName(original.getName());
+        override.setAgentProvider(original.getAgentProvider());
+        override.setApiKey(original.getApiKey());
+        override.setProxyEnabled(original.isProxyEnabled());
+        override.setHttpProxy(original.getHttpProxy());
+        override.setNoProxy(original.getNoProxy());
+        override.setModel(memoryModel.trim());
+        return override;
     }
 
     @Override

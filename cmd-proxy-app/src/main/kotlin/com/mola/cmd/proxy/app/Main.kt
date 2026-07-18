@@ -180,32 +180,31 @@ private fun reloadAcpServices() {
         log.warn("ACP 服务正在重载中，忽略重复请求")
         throw IllegalStateException("服务正在重载中，请稍后再试")
     }
-    Thread({
-        try {
-            log.info("开始 ACP 服务热重载...")
+    try {
+        log.info("开始 ACP 服务热重载...")
 
-            // 1. 停止现有 ACP 服务
-            AcpProxy.stop()
-            log.info("旧 ACP 服务已停止")
+        // 1. 停止现有 ACP 服务
+        AcpProxy.stop()
+        log.info("旧 ACP 服务已停止")
 
-            // 2. 重新读取配置文件
-            val file = File(System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json")
-            val content = file.readText(Charset.forName("UTF-8"))
-            if (content.isBlank()) {
-                log.warn("配置文件为空，跳过重载")
-                return@Thread
-            }
-            val config: JSONObject = JSON.parseObject(content)
-
-            // 3. 启动新服务
-            startAcpServices(config)
-            log.info("ACP 服务热重载完成")
-        } catch (e: Exception) {
-            log.error("ACP 服务热重载失败", e)
-        } finally {
-            reloading.set(false)
+        // 2. 重新读取配置文件
+        val file = File(System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json")
+        val content = file.readText(Charset.forName("UTF-8"))
+        if (content.isBlank()) {
+            log.warn("配置文件为空，跳过重载")
+            return
         }
-    }, "acp-reload").start()
+        val config: JSONObject = JSON.parseObject(content)
+
+        // 3. 启动新服务（内部并行启动，阻塞直到所有 client 就绪）
+        startAcpServices(config)
+        log.info("ACP 服务热重载完成")
+    } catch (e: Exception) {
+        log.error("ACP 服务热重载失败", e)
+        throw e
+    } finally {
+        reloading.set(false)
+    }
 }
 
 /**

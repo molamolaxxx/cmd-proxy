@@ -116,7 +116,7 @@ public class MemoryExtractor {
         String groupId = "memory_extractor__" + workspacePath.hashCode();
 
         try (MemoryAcpClient client = new MemoryAcpClient(
-                workspacePath, groupId, config.getSubClientTimeout(), robotParam)) {
+                workspacePath, groupId, config.getSubClientTimeout(), robotParam, config.getModel())) {
             client.start();
             String response = client.sendPromptSync(prompt);
             logger.info("记忆提取子 Client 返回, 长度={}", response.length());

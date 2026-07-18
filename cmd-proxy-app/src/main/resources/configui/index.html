@@ -207,6 +207,7 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-group"><label>索引最大行数</label><input type="number" id="dMemIndex" min="1" value="'+(m.indexMaxLines||200)+'"></div>'+
 '<div class="field-group"><label>项目最大条目</label><input type="number" id="dMemProject" min="1" value="'+(m.maxEntriesPerProject||30)+'"></div>'+
 '<div class="field-group"><label>项目过期天数</label><input type="number" id="dMemExpire" min="1" value="'+(m.projectExpireDays||30)+'"></div>'+
+'<div class="field-group"><label>记忆模型</label><input type="text" id="dMemModel" placeholder="留空则沿用主模型" value="'+esc(m.model||'')+'"></div>'+
 '<div class="field-group"><label>子Client超时(秒)</label><input type="number" id="dMemTimeout" min="10" value="'+(m.subClientTimeout||120)+'"></div>'+
 '<div class="field-group"><label>&nbsp;</label><div class="toggle-row" style="border:none;padding:0"><div class="toggle-label">Dream整理</div><label class="switch"><input type="checkbox" id="dMemDream"'+(m.dreamEnabled!==false?' checked':'')+'><span class="slider"></span></label></div></div>'+
 '<div class="field-group"><label>Dream最小间隔(时)</label><input type="number" id="dMemDreamH" min="1" value="'+(m.dreamMinHours||24)+'"></div>'+
@@ -272,6 +273,7 @@ indexMaxLines:parseInt(document.getElementById('dMemIndex').value)||200,
 maxEntriesPerProject:parseInt(document.getElementById('dMemProject').value)||30,
 projectExpireDays:parseInt(document.getElementById('dMemExpire').value)||30,
 subClientTimeout:parseInt(document.getElementById('dMemTimeout').value)||120,
+model:document.getElementById('dMemModel').value.trim()||undefined,
 dreamEnabled:document.getElementById('dMemDream').checked,
 dreamMinHours:parseInt(document.getElementById('dMemDreamH').value)||24,
 dreamMinSessions:parseInt(document.getElementById('dMemDreamS').value)||5};
@@ -337,9 +339,11 @@ return true;
 }
 
 async function refreshService(){
+var btn=event.target.closest('button');btn.disabled=true;btn.innerHTML='<span class="material-icons">hourglass_top</span>刷新中...';
 var ok=await saveConfig(true);
-if(!ok)return;
+if(!ok){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>刷新服务';return}
 await reloadService('配置已保存，服务已刷新');
+btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>刷新服务';
 }
 
 async function reloadService(successMessage){
@@ -350,11 +354,13 @@ catch(e){showSnackbar('刷新失败:'+e.message);return false}
 
 async function refreshRobot(name){
 if(!confirm('确定刷新 Robot「'+name+'」的服务？'))return;
+var btn=event.target.closest('button');btn.disabled=true;btn.innerHTML='<span class="material-icons">hourglass_top</span>';
 var ok=await saveConfig(true);
-if(!ok)return;
+if(!ok){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>';return}
 try{var r=await fetch('/api/refresh-robot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});var d=await r.json();
 if(d.ok)showSnackbar('Robot「'+name+'」已刷新');else showSnackbar('刷新失败:'+(d.error||''))}
 catch(e){showSnackbar('刷新失败:'+e.message)}
+btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>';
 }
 
 function showSnackbar(msg){var el=document.getElementById('snackbar');el.textContent=msg;el.classList.add('show');setTimeout(function(){el.classList.remove('show')},3000)}

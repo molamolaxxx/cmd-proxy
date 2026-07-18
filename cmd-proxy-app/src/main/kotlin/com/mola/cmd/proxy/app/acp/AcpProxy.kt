@@ -23,6 +23,8 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 object AcpProxy {
@@ -94,46 +96,60 @@ object AcpProxy {
         // 注册 cmdGroupList 维度的命令处理器
         registerGroupCommands(cmdGroupList)
 
-        // 冷加载：启动时为每个groupId预创建client
+        // 冷加载：并行启动所有 groupId 的 client
+        val latch = CountDownLatch(cmdGroupList.size)
+        val executor = Executors.newFixedThreadPool(
+            minOf(cmdGroupList.size, Runtime.getRuntime().availableProcessors() * 2)
+        )
+
         for (groupId in cmdGroupList) {
-            try {
-                val workDir = groupWorkDirMap[groupId]
-                val robot = groupRobotMap[groupId]
+            executor.submit {
+                try {
+                    val workDir = groupWorkDirMap[groupId]
+                    val robot = groupRobotMap[groupId]
 
-                // onlySubAgent 的 robot 不启动 AcpClient，只做 ability 反思
-                if (robot != null && robot.isOnlySubAgent) {
-                    initAbilityReflectionStandalone(groupId, robot)
-                    log.info("onlySubAgent robot 跳过 client 创建, groupId={}, robot={}", groupId, robot.name)
-                    continue
+                    // onlySubAgent 的 robot 不启动 AcpClient，只做 ability 反思
+                    if (robot != null && robot.isOnlySubAgent) {
+                        initAbilityReflectionStandalone(groupId, robot)
+                        log.info("onlySubAgent robot 跳过 client 创建, groupId={}, robot={}", groupId, robot.name)
+                        return@submit
+                    }
+
+                    registry.createSession(groupId, workDir, robot)
+
+                    val client = registry.getClient(groupId) ?: return@submit
+
+                    // 按 robot 维度初始化记忆
+                    initMemoryForClient(groupId, client, robot)
+
+                    // 初始化能力反思
+                    initAbilityReflection(groupId, client, robot)
+
+                    // 初始化子 Agent 派发
+                    initSubAgentDispatcher(groupId, client, robot)
+
+                    // 初始化定时任务
+                    initScheduleSupport(groupId, client, robot)
+
+                    // 初始化 TalkTo 支持
+                    initTalkToSupport(groupId, client, robot)
+
+                    log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
+                        groupId, robot?.name ?: "unknown", workDir ?: "default",
+                        robot?.isMemoryEnabled ?: false,
+                        robot?.subAgents?.map { it.name } ?: emptyList<String>())
+                } catch (e: Exception) {
+                    log.error("ACP client 冷加载失败, groupId={}", groupId, e)
+                } finally {
+                    latch.countDown()
                 }
-
-                registry.createSession(groupId, workDir, robot)
-
-                val client = registry.getClient(groupId) ?: continue
-
-                // 按 robot 维度初始化记忆
-                initMemoryForClient(groupId, client, robot)
-
-                // 初始化能力反思
-                initAbilityReflection(groupId, client, robot)
-
-                // 初始化子 Agent 派发
-                initSubAgentDispatcher(groupId, client, robot)
-
-                // 初始化定时任务
-                initScheduleSupport(groupId, client, robot)
-
-                // 初始化 TalkTo 支持
-                initTalkToSupport(groupId, client, robot)
-
-                log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
-                    groupId, robot?.name ?: "unknown", workDir ?: "default",
-                    robot?.isMemoryEnabled ?: false,
-                    robot?.subAgents?.map { it.name } ?: emptyList<String>())
-            } catch (e: Exception) {
-                log.error("ACP client 冷加载失败, groupId={}", groupId, e)
             }
         }
+
+        // 等待所有 client 启动完成
+        latch.await()
+        executor.shutdown()
+        log.info("所有 ACP client 冷加载完成, 共 {} 个", cmdGroupList.size)
 
         // 启动定时任务调度器
         startScheduler(groupRobotMap)

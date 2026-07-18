@@ -96,8 +96,8 @@ public class MemoryDreamer {
             String response;
             try (MemoryAcpClient client = new MemoryAcpClient(
                     workspacePath, groupId,
-                    config.getSubClientTimeout() * 2,  // 整理比提取更耗时
-                    robotParam)) {
+                    config.getSubClientTimeout() * 2,
+                    robotParam, config.getModel())) {
                 client.start();
                 response = client.sendPromptSync(prompt);
             }

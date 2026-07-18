@@ -19,6 +19,9 @@ public class MemoryConfig {
     /** 记忆隔离级别："workspace"（默认，同工作区共享）或 "robot"（按 robot name 隔离） */
     private String scope = "workspace";
 
+    /** 记忆模块专用模型，为空时沿用主 robot 的 model */
+    private String model;
+
     // Dream（记忆整理）相关配置
     private boolean dreamEnabled = true;
     private int dreamMinHours = 24;
@@ -57,6 +60,9 @@ public class MemoryConfig {
     public void setScope(String scope) { this.scope = scope; }
 
     public boolean isRobotScope() { return "robot".equals(scope); }
+
+    public String getModel() { return model; }
+    public void setModel(String model) { this.model = model; }
 
     public boolean isDreamEnabled() { return dreamEnabled; }
     public void setDreamEnabled(boolean dreamEnabled) { this.dreamEnabled = dreamEnabled; }
