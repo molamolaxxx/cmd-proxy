@@ -88,7 +88,7 @@ public class KiroCliAgentProvider implements AgentProvider {
         // payload schema。兼容已知的 status/state/phase/result 字段，并保留原始
         // notification 日志，方便在不同 CLI 版本中收紧判断。
         String status = firstNonEmpty(
-                getString(params, "status"),
+                getCompactionStatus(params),
                 getString(params, "state"),
                 getString(params, "phase"),
                 getString(params, "result"))
@@ -109,8 +109,21 @@ public class KiroCliAgentProvider implements AgentProvider {
         return CompactionSignal.NONE;
     }
 
+    /**
+     * Kiro CLI 既出现过字符串状态，也会发送 {"type":"started"} 形式的状态对象。
+     */
+    private String getCompactionStatus(JsonObject params) {
+        if (params == null || !params.has("status") || params.get("status").isJsonNull()) {
+            return "";
+        }
+        if (params.get("status").isJsonObject()) {
+            return getString(params.getAsJsonObject("status"), "type");
+        }
+        return getString(params, "status");
+    }
+
     private String getString(JsonObject object, String member) {
-        return object != null && object.has(member) && !object.get(member).isJsonNull()
+        return object != null && object.has(member) && object.get(member).isJsonPrimitive()
                 ? object.get(member).getAsString() : "";
     }
 

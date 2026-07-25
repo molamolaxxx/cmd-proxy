@@ -595,7 +595,7 @@ public class AcpClient extends AbstractAcpClient {
                 continue;
             }
 
-            AgentProvider.CompactionSignal compactionSignal = observeCompactionSignal(msg);
+            AgentProvider.CompactionSignal compactionSignal = observeCompactionSignal(msg, listener);
 
             // prompt response（JSON-RPC Response 没有 method 字段，排除 Request 误匹配）
             if (!msg.has("method") && msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
@@ -714,7 +714,7 @@ public class AcpClient extends AbstractAcpClient {
     /**
      * 消费 provider 专用的上下文压缩事件，并在完成时安排下一次 prompt 的完整 Harness 重注入。
      */
-    private AgentProvider.CompactionSignal observeCompactionSignal(JsonObject msg) {
+    private AgentProvider.CompactionSignal observeCompactionSignal(JsonObject msg, AcpResponseListener listener) {
         if (msg.has("method")
                 && "_kiro.dev/compaction/status".equals(msg.get("method").getAsString())) {
             // Kiro 的扩展文档未固定公开 payload schema。保留完整报文日志，既便于
@@ -731,6 +731,9 @@ public class AcpClient extends AbstractAcpClient {
             case COMPLETED:
                 compactionInProgress = false;
                 acpHarnessReinjectionPending.set(true);
+                if (listener != null) {
+                    listener.onCompactionEvent("COMPACTION_COMPLETED", agentProvider.getName());
+                }
                 logger.info("Agent 已完成上下文压缩；下一次 prompt 将完整重注入 ACP harness, provider={}, sessionId={}",
                         agentProvider.getName(), sessionId);
                 break;
@@ -745,6 +748,9 @@ public class AcpClient extends AbstractAcpClient {
                 if (compactionInProgress) {
                     compactionInProgress = false;
                     acpHarnessReinjectionPending.set(true);
+                    if (listener != null) {
+                        listener.onCompactionEvent("COMPACTION_COMPLETED", agentProvider.getName());
+                    }
                     logger.info("Agent 压缩后的上下文用量已刷新；下一次 prompt 将完整重注入 ACP harness, provider={}, sessionId={}",
                             agentProvider.getName(), sessionId);
                 }
@@ -785,7 +791,7 @@ public class AcpClient extends AbstractAcpClient {
                 continue;
             }
 
-            observeCompactionSignal(msg);
+            observeCompactionSignal(msg, listener);
 
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
                 processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache);

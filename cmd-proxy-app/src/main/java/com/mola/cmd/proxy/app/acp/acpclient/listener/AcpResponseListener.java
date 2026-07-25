@@ -66,6 +66,19 @@ public interface AcpResponseListener {
     }
 
     /**
+     * Agent 上下文压缩事件回调。
+     * <p>
+     * 与 onMessage 分离，让客户端可以用独立卡片提示用户上下文已经压缩。
+     * 默认空实现，向后兼容已有的 Listener 实现。
+     *
+     * @param eventType 事件类型：COMPACTION_COMPLETED
+     * @param provider  触发上下文压缩的 provider 名称
+     */
+    default void onCompactionEvent(String eventType, String provider) {
+        // 默认空实现，向后兼容
+    }
+
+    /**
      * agent 回答完成时回调
      *
      * @param fullResponse 完整的回答文本

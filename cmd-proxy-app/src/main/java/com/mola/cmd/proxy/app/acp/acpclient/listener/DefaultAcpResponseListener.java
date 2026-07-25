@@ -214,6 +214,20 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         sendCardContent(content, false);
     }
 
+    @Override
+    public void onCompactionEvent(String eventType, String provider) {
+        if (!"COMPACTION_COMPLETED".equals(eventType)) {
+            return;
+        }
+        String content = "<details class=\"tool-call\">"
+                + "<summary>🗜️ ✅ 上下文压缩完成</summary>"
+                + "<div class=\"tool-call-body\">\n\n"
+                + "Agent 已完成上下文压缩，下一轮对话将重新注入完整 ACP harness。"
+                + "\n\nProvider：`" + sanitizeCodeFences(provider) + "`"
+                + "\n\n</div></details>\n";
+        sendCardContent(content, false);
+    }
+
     private static String escapeHtml(String text) {
         if (text == null) return "";
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
