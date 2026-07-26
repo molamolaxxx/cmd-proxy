@@ -55,7 +55,7 @@ public class ScheduleTaskManager {
     private static final Logger logger = LoggerFactory.getLogger(ScheduleTaskManager.class);
 
     private static final String SCHEDULES_BASE_DIR =
-            System.getProperty("user.home") + "/.cmd-proxy/schedules";
+            com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("schedules");
     private static final String TASKS_FILE = "tasks.json";
 
     /** 相对时间表达式：+30s, +30m, +2h, +1d */

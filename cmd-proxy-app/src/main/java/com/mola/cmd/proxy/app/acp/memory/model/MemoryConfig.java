@@ -8,7 +8,7 @@ public class MemoryConfig {
 
     private boolean readEnabled = true;
     private boolean writeEnabled = true;
-    private String baseDir = System.getProperty("user.home") + "/.cmd-proxy/memory";
+    private String baseDir = com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("memory");
     private int extractIntervalTurns = 5;
     private int indexMaxLines = 200;
     private int maxEntriesPerProject = 30;

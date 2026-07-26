@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.mcp
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
 import com.google.common.collect.Maps
+import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import com.mola.cmd.proxy.app.utils.McpFileUtils
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import org.slf4j.Logger
@@ -46,7 +47,7 @@ object McpProxy {
             val sessionId = param.getString("sessionId") ?: "default"
             
             val workSkillsDir = File("${parsePath(queryWorkingDir(sessionId), sessionId)}/.skills")
-            val userSkillsDir = File("${System.getProperty("user.home")}/.cmd-proxy/skills")
+            val userSkillsDir = File(CmdProxyHome.pathOf("skills"))
             
             val skillDir = findSkillDirectory(skillName, workSkillsDir) ?: findSkillDirectory(skillName, userSkillsDir) 
                 ?: return@register "未找到名为 $skillName 的skill"
@@ -201,8 +202,7 @@ object McpProxy {
 
 
             // 文件备份
-            val userHome = System.getProperty("user.home")
-            val backupDir = Paths.get(userHome, ".cmd-proxy", "mcp-file-history")
+            val backupDir = CmdProxyHome.resolve("mcp-file-history")
             if (!Files.exists(backupDir)) {
                 Files.createDirectories(backupDir)
             }

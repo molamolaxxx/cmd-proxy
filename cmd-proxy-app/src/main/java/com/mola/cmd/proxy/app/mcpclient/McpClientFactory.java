@@ -19,7 +19,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class McpClientFactory implements Closeable {
 
     private static final Logger logger = LoggerFactory.getLogger(McpClientFactory.class);
-    private static final String CONFIG_DIR = ".cmd-proxy";
     private static final String CONFIG_FILE = "mcp.json";
 
     private static volatile McpClientFactory instance;
@@ -51,7 +50,7 @@ public class McpClientFactory implements Closeable {
      * 从 ~/.cmd-proxy/mcp.json 读取配置并初始化所有非禁用的 client
      */
     public void init() throws IOException {
-        Path configPath = Paths.get(System.getProperty("user.home"), CONFIG_DIR, CONFIG_FILE);
+        Path configPath = com.mola.cmd.proxy.app.utils.CmdProxyHome.resolve(CONFIG_FILE);
         initFromPath(configPath);
         // 记录全局配置加载的 server 名称
         globalServerNames.addAll(clients.keySet());

@@ -37,7 +37,7 @@ import java.util.concurrent.*;
 public class AbilityReflectionService {
 
     private static final Logger logger = LoggerFactory.getLogger(AbilityReflectionService.class);
-    private static final String BASE_DIR = System.getProperty("user.home") + "/.cmd-proxy/ability";
+    private static final String BASE_DIR = com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("ability");
     private static final String ABILITY_FILE = "ability.md";
     private static final String SNAPSHOT_FILE = "snapshot.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();

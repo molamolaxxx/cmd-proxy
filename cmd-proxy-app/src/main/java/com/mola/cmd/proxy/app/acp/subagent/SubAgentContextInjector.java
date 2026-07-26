@@ -32,7 +32,7 @@ public class SubAgentContextInjector {
 
     private static final Logger logger = LoggerFactory.getLogger(SubAgentContextInjector.class);
     private static final String ABILITY_BASE_DIR =
-            System.getProperty("user.home") + "/.cmd-proxy/ability";
+            com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("ability");
     private static final String ABILITY_FILE = "ability.md";
     private static final int ABILITY_SUMMARY_MAX_CHARS = 800;
 

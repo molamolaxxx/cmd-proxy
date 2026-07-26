@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.mcp
 import com.alibaba.fastjson.JSON
 import com.alibaba.fastjson.JSONObject
 import com.mola.cmd.proxy.app.mcpclient.McpClientFactory
+import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import java.io.File
 
@@ -126,7 +127,7 @@ object SystemCommand {
             
             val sessionId = params.cmdArgs.getOrNull(0) ?: "default"
             val workSkillsDir = File("${parsePath(queryWorkingDir(sessionId), sessionId)}/.skills")
-            val userSkillsDir = File("${System.getProperty("user.home")}/.cmd-proxy/skills")
+            val userSkillsDir = File(CmdProxyHome.pathOf("skills"))
             
             processSkillsDirectory(workSkillsDir, skillNameSet, lines)
             processSkillsDirectory(userSkillsDir, skillNameSet, lines)

@@ -39,7 +39,8 @@ import java.util.Map;
 public class ConversationHistoryManager {
 
     private static final Logger logger = LoggerFactory.getLogger(ConversationHistoryManager.class);
-    private static final Path SESSION_ROOT_DIR = Paths.get(System.getProperty("user.home"), ".cmd-proxy", "session");
+    private static final Path SESSION_ROOT_DIR =
+            com.mola.cmd.proxy.app.utils.CmdProxyHome.resolve("session");
     private static final Gson PRETTY_GSON = new GsonBuilder().setPrettyPrinting().create();
 
     /** 按 workspacePath 隔离的 session 基础目录 */

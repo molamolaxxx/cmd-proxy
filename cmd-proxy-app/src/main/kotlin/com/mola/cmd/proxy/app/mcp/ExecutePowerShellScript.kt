@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.mcp
 
 import com.alibaba.fastjson.JSONObject
+import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.File
@@ -19,7 +20,7 @@ class ExecutePowerShellScript {
 
         val sessionWorkingDirMap = ConcurrentHashMap<String, String>()
 
-        private val PERSIST_FILE_BASE = System.getProperty("user.home") + "/.cmd-proxy/cmd-proxy-ps-wd"
+        private val PERSIST_FILE_BASE = CmdProxyHome.pathOf("cmd-proxy-ps-wd")
 
         fun readPersistedWd(sessionId: String): String {
             return try {

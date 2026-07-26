@@ -5,16 +5,20 @@ import com.alibaba.fastjson.JSONObject
 import com.alibaba.fastjson.serializer.SerializerFeature
 import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.acp.AcpRobotParam
+import com.mola.cmd.proxy.app.acp.common.InstanceRegistry
 import com.mola.cmd.proxy.app.acp.configui.ConfigUiServer
 import com.mola.cmd.proxy.app.mcp.McpProxy
+import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import com.mola.cmd.proxy.app.utils.LogUtil
 import com.mola.cmd.proxy.app.utils.McpFileUtils
+import com.mola.cmd.proxy.app.utils.PortAllocator
 import com.mola.cmd.proxy.client.conf.CmdProxyConf
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.nio.charset.Charset
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.system.exitProcess
 
 
 /**
@@ -29,12 +33,15 @@ private val log: Logger = LoggerFactory.getLogger(McpProxy::class.java)
 /** 热重载防重入标志 */
 private val reloading = AtomicBoolean(false)
 
+/** 当前实例实际使用的 ConfigUI 端口，热重载时复用，避免重复分配 */
+private var activeConfigUiPort = 0
+
 fun main(args: Array<String>) {
     val mode = args.getOrNull(0)?.lowercase() ?: "mcp"
     log.info("启动模式: {}", mode)
 
     LogUtil.debugReject()
-    CmdProxyConf.serverPort = 10020
+    CmdProxyHome.logSummary()
     CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
 
     when (mode) {
@@ -44,7 +51,8 @@ fun main(args: Array<String>) {
 }
 
 private fun startMcp() {
-    val file = File(System.getProperty("user.home") + "/.cmd-proxy/cmdGroupList.txt")
+    CmdProxyConf.serverPort = PortAllocator.allocate("RPC", CmdProxyHome.rpcPort())
+    val file = File(CmdProxyHome.pathOf("cmdGroupList.txt"))
     if (!file.exists()) {
         McpFileUtils.createFileSmart(file.absolutePath)
     }
@@ -60,29 +68,65 @@ private fun startMcp() {
 }
 
 private fun startAcp() {
-    val file = File(System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json")
+    // 尽早抢占本环境所有权，使同一环境重复启动快速失败
+    try {
+        InstanceRegistry.acquireOwnership()
+    } catch (e: IllegalStateException) {
+        abort("环境重复启动", e)
+    }
+
+    val file = File(CmdProxyHome.pathOf("acpConfig.json"))
     if (!file.exists()) {
         McpFileUtils.createFileSmart(file.absolutePath)
     }
     var content = file.readText(Charset.forName("UTF-8"))
+    var firstInit = false
 
     if (content.isBlank()) {
-        // 首次初始化：写入默认 configUi 配置，引导用户去页面配置
+        // 首次初始化：写入空配置骨架，端口在下一步统一分配后回写
         val defaultConfig = JSONObject()
         defaultConfig["robots"] = JSON.parseArray("[]")
         defaultConfig["chatterIds"] = JSON.parseArray("[]")
-        defaultConfig["configUi"] = JSON.parseObject("""{"port":10528,"enabled":true}""")
+        defaultConfig["configUi"] = JSON.parseObject("""{"enabled":true}""")
         content = JSON.toJSONString(defaultConfig, SerializerFeature.PrettyFormat)
         file.bufferedWriter().use { writer -> writer.write(content) }
+        firstInit = true
         log.info("首次启动，已生成默认配置文件: {}", file.absolutePath)
-        println("========================================")
-        println("  ACP 配置文件已初始化")
-        println("  请通过浏览器访问配置页面完成配置：")
-        println("  http://localhost:10528")
-        println("========================================")
     }
 
     val config: JSONObject = JSON.parseObject(content)
+
+    // 端口自动分配：跳过其它存活实例已登记的端口，再实测 bind
+    val reserved = InstanceRegistry.reservedPorts().toMutableSet()
+    val rpcPort = PortAllocator.allocate("RPC", CmdProxyHome.rpcPort(), reserved)
+    CmdProxyConf.serverPort = rpcPort
+    reserved.add(rpcPort)
+    val configUiEnabled = config.getJSONObject("configUi")?.getBooleanValue("enabled") ?: true
+    if (configUiEnabled) {
+        activeConfigUiPort = PortAllocator.allocate("ConfigUI", desiredConfigUiPort(config), reserved)
+        // 端口漂移时回写配置文件，保证配置页展示与实际监听一致
+        persistConfigUiPort(file, config, activeConfigUiPort)
+    } else {
+        // 未开启配置页则不占用端口，登记为 0，其它环境据此判定“不可远程编辑”
+        activeConfigUiPort = 0
+        log.info("ConfigUI 已禁用，跳过端口分配")
+    }
+
+    // 多环境冲突检查：与主机上其它存活实例比对 chatterIds / robot 名称
+    try {
+        registerInstance(config)
+    } catch (e: IllegalStateException) {
+        abort("多环境冲突", e)
+    }
+
+    if (firstInit) {
+        println("========================================")
+        println("  ACP 配置文件已初始化")
+        println("  配置文件路径：${file.absolutePath}")
+        println("  请通过浏览器访问配置页面完成配置：")
+        println("  http://localhost:$activeConfigUiPort")
+        println("========================================")
+    }
 
     // 启动 ConfigUI 服务（无论是否有 robots 配置都启动，方便用户配置）
     startConfigUiServer(config)
@@ -97,6 +141,52 @@ private fun startAcp() {
     }
 
     startAcpServices(config)
+}
+
+private fun abort(reason: String, e: Exception): Nothing {
+    log.error("{}，启动终止", reason, e)
+    println("========================================")
+    println(e.message)
+    println("========================================")
+    exitProcess(1)
+}
+
+/** ConfigUI 期望端口：配置文件优先，缺失或非法时用 CmdProxyHome 的默认值作为分配基准 */
+private fun desiredConfigUiPort(config: JSONObject): Int {
+    val port = config.getJSONObject("configUi")?.getIntValue("port") ?: 0
+    return if (port <= 0) CmdProxyHome.configUiPort() else port
+}
+
+/** 实际端口与配置文件不一致时回写，使页面上的端口值与真实监听一致 */
+private fun persistConfigUiPort(file: File, config: JSONObject, actualPort: Int) {
+    val configUi = config.getJSONObject("configUi") ?: JSONObject().also { config["configUi"] = it }
+    if (configUi.getIntValue("port") == actualPort) {
+        return
+    }
+    configUi["port"] = actualPort
+    try {
+        file.bufferedWriter().use { writer ->
+            writer.write(JSON.toJSONString(config, SerializerFeature.PrettyFormat))
+        }
+        log.info("ConfigUI 端口已回写配置文件: port={}, file={}", actualPort, file.absolutePath)
+    } catch (e: Exception) {
+        log.warn("ConfigUI 端口回写失败, port={}", actualPort, e)
+    }
+}
+
+/**
+ * 向主机级实例注册表登记当前环境，并校验与其它存活环境的冲突。
+ * 冲突时抛出 IllegalStateException，由调用方决定是终止启动还是拒绝本次重载。
+ */
+private fun registerInstance(config: JSONObject) {
+    val chatterIds = config.getJSONArray("chatterIds")
+        ?.toJavaList(String::class.java) ?: emptyList()
+    val robotNames = config.getJSONArray("robots")
+        ?.toJavaList(AcpRobotParam::class.java)
+        ?.filter { it.isEnabled }
+        ?.map { it.name } ?: emptyList()
+    InstanceRegistry.checkAndRegister(
+        chatterIds, robotNames, CmdProxyConf.serverPort, activeConfigUiPort)
 }
 
 /**
@@ -160,8 +250,8 @@ private fun startConfigUiServer(config: JSONObject) {
         log.info("ConfigUI 已禁用，跳过启动")
         return
     }
-    val port = configUi?.getIntValue("port") ?: 10528
-    val actualPort = if (port <= 0) 10528 else port
+    val actualPort = if (activeConfigUiPort > 0) activeConfigUiPort
+        else PortAllocator.allocate("ConfigUI", desiredConfigUiPort(config))
     try {
         val server = ConfigUiServer(actualPort, { reloadAcpServices() }, { name -> reloadRobot(name) })
         server.start()
@@ -188,7 +278,7 @@ private fun reloadAcpServices() {
         log.info("旧 ACP 服务已停止")
 
         // 2. 重新读取配置文件
-        val file = File(System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json")
+        val file = File(CmdProxyHome.pathOf("acpConfig.json"))
         val content = file.readText(Charset.forName("UTF-8"))
         if (content.isBlank()) {
             log.warn("配置文件为空，跳过重载")
@@ -196,7 +286,10 @@ private fun reloadAcpServices() {
         }
         val config: JSONObject = JSON.parseObject(content)
 
-        // 3. 启动新服务（内部并行启动，阻塞直到所有 client 就绪）
+        // 3. 多环境冲突检查：配置改动可能引入与其它环境相同的 chatterIds 或重名 robot
+        registerInstance(config)
+
+        // 4. 启动新服务（内部并行启动，阻塞直到所有 client 就绪）
         startAcpServices(config)
         log.info("ACP 服务热重载完成")
     } catch (e: Exception) {
@@ -212,7 +305,7 @@ private fun reloadAcpServices() {
  */
 private fun reloadRobot(robotName: String) {
     try {
-        val file = File(System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json")
+        val file = File(CmdProxyHome.pathOf("acpConfig.json"))
         val content = file.readText(Charset.forName("UTF-8"))
         if (content.isBlank()) {
             log.warn("配置文件为空，跳过 robot 级重载")

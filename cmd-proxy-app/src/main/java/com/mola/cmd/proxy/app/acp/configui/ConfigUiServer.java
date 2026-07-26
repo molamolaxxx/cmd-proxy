@@ -3,6 +3,8 @@ package com.mola.cmd.proxy.app.acp.configui;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
+import com.mola.cmd.proxy.app.utils.CmdProxyHome;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
@@ -21,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.cert.X509Certificate;
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -32,7 +35,8 @@ import java.util.function.Consumer;
 public class ConfigUiServer {
 
     private static final Logger logger = LoggerFactory.getLogger(ConfigUiServer.class);
-    private static final String CONFIG_PATH = System.getProperty("user.home") + "/.cmd-proxy/acpConfig.json";
+    private static final String CONFIG_PATH =
+            com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("acpConfig.json");
 
     private static final String UPDATE_JAR_URL = "https://106.54.193.10/download/cmd-proxy.jar";
 
@@ -66,13 +70,15 @@ public class ConfigUiServer {
 
         // 静态页面
         server.createContext("/", this::handleIndex);
-        // REST API
-        server.createContext("/api/config", this::handleConfig);
-        server.createContext("/api/refresh", this::handleRefresh);
-        server.createContext("/api/refresh-robot", this::handleRefreshRobot);
-        server.createContext("/api/browse-dir", this::handleBrowseDir);
-        server.createContext("/api/update-jar", this::handleUpdateJar);
-        server.createContext("/api/update-jar/status", this::handleUpdateJarStatus);
+        // 环境列表（不代理，始终由本进程扫描主机级注册表）
+        server.createContext("/api/instances", this::handleInstances);
+        // REST API：带 instance 参数且非本环境时，转发到目标环境的 ConfigUI
+        server.createContext("/api/config", proxied(this::handleConfig));
+        server.createContext("/api/refresh", proxied(this::handleRefresh));
+        server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
+        server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
+        server.createContext("/api/update-jar", proxied(this::handleUpdateJar));
+        server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
 
         server.start();
         logger.info("ConfigUI 已启动: http://localhost:{}", port);
@@ -83,6 +89,138 @@ public class ConfigUiServer {
             server.stop(0);
             logger.info("ConfigUI 已停止");
         }
+    }
+
+    // ==================== 多环境：环境列表与跨环境代理 ====================
+
+    /** 代理请求标记，避免转发成环 */
+    private static final String PROXY_HEADER = "X-Cmd-Proxy-Proxied";
+
+    /**
+     * 包装 handler：请求带 {@code instance} 参数且指向其它环境时，
+     * 转发到该环境 ConfigUI 的同名接口，否则按本地逻辑处理。
+     * 这样前端始终同源，无需 CORS，且 refresh/update-jar 这类必须在目标进程内执行的操作也能正确落地。
+     */
+    private com.sun.net.httpserver.HttpHandler proxied(com.sun.net.httpserver.HttpHandler local) {
+        return exchange -> {
+            String target = param(exchange, "instance");
+            boolean alreadyProxied = exchange.getRequestHeaders().getFirst(PROXY_HEADER) != null;
+            if (target == null || target.isEmpty() || alreadyProxied
+                    || target.equals(CmdProxyHome.instanceId())) {
+                local.handle(exchange);
+                return;
+            }
+            forward(exchange, target);
+        };
+    }
+
+    /** 环境列表：主机上所有存活环境，供前端渲染环境页签 */
+    private void handleInstances(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        List<InstanceRegistry.InstanceInfo> instances = InstanceRegistry.listAll();
+        sendResponse(exchange, 200, "application/json",
+                JSON.toJSONString(instances, SerializerFeature.DisableCircularReferenceDetect));
+    }
+
+    /** 把当前请求原样转发到目标环境的 ConfigUI */
+    private void forward(HttpExchange exchange, String instanceId) throws IOException {
+        InstanceRegistry.InstanceInfo target = null;
+        for (InstanceRegistry.InstanceInfo info : InstanceRegistry.listAll()) {
+            if (instanceId.equals(info.instanceId)) {
+                target = info;
+                break;
+            }
+        }
+        if (target == null) {
+            sendResponse(exchange, 404, "application/json",
+                    "{\"ok\":false,\"error\":\"环境不存在或已退出: " + jsonEscape(instanceId) + "\"}");
+            return;
+        }
+        if (target.configUiPort <= 0) {
+            sendResponse(exchange, 409, "application/json",
+                    "{\"ok\":false,\"error\":\"环境 " + jsonEscape(target.home)
+                            + " 未开启配置页，无法远程编辑\"}");
+            return;
+        }
+
+        byte[] body = readAllBytes(exchange.getRequestBody());
+        String query = stripInstanceParam(exchange.getRequestURI().getRawQuery());
+        String url = "http://127.0.0.1:" + target.configUiPort + exchange.getRequestURI().getPath()
+                + (query.isEmpty() ? "" : "?" + query);
+
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod(exchange.getRequestMethod());
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(60000);
+            conn.setRequestProperty(PROXY_HEADER, "1");
+            String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+            if (contentType != null) {
+                conn.setRequestProperty("Content-Type", contentType);
+            }
+            if (body.length > 0) {
+                conn.setDoOutput(true);
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(body);
+                }
+            }
+            int code = conn.getResponseCode();
+            InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            byte[] respBytes = is == null ? new byte[0] : readAllBytes(is);
+            String respType = conn.getContentType();
+            sendResponse(exchange, code,
+                    respType == null ? "application/json" : respType,
+                    new String(respBytes, StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            logger.warn("跨环境转发失败: url={}", url, e);
+            sendResponse(exchange, 502, "application/json",
+                    "{\"ok\":false,\"error\":\"目标环境无响应: " + jsonEscape(e.getMessage()) + "\"}");
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    /** 转发时去掉 instance 参数，使目标环境按本地逻辑处理 */
+    private String stripInstanceParam(String rawQuery) {
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String pair : rawQuery.split("&")) {
+            if (pair.isEmpty() || pair.equals("instance") || pair.startsWith("instance=")) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append('&');
+            }
+            sb.append(pair);
+        }
+        return sb.toString();
+    }
+
+    /** 读取 query 参数（已 URL 解码） */
+    private String param(HttpExchange exchange, String key) throws IOException {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null) {
+            return null;
+        }
+        for (String pair : query.split("&")) {
+            String[] kv = pair.split("=", 2);
+            if (kv.length == 2 && key.equals(kv[0])) {
+                return java.net.URLDecoder.decode(kv[1], "UTF-8");
+            }
+        }
+        return null;
+    }
+
+    private String jsonEscape(String raw) {
+        return raw == null ? "" : raw.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private void handleIndex(HttpExchange exchange) throws IOException {
