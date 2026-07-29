@@ -21,6 +21,7 @@ public class AcpRobotParam {
     private List<ContactRef> contacts;
     private String model;
     private String apiKey;
+    private String codexHome;
 
     private boolean proxyEnabled;
     private String httpProxy;
@@ -171,6 +172,9 @@ public class AcpRobotParam {
 
     public String getApiKey() { return apiKey; }
     public void setApiKey(String apiKey) { this.apiKey = apiKey; }
+
+    public String getCodexHome() { return codexHome; }
+    public void setCodexHome(String codexHome) { this.codexHome = codexHome; }
 
     public boolean isProxyEnabled() { return proxyEnabled; }
     public void setProxyEnabled(boolean proxyEnabled) { this.proxyEnabled = proxyEnabled; }

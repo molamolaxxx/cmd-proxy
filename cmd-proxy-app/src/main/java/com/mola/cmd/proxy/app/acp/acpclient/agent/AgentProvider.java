@@ -75,6 +75,14 @@ public interface AgentProvider {
     List<Path> getMcpConfigPaths(String workspacePath);
 
     /**
+     * 获取与指定 robot 对应的 MCP 配置文件路径。
+     * 默认沿用 provider 的工作目录级实现；需要 robot 级状态隔离的 provider 可覆写。
+     */
+    default List<Path> getMcpConfigPaths(String workspacePath, AcpRobotParam robotParam) {
+        return getMcpConfigPaths(workspacePath);
+    }
+
+    /**
      * agent 的显示名称，用于日志和调试。
      */
     String getName();

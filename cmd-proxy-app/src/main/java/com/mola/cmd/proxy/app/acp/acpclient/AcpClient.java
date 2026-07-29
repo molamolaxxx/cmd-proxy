@@ -113,7 +113,7 @@ public class AcpClient extends AbstractAcpClient {
                 robotParam != null && !robotParam.getName().isEmpty()
                         ? robotParam.getName() : groupId);
         this.globalListener = new DefaultAcpResponseListener(groupId);
-        this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath);
+        this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath, robotParam);
     }
 
     /**

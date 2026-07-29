@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -323,46 +324,54 @@ public class ConfigUiServer {
 
     /**
      * 目录浏览 API：GET /api/browse-dir?path=/some/path
-     * 返回指定路径下的子目录列表，用于前端文件夹选择器。
+     * 返回规范化路径、父目录、文件系统根目录和完整子目录路径。
+     * 路径拼接全部在服务端完成，以兼容 Windows 盘符、反斜杠和 UNC 路径。
      */
     private void handleBrowseDir(HttpExchange exchange) throws IOException {
         if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
             return;
         }
-        String query = exchange.getRequestURI().getQuery();
-        String dirPath = System.getProperty("user.home");
-        if (query != null) {
-            for (String param : query.split("&")) {
-                String[] kv = param.split("=", 2);
-                if (kv.length == 2 && "path".equals(kv[0])) {
-                    dirPath = java.net.URLDecoder.decode(kv[1], "UTF-8");
-                }
-            }
+        String dirPath = param(exchange, "path");
+        if (dirPath == null || dirPath.trim().isEmpty()) {
+            dirPath = System.getProperty("user.home");
         }
 
-        File dir = new File(dirPath);
+        File dir = Paths.get(dirPath).toAbsolutePath().normalize().toFile();
+        JSONObject result = new JSONObject();
+        result.put("path", dir.getPath());
+        result.put("parent", dir.getParent());
+        result.put("roots", directoryEntries(File.listRoots()));
+
         if (!dir.exists() || !dir.isDirectory()) {
-            sendResponse(exchange, 200, "application/json",
-                    "{\"path\":\"" + dirPath.replace("\\", "\\\\").replace("\"", "\\\"") + "\",\"dirs\":[],\"error\":\"not a directory\"}");
+            result.put("dirs", new ArrayList<>());
+            result.put("error", "not a directory");
+            sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
             return;
         }
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\"path\":\"").append(dir.getAbsolutePath().replace("\\", "\\\\").replace("\"", "\\\"")).append("\",\"dirs\":[");
         File[] children = dir.listFiles(File::isDirectory);
         if (children != null) {
             java.util.Arrays.sort(children, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-            boolean first = true;
-            for (File child : children) {
-                if (child.getName().startsWith(".")) continue;
-                if (!first) sb.append(",");
-                sb.append("\"").append(child.getName().replace("\\", "\\\\").replace("\"", "\\\"")).append("\"");
-                first = false;
-            }
         }
-        sb.append("]}");
-        sendResponse(exchange, 200, "application/json", sb.toString());
+        result.put("dirs", directoryEntries(children));
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private List<JSONObject> directoryEntries(File[] directories) {
+        List<JSONObject> result = new ArrayList<>();
+        if (directories == null) {
+            return result;
+        }
+        for (File directory : directories) {
+            JSONObject entry = new JSONObject();
+            String path = directory.toPath().toAbsolutePath().normalize().toString();
+            String name = directory.getName();
+            entry.put("path", path);
+            entry.put("name", name == null || name.isEmpty() ? path : name);
+            result.add(entry);
+        }
+        return result;
     }
 
     private void sendResponse(HttpExchange exchange, int code, String contentType, String body) throws IOException {

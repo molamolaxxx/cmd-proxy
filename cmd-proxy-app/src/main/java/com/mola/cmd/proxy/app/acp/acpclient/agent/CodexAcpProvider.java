@@ -29,8 +29,6 @@ public class CodexAcpProvider implements AgentProvider {
 
     private static final Gson GSON = new Gson();
     private static final String NPX_PACKAGE = "@agentclientprotocol/codex-acp";
-    private static final String HOME = System.getProperty("user.home");
-
     @Override
     public String getCommand() {
         return System.getProperty("os.name").toLowerCase().contains("win") ? "npx.cmd" : "npx";
@@ -58,10 +56,15 @@ public class CodexAcpProvider implements AgentProvider {
 
     @Override
     public List<Path> getMcpConfigPaths(String workspacePath) {
+        return getMcpConfigPaths(workspacePath, null);
+    }
+
+    @Override
+    public List<Path> getMcpConfigPaths(String workspacePath, AcpRobotParam robotParam) {
         // 先加载全局配置；McpConfigLoader 会按 server 名去重，保留先加载的配置。
         // 这使同名的项目级配置不会在 ACP 会话中重复注册。
         List<Path> paths = new ArrayList<>();
-        paths.add(Paths.get(HOME, ".codex", "config.toml"));
+        paths.add(resolveCodexHome(robotParam).resolve("config.toml"));
         if (workspacePath != null && !workspacePath.trim().isEmpty()) {
             // Codex 的项目级 MCP 配置位于 <workspace>/.codex/config.toml。
             // 显式传入 ACP，避免依赖 codex-acp/App Server 对项目配置层的隐式加载，
@@ -120,6 +123,10 @@ public class CodexAcpProvider implements AgentProvider {
             return Collections.emptyMap();
         }
         Map<String, String> env = new HashMap<>();
+        String codexHome = robotParam.getCodexHome();
+        if (codexHome != null && !codexHome.trim().isEmpty()) {
+            env.put("CODEX_HOME", expandUserHome(codexHome.trim()).toString());
+        }
         String apiKey = robotParam.getApiKey();
         if (apiKey != null && !apiKey.trim().isEmpty()) {
             String trimmedApiKey = apiKey.trim();
@@ -131,6 +138,29 @@ public class CodexAcpProvider implements AgentProvider {
             env.put("CODEX_CONFIG", buildCodexConfig(model.trim()));
         }
         return env;
+    }
+
+    private Path resolveCodexHome(AcpRobotParam robotParam) {
+        if (robotParam != null && robotParam.getCodexHome() != null
+                && !robotParam.getCodexHome().trim().isEmpty()) {
+            return expandUserHome(robotParam.getCodexHome().trim());
+        }
+        String envHome = System.getenv("CODEX_HOME");
+        if (envHome != null && !envHome.trim().isEmpty()) {
+            return expandUserHome(envHome.trim());
+        }
+        return Paths.get(System.getProperty("user.home"), ".codex");
+    }
+
+    private Path expandUserHome(String path) {
+        if ("~".equals(path)) {
+            return Paths.get(System.getProperty("user.home")).toAbsolutePath().normalize();
+        }
+        if (path.startsWith("~/") || path.startsWith("~\\")) {
+            return Paths.get(System.getProperty("user.home"), path.substring(2))
+                    .toAbsolutePath().normalize();
+        }
+        return Paths.get(path).toAbsolutePath().normalize();
     }
 
     private String buildCodexConfig(String model) {

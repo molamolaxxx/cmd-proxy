@@ -121,7 +121,7 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 </div></div>
 
 <div class="dialog-overlay" id="dirDialog"><div class="dialog">
-<div class="dialog-title">选择文件夹</div>
+<div class="dialog-title" id="dirDialogTitle">选择文件夹</div>
 <div class="dialog-body">
 <div class="dir-path" id="dirPath"></div>
 <div class="dir-list" id="dirList"></div>
@@ -150,6 +150,7 @@ function currentPort(){return parseInt(location.port)||10528}
 var config={robots:[],chatterIds:[],configUi:{enabled:true,port:currentPort()}};
 var editIdx=-1;
 var currentDirPath='';
+var dirTargetInputId='dWorkDir';
 var dlgSubAgents=[];
 var dlgContacts=[];
 // 多环境：环境列表、当前选中环境、未保存标记
@@ -282,9 +283,10 @@ var m=r.memory;
 var h='<div class="section-title">基本信息</div>'+
 '<div class="field-group"><label>名称 *</label><input type="text" id="dName" value="'+esc(r.name)+'"></div>'+
 '<div class="field-group"><label>签名描述</label><input type="text" id="dSig" value="'+esc(r.signature||'')+'"></div>'+
-'<div class="field-row"><div class="field-group"><label>工作目录 *</label><input type="text" id="dWorkDir" value="'+esc(r.workDir)+'"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker()" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
+'<div class="field-row"><div class="field-group"><label>工作目录 *</label><input type="text" id="dWorkDir" value="'+esc(r.workDir)+'"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker(\'dWorkDir\',\'选择工作目录\')" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
 '<div class="grid-2"><div class="field-group"><label>Agent 后端</label><select id="dProvider" onchange="onProviderChange()"><option value="KIRO_CLI"'+(r.agentProvider==='KIRO_CLI'||!r.agentProvider?' selected':'')+'>Kiro CLI</option><option value="OPENCODE"'+(r.agentProvider==='OPENCODE'?' selected':'')+'>OpenCode</option><option value="CLAUDE_AGENT_ACP"'+(r.agentProvider==='CLAUDE_AGENT_ACP'?' selected':'')+'>Claude Agent (ACP)</option><option value="CODEX_ACP"'+(r.agentProvider==='CODEX_ACP'?' selected':'')+'>Codex ACP</option></select></div><div class="field-group"><label>头像 URL</label><input type="text" id="dAvatar" value="'+esc(r.avatar||'')+'"></div></div>'+
 '<div class="grid-2"><div class="field-group"><label>模型 (可选)</label><input type="text" id="dModel" value="'+esc(r.model||'')+'" placeholder="留空使用默认模型"></div><div class="field-group" id="apiKeyGroup" style="'+(r.agentProvider==='CODEX_ACP'?'':'display:none')+'"><label>API Key</label><input type="text" id="dApiKey" value="'+esc(r.apiKey||'')+'" placeholder="OpenAI API Key (sk-xxx)"></div></div>'+
+'<div class="field-row" id="codexHomeGroup" style="'+(r.agentProvider==='CODEX_ACP'?'':'display:none')+'"><div class="field-group"><label>Codex Home (可选)</label><input type="text" id="dCodexHome" value="'+esc(r.codexHome||'')+'" placeholder="留空使用 CODEX_HOME 或 ~/.codex"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker(\'dCodexHome\',\'选择 Codex Home\')" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
 '<div class="section-title">代理设置 (可选)</div>'+
 '<div class="toggle-row"><div><div class="toggle-label">启用代理</div></div><label class="switch"><input type="checkbox" id="dProxyEnabled"'+(r.proxyEnabled?' checked':'')+' onchange="toggleProxyPanel()"><span class="slider"></span></label></div>'+
 '<div style="'+(r.proxyEnabled?'':'display:none')+'" id="proxyPanel"><div class="grid-2"><div class="field-group"><label>http_proxy</label><input type="text" id="dHttpProxy" value="'+esc(r.httpProxy||'')+'" placeholder="例: 106.54.193.10:22222"></div><div class="field-group"><label>no_proxy</label><input type="text" id="dNoProxy" value="'+esc(r.noProxy||'')+'" placeholder="例: localhost,127.0.0.1"></div></div></div>'+
@@ -318,7 +320,7 @@ document.getElementById('robotDialog').classList.add('show');
 
 function toggleMemPanel(){var show=document.getElementById('dMemRead').checked||document.getElementById('dMemWrite').checked;document.getElementById('memPanel').style.display=show?'':'none'}
 function toggleProxyPanel(){document.getElementById('proxyPanel').style.display=document.getElementById('dProxyEnabled').checked?'':'none'}
-function onProviderChange(){var p=document.getElementById('dProvider').value;if(p==='CLAUDE_AGENT_ACP'){document.getElementById('dMemRead').checked=false;document.getElementById('dMemWrite').checked=false;toggleMemPanel()}document.getElementById('apiKeyGroup').style.display=(p==='CODEX_ACP'?'':'none')}
+function onProviderChange(){var p=document.getElementById('dProvider').value;if(p==='CLAUDE_AGENT_ACP'){document.getElementById('dMemRead').checked=false;document.getElementById('dMemWrite').checked=false;toggleMemPanel()}var codex=p==='CODEX_ACP';document.getElementById('apiKeyGroup').style.display=codex?'':'none';document.getElementById('codexHomeGroup').style.display=codex?'':'none'}
 
 function renderSubAgents(){
 var c=document.getElementById('dSubList');
@@ -352,6 +354,7 @@ workDir:workDir,agentProvider:document.getElementById('dProvider').value,
 avatar:document.getElementById('dAvatar').value.trim(),
 model:document.getElementById('dModel').value.trim()||undefined,
 apiKey:document.getElementById('dApiKey').value.trim()||undefined,
+codexHome:document.getElementById('dCodexHome').value.trim()||undefined,
 proxyEnabled:document.getElementById('dProxyEnabled').checked,
 httpProxy:document.getElementById('dHttpProxy').value.trim()||undefined,
 noProxy:document.getElementById('dNoProxy').value.trim()||undefined,
@@ -391,29 +394,52 @@ closeDialog('robotDialog');render();
 showSnackbar(editIdx>=0?'Robot 已更新':'Robot 已添加');
 }
 
-function openDirPicker(){
-var cur=document.getElementById('dWorkDir').value.trim()||'/home';
-browseDir(cur);
+function openDirPicker(inputId,title){
+dirTargetInputId=inputId;
+var cur=document.getElementById(inputId).value.trim();
+document.getElementById('dirDialogTitle').textContent=title||'选择文件夹';
 document.getElementById('dirDialog').classList.add('show');
+browseDir(cur);
 }
 
 async function browseDir(path){
-currentDirPath=path;
-document.getElementById('dirPath').textContent=path;
+currentDirPath=path||'';
+document.getElementById('dirPath').textContent=currentDirPath||'加载中...';
+document.getElementById('dirList').innerHTML='<div style="padding:16px;color:#9e9e9e">加载中...</div>';
 try{
-var r=await api('/api/browse-dir?path='+encodeURIComponent(path));
+var r=await api('/api/browse-dir?path='+encodeURIComponent(path||''));
+if(!r.ok)throw new Error('HTTP '+r.status);
 var data=await r.json();
 currentDirPath=data.path||path;
 document.getElementById('dirPath').textContent=currentDirPath;
-var items='';
-if(currentDirPath!=='/'){items+='<div class="dir-item" onclick="browseDir(\''+esc(parentDir(currentDirPath))+'\')"><span class="material-icons">arrow_upward</span>..</div>'}
-if(data.dirs){data.dirs.forEach(function(d){items+='<div class="dir-item" onclick="browseDir(\''+esc(currentDirPath+(currentDirPath.endsWith('/')?'':'/')+d)+'\')"><span class="material-icons">folder</span>'+esc(d)+'</div>'})}
-document.getElementById('dirList').innerHTML=items||'<div style="padding:16px;color:#9e9e9e">无子目录</div>';
+var list=document.getElementById('dirList');
+list.innerHTML='';
+if(data.roots&&data.roots.length>1){data.roots.forEach(function(root){appendDirItem(list,'storage',root.name,root.path)})}
+if(data.parent){appendDirItem(list,'arrow_upward','..',data.parent)}
+if(data.error){appendDirMessage(list,'路径不存在或不是目录','#d32f2f')}
+else if(data.dirs&&data.dirs.length){data.dirs.forEach(function(d){appendDirItem(list,'folder',d.name,d.path)})}
+else{appendDirMessage(list,'无子目录','#9e9e9e')}
 }catch(e){document.getElementById('dirList').innerHTML='<div style="padding:16px;color:#d32f2f">加载失败</div>'}
 }
 
-function parentDir(p){var i=p.lastIndexOf('/');return i<=0?'/':p.substring(0,i)}
-function confirmDir(){document.getElementById('dWorkDir').value=currentDirPath;closeDialog('dirDialog')}
+function appendDirItem(container,icon,label,path){
+var item=document.createElement('div');
+item.className='dir-item';
+var iconEl=document.createElement('span');
+iconEl.className='material-icons';
+iconEl.textContent=icon;
+item.appendChild(iconEl);
+item.appendChild(document.createTextNode(label));
+item.onclick=function(){browseDir(path)};
+container.appendChild(item);
+}
+function appendDirMessage(container,text,color){
+var item=document.createElement('div');
+item.style.cssText='padding:16px;color:'+color;
+item.textContent=text;
+container.appendChild(item);
+}
+function confirmDir(){var input=document.getElementById(dirTargetInputId);if(input)input.value=currentDirPath;closeDialog('dirDialog')}
 function closeDialog(id){document.getElementById(id).classList.remove('show')}
 
 async function applyGlobalProxy(){

@@ -51,6 +51,7 @@ public class MemoryAcpClient extends AbstractAcpClient {
         override.setName(original.getName());
         override.setAgentProvider(original.getAgentProvider());
         override.setApiKey(original.getApiKey());
+        override.setCodexHome(original.getCodexHome());
         override.setProxyEnabled(original.isProxyEnabled());
         override.setHttpProxy(original.getHttpProxy());
         override.setNoProxy(original.getNoProxy());

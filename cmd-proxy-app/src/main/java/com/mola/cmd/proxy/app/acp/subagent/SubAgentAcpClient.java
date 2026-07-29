@@ -45,7 +45,7 @@ public class SubAgentAcpClient extends AbstractAcpClient {
         super(AgentProviderRouter.getInstance().resolve(robotParam.getAgentProvider()),
               workspacePath, groupId, robotParam);
         this.timeoutSeconds = timeoutSeconds;
-        this.mcpConfigPaths = agentProvider.getMcpConfigPaths(workspacePath);
+        this.mcpConfigPaths = agentProvider.getMcpConfigPaths(workspacePath, robotParam);
         this.executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "subagent-worker-" + groupId);
             t.setDaemon(true);
