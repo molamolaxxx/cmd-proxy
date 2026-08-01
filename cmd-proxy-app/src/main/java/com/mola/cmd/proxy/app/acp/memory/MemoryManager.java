@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 记忆系统门面类，主 Client 与记忆模块的唯一交互入口。
@@ -25,14 +26,21 @@ public class MemoryManager implements MemoryManagerBridge {
     private final MemoryLoader loader;
     private final MemoryFileStore fileStore;
     private final MemoryDreamer dreamer;
+    private final MemoryScopeLockRegistry locks;
 
     public MemoryManager(MemoryConfig config, AcpRobotParam robotParam) {
+        this(config, robotParam, new MemoryScopeLockRegistry());
+    }
+
+    public MemoryManager(MemoryConfig config, AcpRobotParam robotParam,
+                         MemoryScopeLockRegistry locks) {
         this.config = config;
+        this.locks = locks;
         String effectiveRobotName = config.isRobotScope() ? robotParam.getName() : null;
         this.fileStore = new MemoryFileStore(config.getBaseDir(), effectiveRobotName);
         this.loader = new MemoryLoader(fileStore, config);
-        this.extractor = new MemoryExtractor(config, fileStore, robotParam);
-        this.dreamer = new MemoryDreamer(config, fileStore, robotParam);
+        this.extractor = new MemoryExtractor(config, fileStore, robotParam, locks);
+        this.dreamer = new MemoryDreamer(config, fileStore, robotParam, locks);
     }
 
     // ==================== MemoryManagerBridge 实现 ====================
@@ -40,6 +48,8 @@ public class MemoryManager implements MemoryManagerBridge {
     @Override
     public String buildMemoryPrompt(String workspacePath) {
         if (!config.isReadEnabled()) return "";
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
         try {
             // 检查是否需要自动整理
             checkAndTriggerDream(workspacePath);
@@ -47,6 +57,8 @@ public class MemoryManager implements MemoryManagerBridge {
         } catch (Exception e) {
             logger.error("构建记忆概要失败", e);
             return "";
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -65,20 +77,28 @@ public class MemoryManager implements MemoryManagerBridge {
     @Override
     public void incrementSessionCount(String workspacePath) {
         if (!config.isWriteEnabled()) return;
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
         try {
             fileStore.incrementDreamSessionCount(workspacePath);
         } catch (Exception e) {
             logger.warn("递增 session 计数失败", e);
+        } finally {
+            lock.unlock();
         }
     }
 
     @Override
     public void onMemoryAccessed(String workspacePath, String filePath) {
         if (!config.isWriteEnabled() || filePath == null) return;
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
         try {
             fileStore.touchMemory(workspacePath, filePath);
         } catch (Exception e) {
             logger.warn("记忆访问强化失败: {}", filePath, e);
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -92,7 +112,13 @@ public class MemoryManager implements MemoryManagerBridge {
      * @return true 如果成功删除
      */
     public boolean deleteMemory(String workspacePath, String memoryId) {
-        return fileStore.deleteMemory(workspacePath, memoryId);
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
+        try {
+            return fileStore.deleteMemory(workspacePath, memoryId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -102,7 +128,13 @@ public class MemoryManager implements MemoryManagerBridge {
      * @return 记忆列表
      */
     public List<MemoryEntry> listMemories(String workspacePath) {
-        return fileStore.listMemories(workspacePath);
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
+        try {
+            return fileStore.listMemories(workspacePath);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -112,7 +144,14 @@ public class MemoryManager implements MemoryManagerBridge {
      * @return 清理的记忆数量
      */
     public int cleanExpiredMemories(String workspacePath) {
-        return fileStore.cleanExpiredMemories(workspacePath, config.getProjectExpireDays());
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
+        try {
+            return fileStore.cleanExpiredMemories(
+                    workspacePath, config.getProjectExpireDays());
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -129,7 +168,13 @@ public class MemoryManager implements MemoryManagerBridge {
      * @return ISO 格式时间字符串，从未整理过时返回 null
      */
     public String getLastDreamTime(String workspacePath) {
-        return fileStore.loadDreamState(workspacePath).getLastDreamTime();
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
+        try {
+            return fileStore.loadDreamState(workspacePath).getLastDreamTime();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -138,11 +183,15 @@ public class MemoryManager implements MemoryManagerBridge {
      */
     public String buildMemorySummary(String workspacePath) {
         if (!config.isReadEnabled()) return "";
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
         try {
             return loader.buildMemorySummary(workspacePath);
         } catch (Exception e) {
             logger.error("构建记忆概要失败", e);
             return "";
+        } finally {
+            lock.unlock();
         }
     }
 

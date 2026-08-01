@@ -499,6 +499,14 @@ public class MemoryFileStore {
         return getIndexFilePath(workspacePath).toAbsolutePath().toString();
     }
 
+    /**
+     * 返回该 workspace/scope 的规范化实际存储目录，供跨 manager 锁定。
+     */
+    public String getStorageKey(String workspacePath) {
+        return getProjectDir(workspacePath).toAbsolutePath()
+                .normalize().toString();
+    }
+
     private Path getIndexFilePath(String workspacePath) {
         return getProjectDir(workspacePath).resolve(INDEX_FILE);
     }

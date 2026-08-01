@@ -1,7 +1,5 @@
 package com.mola.cmd.proxy.app.acp.acpclient.listener;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.client.provider.CmdReceiver;
 import com.mola.cmd.proxy.client.resp.CmdResponseContent;
@@ -15,20 +13,23 @@ import java.util.UUID;
  */
 public class DefaultAcpResponseListener implements AcpResponseListener {
 
-    private static final int MAX_JSON_LENGTH = 1000;
-    private static final Gson PRETTY_GSON = new GsonBuilder().setPrettyPrinting().create();
-
     private final String groupId;
+    private final AcpResponseContentRenderer renderer;
+    private final AcpResponseContentRenderer.Output output;
 
     /** 缓冲模式：开启后 sendContent 不立即发送，而是攒到 buffer 中 */
     private boolean buffering = false;
     private final StringBuilder buffer = new StringBuilder();
 
-    /** 追踪最近一次输出内容的末尾字符，用于判断卡片前是否需要补换行 */
-    private char lastChar = '\0';
-
     public DefaultAcpResponseListener(String groupId) {
+        this(groupId, null);
+    }
+
+    DefaultAcpResponseListener(
+            String groupId, AcpResponseContentRenderer.Output output) {
         this.groupId = groupId;
+        this.output = output == null ? this::doCallback : output;
+        this.renderer = new AcpResponseContentRenderer(this::sendContent);
     }
 
     /**
@@ -52,214 +53,45 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
 
     @Override
     public void onMessage(String text) {
-        sendContent(text, false);
+        renderer.onMessage(text);
     }
 
     @Override
     public void onToolCall(String toolCallId, String title, String status, JsonObject update) {
-        if (title == null || title.length() == 0) {
-            title = "tool_call";
-        }
-        if ("completed".equals(status)) {
-            StringBuilder sb = new StringBuilder();
-            String inputBlock = "";
-            if (update.has("rawInput")) {
-                String inputJson = PRETTY_GSON.toJson(update.get("rawInput"));
-                if (inputJson.length() > MAX_JSON_LENGTH) {
-                    inputJson = inputJson.substring(0, MAX_JSON_LENGTH) + "\n...";
-                }
-                inputBlock = "<details class=\"tool-detail\" open><summary>📥 输入参数</summary>\n\n```json\n"
-                        + escapeHtml(inputJson) + "\n```\n\n</details>";
-            }
-
-            String outputBlock = "";
-            if (update.has("rawOutput")) {
-                String outputJson = PRETTY_GSON.toJson(update.get("rawOutput"));
-                if (outputJson.length() > MAX_JSON_LENGTH) {
-                    outputJson = outputJson.substring(0, MAX_JSON_LENGTH) + "\n...";
-                }
-                outputBlock = "<details class=\"tool-detail\" open><summary>📤 输出结果</summary>\n\n```json\n"
-                        + escapeHtml(outputJson) + "\n```\n\n</details>";
-            }
-
-            sb.append("<details class=\"tool-call\">");
-            sb.append("<summary>🛠️ ✅ ").append(escapeMarkdown(title)).append("</summary>");
-            sb.append("<div class=\"tool-call-body\">\n\n");
-            sb.append(inputBlock);
-            sb.append(outputBlock);
-            sb.append("\n\n</div></details>\n");
-
-            sendCardContent(sb.toString(), false);
-        }
+        renderer.onToolCall(title, status, update);
     }
 
     @Override
     public void onComplete(String fullResponse) {
-        sendContent("", true);
+        renderer.onComplete();
     }
 
     @Override
     public void onError(Exception error) {
-        sendContent("====== 发生错误 ======\n" + error.getMessage(), true);
+        renderer.onError(error);
     }
 
     @Override
     public void onSubAgentEvent(String eventType, String agentName, String detail) {
-        String safeDetail = sanitizeCodeFences(detail);
-        String safeName = escapeMarkdown(agentName);
-        String content;
-        switch (eventType) {
-            case "DISPATCH_START":
-                content = "<details class=\"tool-call\" open>"
-                        + "<summary>📋 子 Agent 派发</summary>"
-                        + "<div class=\"tool-call-body\">\n\n```\n"
-                        + safeDetail + "\n```\n\n</div></details>\n";
-                break;
-            case "AGENT_START":
-                content = "<details class=\"tool-call\">"
-                        + "<summary>🚀 [" + safeName + "] 执行中...</summary>"
-                        + "<div class=\"tool-call-body\">\n\n"
-                        + "<details class=\"tool-detail\" open><summary>📥 任务</summary>\n\n```\n"
-                        + safeDetail + "\n```\n\n</details>"
-                        + "\n\n</div></details>\n";
-                break;
-            case "AGENT_PROGRESS":
-                content = "<details class=\"tool-call\">"
-                        + "<summary>⏳ [" + safeName + "] 执行中...</summary>"
-                        + "<div class=\"tool-call-body\">\n\n"
-                        + "<details class=\"tool-detail\" open><summary>📋 当前进度</summary>\n\n```\n"
-                        + safeDetail + "\n```\n\n</details>"
-                        + "\n\n</div></details>\n";
-                break;
-            case "AGENT_COMPLETE": {
-                content = "<details class=\"tool-call\">"
-                        + "<summary>🤖 ✅ [" + safeName + "] 完成</summary>"
-                        + "<div class=\"tool-call-body\">\n\n"
-                        + "<details class=\"tool-detail\" open><summary>📤 执行结果</summary>\n\n```\n"
-                        + safeDetail + "\n```\n\n</details>"
-                        + "\n\n</div></details>\n";
-                break;
-            }
-            case "AGENT_ERROR":
-                content = "<details class=\"tool-call\">"
-                        + "<summary>🤖 ❌ [" + safeName + "] 失败</summary>"
-                        + "<div class=\"tool-call-body\">\n\n"
-                        + "<details class=\"tool-detail\" open><summary>📤 错误信息</summary>\n\n```\n"
-                        + safeDetail + "\n```\n\n</details>"
-                        + "\n\n</div></details>\n";
-                break;
-            case "DISPATCH_COMPLETE":
-                content = "<details class=\"tool-call\">"
-                        + "<summary>📊 " + escapeMarkdown(safeDetail) + "</summary>"
-                        + "</details>\n";
-                break;
-            default:
-                content = "<details class=\"tool-call\">"
-                        + "<summary>ℹ️ " + escapeMarkdown(safeDetail) + "</summary>"
-                        + "</details>\n";
-        }
-        sendCardContent(content, false);
+        renderer.onSubAgentEvent(eventType, agentName, detail);
     }
 
     @Override
     public void onScheduleEvent(String eventType, String detail, boolean expanded) {
-        String safeDetail = sanitizeCodeFences(detail);
-        String openAttr = expanded ? " open" : "";
-        String content;
-        switch (eventType) {
-            case "SCHEDULE_CREATE":
-                content = "<details class=\"tool-call\"" + openAttr + ">"
-                        + "<summary>⏰ 定时任务创建</summary>"
-                        + "<div class=\"tool-call-body\">\n\n```\n"
-                        + safeDetail + "\n```\n\n</div></details>\n";
-                break;
-            case "SCHEDULE_MANAGE":
-                content = "<details class=\"tool-call\"" + openAttr + ">"
-                        + "<summary>⏰ 定时任务操作</summary>"
-                        + "<div class=\"tool-call-body\">\n\n```\n"
-                        + safeDetail + "\n```\n\n</div></details>\n";
-                break;
-            default:
-                content = "<details class=\"tool-call\"" + openAttr + ">"
-                        + "<summary>⏰ " + escapeMarkdown(safeDetail) + "</summary>"
-                        + "</details>\n";
-        }
-        sendCardContent(content, false);
+        renderer.onScheduleEvent(eventType, detail, expanded);
     }
 
     @Override
     public void onTalkToEvent(String eventType, String robotName, String messageContent) {
-        String safeName = escapeMarkdown(robotName);
-        String safeContent = sanitizeCodeFences(messageContent);
-        String content;
-        switch (eventType) {
-            case "TALK_TO_SEND":
-                content = "<details class=\"tool-call\" open>"
-                        + "<summary>📤 发送消息给 " + safeName + "</summary>"
-                        + "<div class=\"tool-call-body\">\n\n```\n"
-                        + safeContent + "\n```\n\n</div></details>\n";
-                break;
-            case "TALK_TO_RECEIVE":
-                content = "<details class=\"tool-call\" open>"
-                        + "<summary>📨 收到来自 " + safeName + " 的消息</summary>"
-                        + "<div class=\"tool-call-body\">\n\n```\n"
-                        + safeContent + "\n```\n\n</div></details>\n";
-                break;
-            default:
-                content = "<details class=\"tool-call\" open>"
-                        + "<summary>💬 " + safeName + "</summary>"
-                        + "<div class=\"tool-call-body\">\n\n```\n"
-                        + safeContent + "\n```\n\n</div></details>\n";
-        }
-        sendCardContent(content, false);
+        renderer.onTalkToEvent(eventType, robotName, messageContent);
     }
 
     @Override
     public void onCompactionEvent(String eventType, String provider) {
-        if (!"COMPACTION_COMPLETED".equals(eventType)) {
-            return;
-        }
-        String content = "<details class=\"tool-call\">"
-                + "<summary>🗜️ ✅ 上下文压缩完成</summary>"
-                + "<div class=\"tool-call-body\">\n\n"
-                + "Agent 已完成上下文压缩，下一轮对话将重新注入完整 ACP harness。"
-                + "\n\nProvider：`" + sanitizeCodeFences(provider) + "`"
-                + "\n\n</div></details>\n";
-        sendCardContent(content, false);
-    }
-
-    private static String escapeHtml(String text) {
-        if (text == null) return "";
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
-    }
-
-    /**
-     * 转义 markdown 特殊字符，防止在前端 markdown 渲染器中被解析为格式语法。
-     * 用于 summary 等 HTML 标签内的纯文本内容。
-     */
-    private static String escapeMarkdown(String text) {
-        if (text == null) return "";
-        return text.replaceAll("([#*])", "\\\\$1");
-    }
-
-    /**
-     * 移除文本中的 markdown 代码块标记（```），避免和外层包裹的代码块冲突。
-     * 仅用于给用户展示的 detail 内容，不影响传给主 Agent 的原始结果。
-     */
-    private static String sanitizeCodeFences(String text) {
-        if (text == null) return "";
-        return text.replaceAll("```[a-zA-Z]*", "").replace("```", "");
-    }
-
-    private void sendCardContent(String content, boolean end) {
-        String prefix = (lastChar != '\0' && lastChar != '\n') ? "\n" : "";
-        sendContent(prefix + content, end);
+        renderer.onCompactionEvent(eventType, provider);
     }
 
     private void sendContent(String content, boolean end) {
-        if (content.length() > 0) {
-            lastChar = content.charAt(content.length() - 1);
-        }
         if (buffering && !end) {
             buffer.append(content);
             return;
@@ -276,6 +108,10 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     }
 
     private void doSend(String content, boolean end) {
+        output.emit(content, end);
+    }
+
+    private void doCallback(String content, boolean end) {
         Map<String, String> resultMap = new HashMap<>();
         resultMap.put("groupId", groupId);
         resultMap.put("content", content);

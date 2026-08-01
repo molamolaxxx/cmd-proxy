@@ -10,6 +10,9 @@ public class ScheduledTask {
     /** 任务 ID，由 ScheduleTaskManager 生成，格式: t{时间戳秒数}_{title-slug} */
     private String id;
 
+    /** MAIN/TEAM 显式 owner；旧版任务读取时可为空并由目录迁移补齐。 */
+    private ScheduleOwnerKey owner;
+
     /** 任务标题 */
     private String title;
 
@@ -40,6 +43,14 @@ public class ScheduledTask {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public ScheduleOwnerKey getOwner() {
+        return owner;
+    }
+
+    public void setOwner(ScheduleOwnerKey owner) {
+        this.owner = owner;
     }
 
     public String getTitle() {

@@ -11,7 +11,9 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -32,7 +34,7 @@ public abstract class AbstractAcpClient implements Closeable {
      * AcpClient 生命周期状态
      */
     public enum State {
-        CREATED, STARTING, READY, BUSY, ERROR, CLOSED
+        CREATED, STARTING, READY, BUSY, ERROR, CLOSING, CLOSED
     }
 
     private static final Logger logger = LoggerFactory.getLogger(AbstractAcpClient.class);
@@ -42,12 +44,15 @@ public abstract class AbstractAcpClient implements Closeable {
     private static final String CLIENT_VERSION = "1.0.0";
 
     protected final AgentProvider agentProvider;
+    protected final AcpClientIdentity clientIdentity;
     protected final String workspacePath;
     protected final String groupId;
     protected final AcpRobotParam robotParamRef;
     protected final Gson gson = new GsonBuilder().create();
     protected final AtomicInteger idCounter = new AtomicInteger(0);
     protected final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
+    private final AtomicLong lifecycleGeneration = new AtomicLong(0L);
+    private volatile State stateBeforeClose = State.CREATED;
 
     protected Process process;
     protected BufferedWriter writer;
@@ -69,11 +74,23 @@ public abstract class AbstractAcpClient implements Closeable {
      * 使用指定 AgentProvider 和 robotParam 创建（protected，供子类使用）。
      */
     protected AbstractAcpClient(AgentProvider agentProvider, String workspacePath, String groupId, AcpRobotParam robotParam) {
+        this(agentProvider, workspacePath,
+                AcpClientIdentity.main(groupId, groupId,
+                        robotParam != null ? robotParam.getName() : null),
+                robotParam);
+    }
+
+    /**
+     * 使用显式 Client 身份创建。
+     */
+    protected AbstractAcpClient(AgentProvider agentProvider, String workspacePath,
+                                AcpClientIdentity clientIdentity, AcpRobotParam robotParam) {
         this.agentProvider = agentProvider;
+        this.clientIdentity = Objects.requireNonNull(clientIdentity, "clientIdentity");
         this.workspacePath = (workspacePath == null || workspacePath.trim().isEmpty())
                 ? System.getProperty("user.home")
                 : workspacePath;
-        this.groupId = groupId;
+        this.groupId = clientIdentity.getLogicalId();
         this.robotParamRef = robotParam;
     }
 
@@ -242,17 +259,181 @@ public abstract class AbstractAcpClient implements Closeable {
 
     @Override
     public void close() throws IOException {
-        state.set(State.CLOSED);
-        logger.info("关闭 AbstractAcpClient, groupId={}", groupId);
-        closeCurrentProcess();
+        if (!beginClose()) {
+            return;
+        }
+        closeAfterBegin();
     }
 
+    /**
+     * 抢占关闭权。子类应在自身资源清理前调用，防止重复关闭。
+     */
+    protected boolean beginClose() {
+        while (true) {
+            State current = state.get();
+            if (current == State.CLOSING || current == State.CLOSED) {
+                return false;
+            }
+            if (state.compareAndSet(current, State.CLOSING)) {
+                stateBeforeClose = current;
+                lifecycleGeneration.incrementAndGet();
+                return true;
+            }
+        }
+    }
+
+    /**
+     * 已进入 CLOSING 后执行协议优先的进程关闭，并最终进入 CLOSED。
+     */
+    protected void closeAfterBegin() throws IOException {
+        logger.info("关闭 AbstractAcpClient, logicalId={}, transportGroup={}",
+                clientIdentity.getLogicalId(), clientIdentity.getTransportGroup());
+        try {
+            closeCurrentSessionGracefully();
+        } finally {
+            state.set(State.CLOSED);
+        }
+    }
+
+    /**
+     * 正常关闭：session/end → 等待 → destroy → destroyForcibly。
+     */
+    private void closeCurrentSessionGracefully() {
+        Process currentProcess = process;
+        boolean endSent = false;
+
+        if (currentProcess != null && currentProcess.isAlive()
+                && writer != null && sessionId != null && !sessionId.trim().isEmpty()) {
+            JsonObject params = new JsonObject();
+            params.addProperty("sessionId", sessionId);
+            try {
+                if (stateBeforeClose == State.BUSY) {
+                    JsonObject cancelNotification = new JsonObject();
+                    cancelNotification.addProperty("jsonrpc", JSONRPC_VERSION);
+                    cancelNotification.addProperty("method", "session/cancel");
+                    cancelNotification.add("params", params.deepCopy());
+                    sendJson(cancelNotification);
+                    logger.info("关闭 BUSY client 前已发送 session/cancel, sessionId={}", sessionId);
+                }
+                sendJson(buildRequest("session/end", params));
+                endSent = true;
+                logger.info("已发送 session/end, sessionId={}, logicalId={}",
+                        sessionId, clientIdentity.getLogicalId());
+            } catch (IOException e) {
+                logger.warn("发送 session/end 失败，将进入进程关闭兜底, sessionId={}",
+                        sessionId, e);
+            }
+        }
+
+        if (currentProcess != null && currentProcess.isAlive() && endSent
+                && awaitProcessExit(currentProcess, gracefulShutdownTimeoutMillis())) {
+            closeProcessStreams();
+            clearProcessReferences();
+            return;
+        }
+
+        if (currentProcess != null && currentProcess.isAlive()) {
+            logger.warn("ACP 进程未在优雅关闭窗口内退出，执行 destroy, logicalId={}",
+                    clientIdentity.getLogicalId());
+            currentProcess.destroy();
+            awaitProcessExit(currentProcess, destroyShutdownTimeoutMillis());
+        }
+
+        if (currentProcess != null && currentProcess.isAlive()) {
+            logger.warn("ACP 进程 destroy 后仍未退出，执行 destroyForcibly, logicalId={}",
+                    clientIdentity.getLogicalId());
+            currentProcess.destroyForcibly();
+            awaitProcessExit(currentProcess, forceShutdownTimeoutMillis());
+        }
+
+        closeProcessStreams();
+        clearProcessReferences();
+    }
+
+    private boolean awaitProcessExit(Process target, long timeoutMillis) {
+        try {
+            return target.waitFor(Math.max(0L, timeoutMillis), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.warn("等待 ACP 进程退出被中断, logicalId={}", clientIdentity.getLogicalId());
+            return false;
+        }
+    }
+
+    protected long gracefulShutdownTimeoutMillis() {
+        return 3000L;
+    }
+
+    protected long destroyShutdownTimeoutMillis() {
+        return 1000L;
+    }
+
+    protected long forceShutdownTimeoutMillis() {
+        return 1000L;
+    }
+
+    /**
+     * 获取当前 lifecycle generation，供异步任务捕获。
+     */
+    protected long currentLifecycleGeneration() {
+        return lifecycleGeneration.get();
+    }
+
+    /**
+     * generation 未变化且 client 未进入关闭态时才视为有效。
+     */
+    protected boolean isLifecycleGenerationActive(long generation) {
+        State current = state.get();
+        return lifecycleGeneration.get() == generation
+                && current != State.CLOSING
+                && current != State.CLOSED;
+    }
+
+    /**
+     * generation 有效时执行严格的状态 CAS。
+     */
+    protected boolean compareAndSetStateIfActive(long generation, State expected, State update) {
+        if (!isLifecycleGenerationActive(generation)) {
+            return false;
+        }
+        return state.compareAndSet(expected, update)
+                && lifecycleGeneration.get() == generation;
+    }
+
+    /**
+     * generation 有效时更新状态，关闭开始后不会覆盖 CLOSING/CLOSED。
+     */
+    protected boolean setStateIfActive(long generation, State update) {
+        while (isLifecycleGenerationActive(generation)) {
+            State current = state.get();
+            if (current == State.CLOSING || current == State.CLOSED) {
+                return false;
+            }
+            if (state.compareAndSet(current, update)) {
+                return lifecycleGeneration.get() == generation;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 启动失败/备用命令切换时使用的非会话级快速清理。
+     */
     private void closeCurrentProcess() {
+        Process currentProcess = process;
+        closeProcessStreams();
+        if (currentProcess != null && currentProcess.isAlive()) {
+            currentProcess.destroy();
+        }
+        clearProcessReferences();
+    }
+
+    private void closeProcessStreams() {
         try { if (writer != null) writer.close(); } catch (IOException e) { /* ignore */ }
         try { if (reader != null) reader.close(); } catch (IOException e) { /* ignore */ }
-        if (process != null && process.isAlive()) {
-            process.destroy();
-        }
+    }
+
+    private void clearProcessReferences() {
         writer = null;
         reader = null;
         process = null;
@@ -676,6 +857,8 @@ public abstract class AbstractAcpClient implements Closeable {
 
     public String getSessionId() { return sessionId; }
     public String getGroupId() { return groupId; }
+    public AcpClientIdentity getClientIdentity() { return clientIdentity; }
+    public long getLifecycleGeneration() { return lifecycleGeneration.get(); }
     public State getState() { return state.get(); }
     public String getWorkspacePath() { return workspacePath; }
     public double getContextUsagePercentage() { return contextUsagePercentage; }

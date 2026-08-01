@@ -8,8 +8,10 @@ import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener;
+import com.mola.cmd.proxy.app.acp.acpclient.listener.LifecycleGuardedAcpResponseListener;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
+import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher;
@@ -29,10 +31,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * ACP 主 Client，继承 {@link AbstractAcpClient}，负责：
@@ -79,11 +80,17 @@ public class AcpClient extends AbstractAcpClient {
     /** 定时任务上下文注入器，通过 setter 注入 */
     private ScheduleContextInjector scheduleContextInjector;
 
+    /** 定时任务显式 owner；MAIN 与 TEAM 不再共享 robotName key。 */
+    private ScheduleOwnerKey scheduleOwnerKey;
+
     /** TalkTo 消息投递器，通过 setter 注入，未配置通讯录时为 null */
     private TalkToDispatcher talkToDispatcher;
 
     /** TalkTo 上下文注入器，通过 setter 注入 */
     private TalkToContextInjector talkToContextInjector;
+
+    /** TalkTo 专用 robot 注册表；与 subAgent registry 分离，避免 Team 白名单串扰。 */
+    private Map<String, AcpRobotParam> talkToRobotRegistry;
 
     /** 绑定的 robot 参数，构造时传入，不可变 */
     private final AcpRobotParam robotParam;
@@ -107,12 +114,24 @@ public class AcpClient extends AbstractAcpClient {
      * 使用指定 AgentProvider 创建 AcpClient（包级私有，供未来扩展）。
      */
     AcpClient(AgentProvider agentProvider, String workspacePath, String groupId, AcpRobotParam robotParam) {
-        super(agentProvider, workspacePath, groupId, robotParam);
+        this(agentProvider, workspacePath,
+                AcpClientIdentity.main(
+                        groupId,
+                        robotParam != null && !robotParam.getName().isEmpty()
+                                ? robotParam.getName() : groupId,
+                        robotParam != null ? robotParam.getName() : null),
+                robotParam);
+    }
+
+    /**
+     * 使用显式 Client 身份创建，供 TEAM 等隔离作用域使用。
+     */
+    AcpClient(AgentProvider agentProvider, String workspacePath,
+              AcpClientIdentity clientIdentity, AcpRobotParam robotParam) {
+        super(agentProvider, workspacePath, clientIdentity, robotParam);
         this.robotParam = robotParam;
-        this.historyManager = new ConversationHistoryManager(
-                robotParam != null && !robotParam.getName().isEmpty()
-                        ? robotParam.getName() : groupId);
-        this.globalListener = new DefaultAcpResponseListener(groupId);
+        this.historyManager = new ConversationHistoryManager(clientIdentity);
+        this.globalListener = new DefaultAcpResponseListener(clientIdentity.getTransportGroup());
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath, robotParam);
     }
 
@@ -124,6 +143,16 @@ public class AcpClient extends AbstractAcpClient {
         this(AgentProviderRouter.getInstance().resolve(
                         robotParam != null ? robotParam.getAgentProvider() : null),
                 workspacePath, groupId, robotParam);
+    }
+
+    /**
+     * 使用显式身份创建 AcpClient。
+     */
+    public AcpClient(String workspacePath, AcpClientIdentity clientIdentity,
+                     AcpRobotParam robotParam) {
+        this(AgentProviderRouter.getInstance().resolve(
+                        robotParam != null ? robotParam.getAgentProvider() : null),
+                workspacePath, clientIdentity, robotParam);
     }
 
     /**
@@ -153,8 +182,18 @@ public class AcpClient extends AbstractAcpClient {
      */
     public void setScheduleSupport(ScheduleTaskManager taskManager,
                                    ScheduleContextInjector contextInjector) {
+        setScheduleSupport(taskManager, contextInjector, null);
+    }
+
+    public void setScheduleSupport(ScheduleTaskManager taskManager,
+                                   ScheduleContextInjector contextInjector,
+                                   ScheduleOwnerKey ownerKey) {
         this.scheduleTaskManager = taskManager;
         this.scheduleContextInjector = contextInjector;
+        this.scheduleOwnerKey = ownerKey;
+        if (taskManager != null && ownerKey != null) {
+            taskManager.register(ownerKey);
+        }
     }
 
     /**
@@ -169,9 +208,7 @@ public class AcpClient extends AbstractAcpClient {
                                  Map<String, AcpRobotParam> robotRegistry) {
         this.talkToDispatcher = dispatcher;
         this.talkToContextInjector = injector;
-        if (robotRegistry != null) {
-            this.globalRobotRegistry = robotRegistry;
-        }
+        this.talkToRobotRegistry = robotRegistry;
     }
 
     // ==================== 生命周期 ====================
@@ -185,12 +222,11 @@ public class AcpClient extends AbstractAcpClient {
             try {
                 loadSession(targetRestoreSessionId);
             } catch (IOException e) {
-                if (tryKillConflictingProcess(e)) {
-                    logger.info("已终止占用进程，重试 session/load (restore), sessionId={}", targetRestoreSessionId);
-                    loadSession(targetRestoreSessionId);
-                } else {
-                    throw e;
+                if (isActiveSessionConflict(e)) {
+                    logger.warn("目标 session 正被其他进程使用；安全策略禁止自动终止未知进程, sessionId={}",
+                            targetRestoreSessionId);
                 }
+                throw e;
             }
             historyManager.saveLastSessionId(targetRestoreSessionId);
             return;
@@ -204,15 +240,9 @@ public class AcpClient extends AbstractAcpClient {
                     loadSession(latestSessionId);
                     return;
                 } catch (IOException e) {
-                    // 如果是 "Session is active in another process"，尝试 kill 占用进程后重试
-                    if (tryKillConflictingProcess(e)) {
-                        try {
-                            logger.info("已终止占用进程，重试 session/load, sessionId={}", latestSessionId);
-                            loadSession(latestSessionId);
-                            return;
-                        } catch (IOException retryEx) {
-                            logger.warn("终止占用进程后 session/load 仍然失败，回退到 session/new, sessionId={}", latestSessionId, retryEx);
-                        }
+                    if (isActiveSessionConflict(e)) {
+                        logger.warn("最近 session 正被其他进程使用；不终止占用进程，安全回退到 session/new, sessionId={}",
+                                latestSessionId);
                     } else {
                         logger.warn("session/load 失败，回退到 session/new, sessionId={}", latestSessionId, e);
                     }
@@ -224,44 +254,14 @@ public class AcpClient extends AbstractAcpClient {
         newSession();
     }
 
-    private static final Pattern PID_PATTERN = Pattern.compile("PID\\s+(\\d+)");
-
     /**
-     * 检查异常是否为 "Session is active in another process" 错误，
-     * 如果是则尝试 kill 该进程。
-     *
-     * @return true 表示成功终止了占用进程，调用方可以重试 loadSession
+     * 检查异常是否为 session 被其它进程占用。
+     * <p>
+     * 这里只做识别和安全回退，绝不根据错误文本中的 PID 终止未知进程。
      */
-    private boolean tryKillConflictingProcess(IOException e) {
+    static boolean isActiveSessionConflict(IOException e) {
         String message = e.getMessage();
-        if (message == null || !message.contains("Session is active in another process")) {
-            return false;
-        }
-        Matcher matcher = PID_PATTERN.matcher(message);
-        if (!matcher.find()) {
-            logger.warn("检测到会话被其他进程占用，但无法提取 PID: {}", message);
-            return false;
-        }
-        String pid = matcher.group(1);
-        logger.info("检测到会话被进程占用, PID={}, 尝试终止该进程", pid);
-        try {
-            ProcessBuilder pb = new ProcessBuilder("kill", "-9", pid);
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-            int exitCode = process.waitFor();
-            if (exitCode == 0) {
-                logger.info("成功终止占用进程, PID={}", pid);
-                // 等待一小段时间让资源释放
-                Thread.sleep(500);
-                return true;
-            } else {
-                logger.warn("终止进程失败, PID={}, exitCode={}", pid, exitCode);
-                return false;
-            }
-        } catch (Exception ex) {
-            logger.warn("终止占用进程时发生异常, PID={}", pid, ex);
-            return false;
-        }
+        return message != null && message.contains("Session is active in another process");
     }
 
 
@@ -347,6 +347,14 @@ public class AcpClient extends AbstractAcpClient {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
+
+        long generation = currentLifecycleGeneration();
+        if (!compareAndSetStateIfActive(generation, State.READY, State.BUSY)) {
+            globalListener.onError(new IllegalStateException(
+                    "当前 client 状态不允许发送消息: " + state.get()));
+            return;
+        }
+
         // 记录本轮新上传的图片路径（用于 inline image block）
         Set<String> previousFiles = new HashSet<>(historyManager.getFileAbsolutePaths());
         historyManager.saveFiles(sessionId, files);
@@ -357,19 +365,29 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
-        state.set(State.BUSY);
-        executor.submit(() -> {
-            try {
-                sendPrompt(userInput, historyManager.getFileAbsolutePaths(), newImagePaths, globalListener, options);
-                state.set(State.READY);
-                // turn 结束后检查 inbox
-                checkAndDeliverInbox();
-            } catch (Exception e) {
-                logger.error("ACP send 失败", e);
-                state.set(State.ERROR);
-                globalListener.onError(e);
+        AcpResponseListener guardedListener = new LifecycleGuardedAcpResponseListener(
+                globalListener, () -> isLifecycleGenerationActive(generation));
+        try {
+            executor.submit(() -> {
+                try {
+                    sendPrompt(userInput, historyManager.getFileAbsolutePaths(), newImagePaths,
+                            guardedListener, options);
+                    if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
+                        // turn 结束且 generation 仍有效时才检查 inbox
+                        checkAndDeliverInbox();
+                    }
+                } catch (Exception e) {
+                    logger.error("ACP send 失败", e);
+                    if (setStateIfActive(generation, State.ERROR)) {
+                        guardedListener.onError(e);
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            if (setStateIfActive(generation, State.ERROR)) {
+                guardedListener.onError(e);
             }
-        });
+        }
     }
 
     public void cancel() throws IOException {
@@ -396,30 +414,37 @@ public class AcpClient extends AbstractAcpClient {
 
     @Override
     public void close() throws IOException {
-        // 先落盘未保存的上下文，确保数据持久化
-        historyManager.forceFlush(sessionId);
+        if (!beginClose()) {
+            return;
+        }
 
-        // 提交全量记忆提取到异步队列（队列会在 shutdown 时执行完）
-        if (memoryManager != null && sessionId != null) {
-            try {
-                if (historyManager.getTurnCount() > initialTurnCount) {
-                    memoryManager.submitExtractFull(workspacePath, historyManager.getFullHistory(sessionId));
-                    memoryManager.incrementSessionCount(workspacePath);
-                } else {
-                    logger.info("本次 session 无新对话，跳过记忆提取, sessionId={}", sessionId);
+        try {
+            // 先落盘未保存的上下文，确保数据持久化
+            historyManager.forceFlush(sessionId);
+
+            // 提交全量记忆提取到异步队列（队列会在 shutdown 时执行完）
+            if (memoryManager != null && sessionId != null) {
+                try {
+                    if (historyManager.getTurnCount() > initialTurnCount) {
+                        memoryManager.submitExtractFull(workspacePath, historyManager.getFullHistory(sessionId));
+                        memoryManager.incrementSessionCount(workspacePath);
+                    } else {
+                        logger.info("本次 session 无新对话，跳过记忆提取, sessionId={}", sessionId);
+                    }
+                } catch (Exception e) {
+                    logger.warn("关闭时提交记忆提取失败", e);
                 }
-            } catch (Exception e) {
-                logger.warn("关闭时提交记忆提取失败", e);
             }
-        }
 
-        // 关闭子 Agent 派发器
-        if (subAgentDispatcher != null) {
-            subAgentDispatcher.close();
-        }
+            // 关闭子 Agent 派发器
+            if (subAgentDispatcher != null) {
+                subAgentDispatcher.close();
+            }
 
-        executor.shutdownNow();
-        super.close();
+            executor.shutdownNow();
+        } finally {
+            closeAfterBegin();
+        }
     }
 
     // ==================== MCP 配置加载 ====================
@@ -485,10 +510,10 @@ public class AcpClient extends AbstractAcpClient {
 
             // 注入 TalkTo 通讯录上下文
             if (talkToContextInjector != null && robotParam != null
-                    && globalRobotRegistry != null) {
+                    && talkToRobotRegistry != null) {
                 try {
                     String talkToContext = talkToContextInjector.buildContext(
-                            robotParam.getContacts(), globalRobotRegistry, robotParam.getName());
+                            robotParam.getContacts(), talkToRobotRegistry, robotParam.getName());
                     if (!talkToContext.isEmpty()) fullTextBuilder.append(talkToContext).append("\n");
                 } catch (Exception e) {
                     logger.warn("构建 TalkTo 上下文失败，跳过", e);
@@ -851,7 +876,9 @@ public class AcpClient extends AbstractAcpClient {
 
         try {
             String robotName = robotParam != null ? robotParam.getName() : groupId;
-            String resultText = scheduleTaskManager.detectAndHandle(fullResponse, robotName);
+            ScheduleOwnerKey owner = scheduleOwnerKey != null
+                    ? scheduleOwnerKey : ScheduleOwnerKey.main(robotName);
+            String resultText = scheduleTaskManager.detectAndHandle(fullResponse, owner);
             if (resultText == null) return false;
 
             // UI 事件推送：根据 action 类型决定展开/收起
@@ -894,7 +921,7 @@ public class AcpClient extends AbstractAcpClient {
                 talkToDispatcher.detectTalkTo(fullResponse);
         if (request == null) return false;
 
-        String senderName = robotParam != null ? robotParam.getName() : groupId;
+        String senderName = talkToRoutingName();
         // 从 groupId 中提取 chatterId（groupId = sort(chatterId, acpId).join("")）
         String senderChatterId = extractChatterId();
         logger.info("检测到 talkTo 指令: {} → {}", senderName, request.getTarget());
@@ -904,7 +931,9 @@ public class AcpClient extends AbstractAcpClient {
                     robotParam != null ? robotParam.getContacts() : null;
             String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
             // 在发送方前端推送 talkTo 卡片
-            listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            if (!talkToDispatcher.managesTalkToEvents()) {
+                listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            }
             sendPrompt(resultText, null, listener);
             return true;
         } catch (Exception e) {
@@ -1012,7 +1041,7 @@ public class AcpClient extends AbstractAcpClient {
             return false;
         }
 
-        String senderName = robotParam != null ? robotParam.getName() : groupId;
+        String senderName = talkToRoutingName();
         String senderChatterId = extractChatterId();
         logger.info("检测到 talkTo 指令(buffered): {} → {}", senderName, request.getTarget());
 
@@ -1020,7 +1049,9 @@ public class AcpClient extends AbstractAcpClient {
             java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
                     robotParam != null ? robotParam.getContacts() : null;
             String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
-            listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            if (!talkToDispatcher.managesTalkToEvents()) {
+                listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            }
             sendPrompt(resultText, null, listener);
             return true;
         } catch (Exception e) {
@@ -1043,7 +1074,7 @@ public class AcpClient extends AbstractAcpClient {
             return false;
         }
 
-        String senderName = robotParam != null ? robotParam.getName() : groupId;
+        String senderName = talkToRoutingName();
         String senderChatterId = extractChatterId();
         java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
                 robotParam != null ? robotParam.getContacts() : null;
@@ -1064,7 +1095,9 @@ public class AcpClient extends AbstractAcpClient {
             logger.info("批量 talkTo 指令: {} → {}", senderName, request.getTarget());
             try {
                 String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
-                listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+                if (!talkToDispatcher.managesTalkToEvents()) {
+                    listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+                }
                 combinedResult.append(resultText).append("\n");
                 successCount++;
             } catch (Exception e) {
@@ -1091,7 +1124,7 @@ public class AcpClient extends AbstractAcpClient {
      */
     private void checkAndDeliverInbox() {
         if (talkToDispatcher == null) return;
-        String robotName = robotParam != null ? robotParam.getName() : null;
+        String robotName = talkToRoutingName();
         if (robotName == null || robotName.isEmpty()) return;
 
         TalkToMessage pending = talkToDispatcher.pollInbox(robotName);
@@ -1102,6 +1135,17 @@ public class AcpClient extends AbstractAcpClient {
             // 再发送消息，会再次进入 BUSY 状态
             send(pending.buildPrompt(), null);
         }
+    }
+
+    /**
+     * 普通 client 沿用 robotName；Team client 必须使用不可变 teamMemberId，
+     * 防止同一来源 robot 被多个 Team/member 复用时发生路由冲突。
+     */
+    private String talkToRoutingName() {
+        if (clientIdentity != null && clientIdentity.isTeam()) {
+            return clientIdentity.getTeamMemberId();
+        }
+        return robotParam != null ? robotParam.getName() : groupId;
     }
 
 

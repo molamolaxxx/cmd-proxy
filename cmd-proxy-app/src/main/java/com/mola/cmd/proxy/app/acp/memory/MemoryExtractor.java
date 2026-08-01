@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 记忆提取器，封装子 Client 的调用和结果解析。
@@ -38,6 +39,7 @@ public class MemoryExtractor {
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
     private final AcpRobotParam robotParam;
+    private final MemoryScopeLockRegistry locks;
 
     /** 单线程提取队列，串行执行所有提取任务 */
     private final ExecutorService extractQueue = new ThreadPoolExecutor(
@@ -55,9 +57,16 @@ public class MemoryExtractor {
     private final AtomicInteger lastExtractedSize = new AtomicInteger(0);
 
     public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
+        this(config, fileStore, robotParam, new MemoryScopeLockRegistry());
+    }
+
+    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore,
+                           AcpRobotParam robotParam,
+                           MemoryScopeLockRegistry locks) {
         this.config = config;
         this.fileStore = fileStore;
         this.robotParam = robotParam;
+        this.locks = locks;
     }
 
     /**
@@ -109,7 +118,14 @@ public class MemoryExtractor {
 
     private void doExtract(String workspacePath, List<ContextMessage> history) {
         String historyText = serializeHistory(history);
-        MemoryIndex existingIndex = fileStore.loadIndex(workspacePath);
+        MemoryIndex existingIndex;
+        ReentrantLock snapshotLock = locks.lockFor(fileStore, workspacePath);
+        snapshotLock.lock();
+        try {
+            existingIndex = fileStore.loadIndex(workspacePath);
+        } finally {
+            snapshotLock.unlock();
+        }
         List<String> availableSkills = scanAvailableSkills(workspacePath);
         String prompt = MemoryPromptTemplate.build(historyText, existingIndex, availableSkills);
 
@@ -127,7 +143,16 @@ public class MemoryExtractor {
                 return;
             }
 
-            fileStore.applyActions(workspacePath, actions, existingIndex, config.getMaxEntriesPerProject());
+            ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+            lock.lock();
+            try {
+                // LLM 调用期间存储可能已由其他 manager 更新，应用前必须重载。
+                MemoryIndex currentIndex = fileStore.loadIndex(workspacePath);
+                fileStore.applyActions(workspacePath, actions, currentIndex,
+                        config.getMaxEntriesPerProject());
+            } finally {
+                lock.unlock();
+            }
             logger.info("记忆提取完成, 操作数={}", actions.size());
         } catch (Exception e) {
             logger.error("记忆提取失败, workspacePath={}", workspacePath, e);

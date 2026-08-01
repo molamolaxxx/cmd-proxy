@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.acpclient.context;
 
 import com.google.gson.*;
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,6 +65,60 @@ public class ConversationHistoryManager {
     public ConversationHistoryManager(String robotName) {
         String dirName = PathUtils.sanitizePath(robotName);
         this.sessionBaseDir = SESSION_ROOT_DIR.resolve(dirName);
+    }
+
+    /**
+     * 按显式 Client Identity 隔离会话目录。
+     * <p>
+     * MAIN 继续沿用历史兼容行为：将整个 robot namespace 清洗为单目录。
+     * TEAM 使用受校验的分层 namespace，例如 {@code team/{teamId}/{teamMemberId}}。
+     */
+    public ConversationHistoryManager(AcpClientIdentity identity) {
+        Objects.requireNonNull(identity, "identity");
+        this.sessionBaseDir = resolveHistoryNamespace(identity);
+    }
+
+    static Path resolveHistoryNamespace(AcpClientIdentity identity) {
+        Path root = SESSION_ROOT_DIR.toAbsolutePath().normalize();
+        if (!identity.isTeam()) {
+            String dirName = PathUtils.sanitizePath(identity.getHistoryNamespace());
+            if (dirName.isEmpty()) {
+                throw new IllegalArgumentException("historyNamespace 清洗后不能为空");
+            }
+            return root.resolve(dirName).normalize();
+        }
+
+        String namespace = identity.getHistoryNamespace().replace('\\', '/');
+        if (namespace.startsWith("/") || namespace.matches("^[a-zA-Z]:.*")) {
+            throw new IllegalArgumentException("TEAM historyNamespace 不能是绝对路径: " + namespace);
+        }
+
+        String[] segments = namespace.split("/", -1);
+        if (segments.length < 2) {
+            throw new IllegalArgumentException("TEAM historyNamespace 必须是分层相对路径: " + namespace);
+        }
+
+        Path relative = Paths.get("");
+        for (String segment : segments) {
+            if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
+                throw new IllegalArgumentException("TEAM historyNamespace 包含非法路径段: " + namespace);
+            }
+            if (!segment.matches("[a-zA-Z0-9._-]+")) {
+                throw new IllegalArgumentException(
+                        "TEAM historyNamespace 路径段只允许字母、数字、._-: " + segment);
+            }
+            relative = relative.resolve(segment);
+        }
+
+        Path resolved = root.resolve(relative).normalize();
+        if (!resolved.startsWith(root)) {
+            throw new IllegalArgumentException("TEAM historyNamespace 越出 session 根目录: " + namespace);
+        }
+        return resolved;
+    }
+
+    Path getSessionBaseDir() {
+        return sessionBaseDir;
     }
 
     /**

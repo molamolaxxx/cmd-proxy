@@ -12,6 +12,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
+import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -64,6 +66,8 @@ public class ScheduleTaskManager {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type TASK_LIST_TYPE = new TypeToken<List<ScheduledTask>>() {}.getType();
 
+    private final Path schedulesBaseDir;
+
     private final CronParser cronParser = new CronParser(
             CronDefinitionBuilder.instanceDefinitionFor(CronType.UNIX));
 
@@ -73,10 +77,26 @@ public class ScheduleTaskManager {
     /** robotName -> 是否有任务正在执行 */
     private final Map<String, Boolean> runningByRobot = new ConcurrentHashMap<>();
 
+    /** persistencePath -> 显式 owner 身份 */
+    private final Map<String, ScheduleOwnerKey> ownerKeys = new ConcurrentHashMap<>();
+    private final Set<String> blockedTeamIds = ConcurrentHashMap.newKeySet();
+
     /** 任务触发回调 */
     private ScheduleExecutionCallback executionCallback;
+    private ScopedScheduleExecutionCallback scopedExecutionCallback;
 
     private ScheduledExecutorService scheduler;
+
+    public ScheduleTaskManager() {
+        this(Paths.get(SCHEDULES_BASE_DIR));
+    }
+
+    /**
+     * 允许测试或嵌入方显式指定持久化根目录。
+     */
+    public ScheduleTaskManager(Path schedulesBaseDir) {
+        this.schedulesBaseDir = schedulesBaseDir.toAbsolutePath().normalize();
+    }
 
     // ==================== 生命周期 ====================
 
@@ -109,6 +129,10 @@ public class ScheduleTaskManager {
         this.executionCallback = callback;
     }
 
+    public void setScopedExecutionCallback(ScopedScheduleExecutionCallback callback) {
+        this.scopedExecutionCallback = callback;
+    }
+
     // ==================== 任务管理 API ====================
 
     /**
@@ -121,8 +145,16 @@ public class ScheduleTaskManager {
      * @return 创建的任务
      */
     public ScheduledTask createTask(String robotName, String title, String prompt, ScheduleConfig config) {
+        return createTask(ScheduleOwnerKey.main(robotName), title, prompt, config);
+    }
+
+    public ScheduledTask createTask(ScheduleOwnerKey owner, String title, String prompt,
+                                    ScheduleConfig config) {
+        ensureOwnerWritable(owner);
+        String robotName = registerOwner(owner);
         ScheduledTask task = new ScheduledTask();
         task.setId(generateId(title));
+        task.setOwner(owner);
         task.setTitle(title);
         task.setPrompt(prompt);
         task.setSchedule(config);
@@ -145,6 +177,11 @@ public class ScheduleTaskManager {
      * 查询指定 robot 的所有任务。
      */
     public List<ScheduledTask> listTasks(String robotName) {
+        return listTasks(ScheduleOwnerKey.main(robotName));
+    }
+
+    public List<ScheduledTask> listTasks(ScheduleOwnerKey owner) {
+        String robotName = registerOwner(owner);
         List<ScheduledTask> tasks = tasksByRobot.get(robotName);
         if (tasks == null) return new ArrayList<>();
         synchronized (tasks) {
@@ -158,6 +195,11 @@ public class ScheduleTaskManager {
      * @return 被取消的任务，不存在则返回 null
      */
     public ScheduledTask cancelTask(String robotName, String taskId) {
+        return cancelTask(ScheduleOwnerKey.main(robotName), taskId);
+    }
+
+    public ScheduledTask cancelTask(ScheduleOwnerKey owner, String taskId) {
+        String robotName = registerOwner(owner);
         List<ScheduledTask> tasks = tasksByRobot.get(robotName);
         if (tasks == null) return null;
 
@@ -185,6 +227,15 @@ public class ScheduleTaskManager {
      */
     public ScheduledTask updateTask(String robotName, String taskId,
                                     String newTitle, String newPrompt, ScheduleConfig newSchedule) {
+        return updateTask(ScheduleOwnerKey.main(robotName), taskId,
+                newTitle, newPrompt, newSchedule);
+    }
+
+    public ScheduledTask updateTask(ScheduleOwnerKey owner, String taskId,
+                                    String newTitle, String newPrompt,
+                                    ScheduleConfig newSchedule) {
+        ensureOwnerWritable(owner);
+        String robotName = registerOwner(owner);
         List<ScheduledTask> tasks = tasksByRobot.get(robotName);
         if (tasks == null) return null;
 
@@ -267,7 +318,7 @@ public class ScheduleTaskManager {
     private void triggerExecution(String robotName, ScheduledTask task) {
         logger.info("触发定时任务执行, robot={}, id={}, title={}", robotName, task.getId(), task.getTitle());
 
-        if (executionCallback == null) {
+        if (executionCallback == null && scopedExecutionCallback == null) {
             logger.error("executionCallback 未设置，无法执行定时任务");
             onTaskCompleted(robotName, task.getId(), false);
             return;
@@ -278,7 +329,10 @@ public class ScheduleTaskManager {
             try {
                 String prompt = String.format("[定时任务触发] 任务: %s\n\n%s",
                         task.getTitle(), task.getPrompt());
-                boolean triggered = executionCallback.execute(robotName, task.getId(), prompt);
+                ScheduleOwnerKey owner = ownerFor(robotName);
+                boolean triggered = scopedExecutionCallback != null
+                        ? scopedExecutionCallback.execute(owner, task.getId(), prompt)
+                        : executionCallback.execute(robotName, task.getId(), prompt);
                 if (!triggered) {
                     // client 忙碌，回退状态，下一轮重试
                     logger.info("定时任务未执行（client 忙碌），等待下一轮, robot={}, id={}",
@@ -344,28 +398,13 @@ public class ScheduleTaskManager {
     // ==================== 持久化 ====================
 
     private void loadAllTasks() {
-        Path baseDir = Paths.get(SCHEDULES_BASE_DIR);
+        Path baseDir = schedulesBaseDir;
         if (!Files.exists(baseDir)) return;
 
-        try {
-            Files.list(baseDir)
-                    .filter(Files::isDirectory)
-                    .forEach(robotDir -> {
-                   String robotName = robotDir.getFileName().toString();
-                        Path tasksFile = robotDir.resolve(TASKS_FILE);
-                        if (Files.exists(tasksFile)) {
-                            try {
-                                String json = new String(Files.readAllBytes(tasksFile), StandardCharsets.UTF_8);
-                                List<ScheduledTask> tasks = GSON.fromJson(json, TASK_LIST_TYPE);
-                                if (tasks != null && !tasks.isEmpty()) {
-                                    tasksByRobot.put(robotName, new ArrayList<>(tasks));
-                                    logger.info("加载 robot '{}' 的定时任务, 数量={}", robotName, tasks.size());
-                                }
-                            } catch (IOException e) {
-                                logger.error("读取 tasks.json 失败, robot={}", robotName, e);
-                            }
-                        }
-                    });
+        try (java.util.stream.Stream<Path> paths = Files.walk(baseDir, 4)) {
+            paths.filter(Files::isRegularFile)
+                    .filter(path -> TASKS_FILE.equals(path.getFileName().toString()))
+                    .forEach(tasksFile -> loadTasksFile(baseDir, tasksFile));
         } catch (IOException e) {
             logger.error("扫描 schedules 目录失败", e);
         }
@@ -373,7 +412,12 @@ public class ScheduleTaskManager {
 
     private void persistTasks(String robotName) {
         List<ScheduledTask> tasks = tasksByRobot.get(robotName);
-        Path dir = Paths.get(SCHEDULES_BASE_DIR, robotName);
+        ScheduleOwnerKey owner = ownerFor(robotName);
+        Path base = schedulesBaseDir;
+        Path dir = base.resolve(owner.getPersistencePath()).normalize();
+        if (!dir.startsWith(base)) {
+            throw new IllegalArgumentException("schedule persistence path escapes base directory");
+        }
         Path file = dir.resolve(TASKS_FILE);
 
         try {
@@ -392,6 +436,116 @@ public class ScheduleTaskManager {
             Files.write(file, json.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             logger.error("持久化 tasks.json 失败, robot={}", robotName, e);
+        }
+    }
+
+    private void loadTasksFile(Path baseDir, Path tasksFile) {
+        String persistencePath = baseDir.relativize(tasksFile.getParent())
+                .toString().replace(java.io.File.separatorChar, '/');
+        try {
+            ScheduleOwnerKey directoryOwner =
+                    ScheduleOwnerKey.fromPersistencePath(persistencePath);
+            String json = new String(
+                    Files.readAllBytes(tasksFile), StandardCharsets.UTF_8);
+            List<ScheduledTask> tasks = GSON.fromJson(json, TASK_LIST_TYPE);
+            if (tasks == null || tasks.isEmpty()) {
+                return;
+            }
+            ScheduleOwnerKey owner = directoryOwner;
+            for (ScheduledTask task : tasks) {
+                if (task.getOwner() == null) {
+                    task.setOwner(directoryOwner);
+                } else {
+                    owner = task.getOwner();
+                }
+            }
+            String storageId = registerOwner(owner);
+            tasksByRobot.put(storageId, new ArrayList<>(tasks));
+            logger.info("加载 schedule owner '{}' 的定时任务, 数量={}",
+                    storageId, tasks.size());
+        } catch (Exception e) {
+            logger.error("读取 tasks.json 失败, file={}", tasksFile, e);
+        }
+    }
+
+    /**
+     * 删除一个 owner 的任务、运行态和持久文件。Team delete 使用此入口；
+     * 普通 shutdown 不调用，因而不会误删持久任务。
+     */
+    public void cleanupOwner(ScheduleOwnerKey owner) {
+        String storageId = registerOwner(owner);
+        tasksByRobot.remove(storageId);
+        runningByRobot.remove(storageId);
+        ownerKeys.remove(storageId);
+        Path base = schedulesBaseDir;
+        Path dir = base.resolve(owner.getPersistencePath()).normalize();
+        if (!dir.startsWith(base)) {
+            throw new IllegalArgumentException("schedule cleanup path escapes base directory");
+        }
+        try {
+            Files.deleteIfExists(dir.resolve(TASKS_FILE));
+            Files.deleteIfExists(dir);
+            if (owner.isTeam()) {
+                Path teamDir = dir.getParent();
+                if (teamDir != null) Files.deleteIfExists(teamDir);
+                Path teamRoot = teamDir == null ? null : teamDir.getParent();
+                if (teamRoot != null && !teamRoot.equals(base)) {
+                    Files.deleteIfExists(teamRoot);
+                }
+            }
+        } catch (java.nio.file.DirectoryNotEmptyException ignored) {
+            // 同 Team 的其他 member 或其他 Team 仍有任务，父目录应保留。
+        } catch (IOException e) {
+            logger.warn("清理 schedule owner 失败, owner={}", owner, e);
+        }
+    }
+
+    public void cleanupTeam(String teamId) {
+        blockedTeamIds.add(teamId);
+        List<ScheduleOwnerKey> owners = new ArrayList<>(ownerKeys.values());
+        for (ScheduleOwnerKey owner : owners) {
+            if (owner.isTeam() && teamId.equals(owner.getTeamId())) {
+                cleanupOwner(owner);
+            }
+        }
+    }
+
+    public boolean isTeamBlocked(String teamId) {
+        return blockedTeamIds.contains(teamId);
+    }
+
+    public int teamOwnerCount() {
+        int count = 0;
+        for (ScheduleOwnerKey owner : ownerKeys.values()) {
+            if (owner.isTeam()) count++;
+        }
+        return count;
+    }
+
+    public int teamOwnerCount(String teamId) {
+        int count = 0;
+        for (ScheduleOwnerKey owner : ownerKeys.values()) {
+            if (owner.isTeam() && teamId.equals(owner.getTeamId())) count++;
+        }
+        return count;
+    }
+
+    public void cleanupOrphanTeams(Set<String> activeTeamIds) {
+        Set<String> active = activeTeamIds == null
+                ? java.util.Collections.emptySet() : activeTeamIds;
+        List<ScheduleOwnerKey> owners = new ArrayList<>(ownerKeys.values());
+        for (ScheduleOwnerKey owner : owners) {
+            if (owner.isTeam() && !active.contains(owner.getTeamId())) {
+                cleanupTeam(owner.getTeamId());
+            }
+        }
+    }
+
+    private void ensureOwnerWritable(ScheduleOwnerKey owner) {
+        if (owner != null && owner.isTeam()
+                && blockedTeamIds.contains(owner.getTeamId())) {
+            throw new IllegalStateException(
+                    "Team is DELETING; schedule writes are blocked");
         }
     }
 
@@ -445,6 +599,29 @@ public class ScheduleTaskManager {
     }
 
     // ==================== 工具方法 ====================
+
+    public void register(ScheduleOwnerKey owner) {
+        registerOwner(owner);
+    }
+
+    private String registerOwner(ScheduleOwnerKey owner) {
+        if (owner == null) {
+            throw new IllegalArgumentException("schedule owner must not be null");
+        }
+        String storageId = owner.getPersistencePath();
+        ownerKeys.put(storageId, owner);
+        return storageId;
+    }
+
+    private ScheduleOwnerKey ownerFor(String storageId) {
+        ScheduleOwnerKey owner = ownerKeys.get(storageId);
+        if (owner != null) {
+            return owner;
+        }
+        owner = ScheduleOwnerKey.fromPersistencePath(storageId);
+        ownerKeys.putIfAbsent(storageId, owner);
+        return owner;
+    }
 
     /**
      * 生成任务 ID：t{时间戳秒数}_{title-slug}
@@ -542,7 +719,11 @@ public class ScheduleTaskManager {
      * 格式化 list 操作的返回文本。
      */
     public String formatTaskList(String robotName) {
-        List<ScheduledTask> tasks = listTasks(robotName);
+        return formatTaskList(ScheduleOwnerKey.main(robotName));
+    }
+
+    public String formatTaskList(ScheduleOwnerKey owner) {
+        List<ScheduledTask> tasks = listTasks(owner);
         if (tasks.isEmpty()) {
             return "[定时任务列表]\n当前没有定时任务。";
         }
@@ -612,6 +793,11 @@ public class ScheduleTaskManager {
         boolean execute(String robotName, String taskId, String prompt);
     }
 
+    @FunctionalInterface
+    public interface ScopedScheduleExecutionCallback {
+        boolean execute(ScheduleOwnerKey owner, String taskId, String prompt);
+    }
+
     // ==================== JSON 指令处理（供 AcpClient 调用） ====================
 
     /**
@@ -625,9 +811,13 @@ public class ScheduleTaskManager {
      * @return 操作结果文本（供注入回 Agent），未检测到指令时返回 null
      */
     public String detectAndHandle(String fullResponse, String robotName) {
+        return detectAndHandle(fullResponse, ScheduleOwnerKey.main(robotName));
+    }
+
+    public String detectAndHandle(String fullResponse, ScheduleOwnerKey owner) {
         String actionJson = extractActionJson(fullResponse);
         if (actionJson == null) return null;
-        return handleAction(actionJson, robotName);
+        return handleAction(actionJson, owner);
     }
 
     /**
@@ -641,20 +831,24 @@ public class ScheduleTaskManager {
      * @return 操作结果文本，action 不匹配时返回 null
      */
     public String handleAction(String actionJson, String robotName) {
+        return handleAction(actionJson, ScheduleOwnerKey.main(robotName));
+    }
+
+    public String handleAction(String actionJson, ScheduleOwnerKey owner) {
         JsonObject json = JsonParser.parseString(actionJson).getAsJsonObject();
         String action = json.get("action").getAsString();
 
         switch (action) {
             case "schedule_task":
-                return handleCreate(json, robotName);
+                return handleCreate(json, owner);
             case "manage_schedule":
-                return handleManage(json, robotName);
+                return handleManage(json, owner);
             default:
                 return null;
         }
     }
 
-    private String handleCreate(JsonObject json, String robotName) {
+    private String handleCreate(JsonObject json, ScheduleOwnerKey owner) {
         JsonArray tasks = json.getAsJsonArray("tasks");
         StringBuilder result = new StringBuilder();
 
@@ -668,23 +862,23 @@ public class ScheduleTaskManager {
                     scheduleJson.get("type").getAsString(),
                     scheduleJson.get("expr").getAsString());
 
-            ScheduledTask created = createTask(robotName, title, prompt, config);
+            ScheduledTask created = createTask(owner, title, prompt, config);
             result.append(formatOperationResult("create", created));
             if (i < tasks.size() - 1) result.append("\n");
         }
         return result.toString();
     }
 
-    private String handleManage(JsonObject json, String robotName) {
+    private String handleManage(JsonObject json, ScheduleOwnerKey owner) {
         String operation = json.get("operation").getAsString();
 
         switch (operation) {
             case "list":
-                return formatTaskList(robotName);
+                return formatTaskList(owner);
 
             case "cancel": {
                 String taskId = json.get("taskId").getAsString();
-                ScheduledTask cancelled = cancelTask(robotName, taskId);
+                ScheduledTask cancelled = cancelTask(owner, taskId);
                 return formatOperationResult("cancel", cancelled);
             }
 
@@ -704,7 +898,7 @@ public class ScheduleTaskManager {
                             schedJson.get("expr").getAsString());
                 }
 
-                ScheduledTask updated = updateTask(robotName, taskId, newTitle, newPrompt, newSchedule);
+                ScheduledTask updated = updateTask(owner, taskId, newTitle, newPrompt, newSchedule);
                 return formatOperationResult("update", updated);
             }
 

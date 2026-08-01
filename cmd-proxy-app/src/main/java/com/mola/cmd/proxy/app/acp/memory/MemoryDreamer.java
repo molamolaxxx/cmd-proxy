@@ -12,6 +12,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 记忆整理器（Memory Dream），负责定期整合、去重、清理已有记忆。
@@ -29,6 +30,7 @@ public class MemoryDreamer {
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
     private final AcpRobotParam robotParam;
+    private final MemoryScopeLockRegistry locks;
 
     private final ExecutorService dreamQueue = new ThreadPoolExecutor(
             1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -42,9 +44,16 @@ public class MemoryDreamer {
     );
 
     public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
+        this(config, fileStore, robotParam, new MemoryScopeLockRegistry());
+    }
+
+    public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore,
+                         AcpRobotParam robotParam,
+                         MemoryScopeLockRegistry locks) {
         this.config = config;
         this.fileStore = fileStore;
         this.robotParam = robotParam;
+        this.locks = locks;
     }
 
     /**
@@ -52,17 +61,19 @@ public class MemoryDreamer {
      */
     public boolean shouldDream(String workspacePath) {
         if (!config.isDreamEnabled()) return false;
-
-        DreamState state = fileStore.loadDreamState(workspacePath);
-
-        boolean timeOk = state.getHoursSinceLastDream() >= config.getDreamMinHours();
-        boolean sessionsOk = state.getSessionsSinceLastDream() >= config.getDreamMinSessions();
-
-        // 至少有 3 条记忆才值得整理
-        MemoryIndex index = fileStore.loadIndex(workspacePath);
-        boolean hasEnough = index.getMemories().size() >= 3;
-
-        return timeOk && sessionsOk && hasEnough;
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
+        try {
+            DreamState state = fileStore.loadDreamState(workspacePath);
+            boolean timeOk =
+                    state.getHoursSinceLastDream() >= config.getDreamMinHours();
+            boolean sessionsOk =
+                    state.getSessionsSinceLastDream() >= config.getDreamMinSessions();
+            MemoryIndex index = fileStore.loadIndex(workspacePath);
+            return timeOk && sessionsOk && index.getMemories().size() >= 3;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -82,12 +93,21 @@ public class MemoryDreamer {
 
         try {
             // Phase 1: Orientation — 读取全部记忆
-            MemoryIndex index = fileStore.loadIndex(workspacePath);
+            MemoryIndex index;
+            Map<String, String> details;
+            ReentrantLock snapshotLock =
+                    locks.lockFor(fileStore, workspacePath);
+            snapshotLock.lock();
+            try {
+                index = fileStore.loadIndex(workspacePath);
+                details = fileStore.loadAllDetails(workspacePath, index);
+            } finally {
+                snapshotLock.unlock();
+            }
             if (index.getMemories().isEmpty()) {
                 logger.info("无记忆可整理");
                 return;
             }
-            Map<String, String> details = fileStore.loadAllDetails(workspacePath, index);
 
             // Phase 2: Analysis — 构建 prompt 并调用子 Client
             String prompt = DreamPromptTemplate.build(index, details);
@@ -107,22 +127,37 @@ public class MemoryDreamer {
             List<DreamAction> actions = parseDreamActions(response);
             if (actions.isEmpty()) {
                 logger.info("记忆无需整理");
-                saveDreamState(workspacePath, 0, 0, 0, System.currentTimeMillis() - startTime);
+                ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+                lock.lock();
+                try {
+                    saveDreamState(workspacePath, 0, 0, 0,
+                            System.currentTimeMillis() - startTime);
+                } finally {
+                    lock.unlock();
+                }
                 return;
             }
 
-            // Phase 4: Apply — 执行操作
-            int[] result = applyDreamActions(workspacePath, actions, index);
-
-            // Phase 5: 清理孤立文件 — 将未被索引引用的明细文件归档
-            int orphaned = fileStore.archiveOrphanedDetails(workspacePath, index);
-            if (orphaned > 0) {
-                logger.info("归档孤立明细文件 {} 个", orphaned);
+            int[] result;
+            long duration;
+            ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+            lock.lock();
+            try {
+                // 分析期间存储可能变化；在同一锁内重载、应用、归档、保存状态。
+                MemoryIndex currentIndex = fileStore.loadIndex(workspacePath);
+                result = applyDreamActions(
+                        workspacePath, actions, currentIndex);
+                int orphaned = fileStore.archiveOrphanedDetails(
+                        workspacePath, currentIndex);
+                if (orphaned > 0) {
+                    logger.info("归档孤立明细文件 {} 个", orphaned);
+                }
+                duration = System.currentTimeMillis() - startTime;
+                saveDreamState(workspacePath, result[0], result[1],
+                        result[2], duration);
+            } finally {
+                lock.unlock();
             }
-
-            long duration = System.currentTimeMillis() - startTime;
-
-            saveDreamState(workspacePath, result[0], result[1], result[2], duration);
             logger.info("记忆整理完成: merged={}, removed={}, updated={}, 耗时={}ms",
                     result[0], result[1], result[2], duration);
 

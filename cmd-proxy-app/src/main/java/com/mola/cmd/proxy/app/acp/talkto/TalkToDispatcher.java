@@ -65,6 +65,24 @@ public class TalkToDispatcher {
         this.robotToGroupId = robotToGroupId;
     }
 
+    /**
+     * Team 等严格隔离实现的扩展构造器。子类必须覆盖 deliver/inbox 方法，
+     * 这里的普通 registry 仅用于满足基类不可空字段，不参与实际路由。
+     */
+    protected TalkToDispatcher() {
+        this(java.util.Collections.emptyMap(), AcpClientRegistry.getInstance(),
+                java.util.Collections.emptyMap());
+    }
+
+    /**
+     * 是否由 dispatcher 自己发布完整的发送/排队/拒绝/接收事件。
+     * 普通模式继续由 AcpClient 发布兼容事件；Team dispatcher 返回 true，
+     * 避免发送事件被重复或将拒绝误报为发送成功。
+     */
+    public boolean managesTalkToEvents() {
+        return false;
+    }
+
     // ==================== 指令检测 ====================
 
     /**

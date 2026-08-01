@@ -16,6 +16,7 @@ import com.mola.rpc.core.proto.RpcInvoker
 import com.mola.rpc.core.system.ReverseInvokeHelper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.util.concurrent.ConcurrentHashMap
 
 
 /**
@@ -32,7 +33,8 @@ object CmdReceiver {
 
     private val callbackConsumerMapByGroup: MutableMap<String, CmdProxyCallbackService> = mutableMapOf()
 
-    private val receiverFuncMap: MutableMap<String, (param: CmdInvokeParam) -> Map<String, String?>> = mutableMapOf()
+    private val receiverFuncMap:
+        MutableMap<String, (param: CmdInvokeParam) -> Map<String, String?>> = ConcurrentHashMap()
 
     private fun init(serverPort: Int) {
         val protoRpcConfigFactory = ProtoRpcConfigFactory.fetch()
@@ -115,22 +117,20 @@ object CmdReceiver {
     fun register(cmdName: String, cmdGroup: String, description: String,
                  receiver: (param: CmdInvokeParam) -> Map<String, String?>) {
         start(cmdName, cmdGroup, description)
-        if (receiverFuncMap.containsKey("$cmdName$cmdGroup")) {
-            log.warn("registerCallback already contains, key = $cmdName$cmdGroup")
-            return
+        val key = "$cmdName$cmdGroup"
+        if (receiverFuncMap.put(key, receiver) != null) {
+            log.info("registerCallback replaced, key = {}", key)
         }
-        receiverFuncMap["$cmdName$cmdGroup"] = receiver
     }
 
     fun register(cmdName: String, cmdGroupList: List<String>, description: String,
                  receiver: (param: CmdInvokeParam) -> Map<String, String?>) {
         for (cmdGroup in cmdGroupList) {
             start(cmdName, cmdGroup, description)
-            if (receiverFuncMap.containsKey("$cmdName$cmdGroup")) {
-                log.warn("registerCallback already contains, key = $cmdName$cmdGroup")
-                continue
+            val key = "$cmdName$cmdGroup"
+            if (receiverFuncMap.put(key, receiver) != null) {
+                log.info("registerCallback replaced, key = {}", key)
             }
-            receiverFuncMap["$cmdName$cmdGroup"] = receiver
         }
     }
 
