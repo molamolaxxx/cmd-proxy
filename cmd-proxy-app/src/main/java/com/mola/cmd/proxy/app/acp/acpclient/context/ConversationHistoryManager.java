@@ -11,9 +11,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * 会话上下文管理器，负责内存中的消息收集、磁盘落盘与加载。
@@ -43,6 +45,7 @@ public class ConversationHistoryManager {
     private static final Path SESSION_ROOT_DIR =
             com.mola.cmd.proxy.app.utils.CmdProxyHome.resolve("session");
     private static final Gson PRETTY_GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final String MEMORY_PENDING_FILE = "memory_extract_pending.json";
 
     /** 按 workspacePath 隔离的 session 基础目录 */
     private final Path sessionBaseDir;
@@ -74,12 +77,23 @@ public class ConversationHistoryManager {
      * TEAM 使用受校验的分层 namespace，例如 {@code team/{teamId}/{teamMemberId}}。
      */
     public ConversationHistoryManager(AcpClientIdentity identity) {
+        this(identity, SESSION_ROOT_DIR);
+    }
+
+    /** 使用显式 session 根目录，供隔离环境和测试使用。 */
+    public ConversationHistoryManager(AcpClientIdentity identity, Path sessionRootDir) {
         Objects.requireNonNull(identity, "identity");
-        this.sessionBaseDir = resolveHistoryNamespace(identity);
+        this.sessionBaseDir = resolveHistoryNamespace(identity, sessionRootDir);
     }
 
     static Path resolveHistoryNamespace(AcpClientIdentity identity) {
-        Path root = SESSION_ROOT_DIR.toAbsolutePath().normalize();
+        return resolveHistoryNamespace(identity, SESSION_ROOT_DIR);
+    }
+
+    private static Path resolveHistoryNamespace(AcpClientIdentity identity,
+                                                Path sessionRootDir) {
+        Path root = Objects.requireNonNull(sessionRootDir, "sessionRootDir")
+                .toAbsolutePath().normalize();
         if (!identity.isTeam()) {
             String dirName = PathUtils.sanitizePath(identity.getHistoryNamespace());
             if (dirName.isEmpty()) {
@@ -303,6 +317,142 @@ public class ConversationHistoryManager {
     public void forceFlush(String sessionId) {
         if (!currentTurn.isEmpty()) {
             flushTurn(sessionId);
+        }
+    }
+
+    /**
+     * 持久化某个 session 尚待执行的全量记忆提取。
+     *
+     * <p>标记与 turn 文件放在同一 session 目录，不复制对话正文。重复写入会用更大的
+     * turnCount 覆盖旧值，因而进程重启和重复 close 都是幂等的。</p>
+     */
+    public boolean markMemoryExtractionPending(String sessionId, int turnCount) {
+        if (sessionId == null || sessionId.trim().isEmpty() || turnCount <= 0) {
+            return false;
+        }
+        Path sessionDir = sessionBaseDir.resolve(sessionId);
+        Path marker = sessionDir.resolve(MEMORY_PENDING_FILE);
+        Path temporary = sessionDir.resolve(MEMORY_PENDING_FILE + ".tmp");
+        try {
+            Files.createDirectories(sessionDir);
+            int effectiveTurnCount = turnCount;
+            PendingMemoryExtraction existing = readPendingMarker(marker, sessionId);
+            if (existing != null) {
+                effectiveTurnCount = Math.max(effectiveTurnCount, existing.getTurnCount());
+            }
+            JsonObject json = new JsonObject();
+            json.addProperty("sessionId", sessionId);
+            json.addProperty("turnCount", effectiveTurnCount);
+            json.addProperty("updatedAt", System.currentTimeMillis());
+            Files.write(temporary,
+                    PRETTY_GSON.toJson(json).getBytes(StandardCharsets.UTF_8));
+            try {
+                Files.move(temporary, marker, StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temporary, marker, StandardCopyOption.REPLACE_EXISTING);
+            }
+            logger.info("已记录待恢复记忆提取, sessionId={}, turnCount={}",
+                    sessionId, effectiveTurnCount);
+            return true;
+        } catch (Exception e) {
+            logger.warn("记录待恢复记忆提取失败, sessionId={}", sessionId, e);
+            try {
+                Files.deleteIfExists(temporary);
+            } catch (IOException ignored) {
+            }
+            return false;
+        }
+    }
+
+    /** 列出当前 history namespace 中全部待恢复的记忆提取任务。 */
+    public List<PendingMemoryExtraction> listPendingMemoryExtractions() {
+        if (!Files.isDirectory(sessionBaseDir)) {
+            return Collections.emptyList();
+        }
+        List<PendingMemoryExtraction> result = new ArrayList<>();
+        try (Stream<Path> directories = Files.list(sessionBaseDir)) {
+            directories.filter(Files::isDirectory).forEach(sessionDir -> {
+                String sessionId = sessionDir.getFileName().toString();
+                PendingMemoryExtraction pending = readPendingMarker(
+                        sessionDir.resolve(MEMORY_PENDING_FILE), sessionId);
+                if (pending != null) {
+                    result.add(pending);
+                }
+            });
+        } catch (IOException e) {
+            logger.warn("遍历待恢复记忆提取失败: {}", sessionBaseDir, e);
+        }
+        result.sort(Comparator.comparing(PendingMemoryExtraction::getSessionId));
+        return Collections.unmodifiableList(result);
+    }
+
+    /**
+     * 在对应版本的提取真正成功后清除 pending 标记。
+     * 若关机期间已写入更新的 turnCount，则旧任务不能误删新标记。
+     */
+    public boolean clearMemoryExtractionPending(String sessionId,
+                                                int completedTurnCount) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return false;
+        }
+        Path marker = sessionBaseDir.resolve(sessionId).resolve(MEMORY_PENDING_FILE);
+        PendingMemoryExtraction current = readPendingMarker(marker, sessionId);
+        if (current == null || current.getTurnCount() > completedTurnCount) {
+            return false;
+        }
+        try {
+            boolean deleted = Files.deleteIfExists(marker);
+            if (deleted) {
+                logger.info("待恢复记忆提取已完成, sessionId={}, turnCount={}",
+                        sessionId, completedTurnCount);
+            }
+            return deleted;
+        } catch (IOException e) {
+            logger.warn("清除待恢复记忆提取失败, sessionId={}", sessionId, e);
+            return false;
+        }
+    }
+
+    private PendingMemoryExtraction readPendingMarker(Path marker,
+                                                      String fallbackSessionId) {
+        if (!Files.isRegularFile(marker)) {
+            return null;
+        }
+        try {
+            JsonObject json = JsonParser.parseString(new String(
+                    Files.readAllBytes(marker), StandardCharsets.UTF_8)).getAsJsonObject();
+            String sessionId = json.has("sessionId")
+                    ? json.get("sessionId").getAsString() : fallbackSessionId;
+            int pendingTurnCount = json.has("turnCount")
+                    ? json.get("turnCount").getAsInt() : 0;
+            if (sessionId == null || sessionId.trim().isEmpty()
+                    || pendingTurnCount <= 0) {
+                logger.warn("忽略无效的待恢复记忆提取标记: {}", marker);
+                return null;
+            }
+            return new PendingMemoryExtraction(sessionId, pendingTurnCount);
+        } catch (Exception e) {
+            logger.warn("读取待恢复记忆提取标记失败: {}", marker, e);
+            return null;
+        }
+    }
+
+    public static final class PendingMemoryExtraction {
+        private final String sessionId;
+        private final int turnCount;
+
+        public PendingMemoryExtraction(String sessionId, int turnCount) {
+            this.sessionId = sessionId;
+            this.turnCount = turnCount;
+        }
+
+        public String getSessionId() {
+            return sessionId;
+        }
+
+        public int getTurnCount() {
+            return turnCount;
         }
     }
 

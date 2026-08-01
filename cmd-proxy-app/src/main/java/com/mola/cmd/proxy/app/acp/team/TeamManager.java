@@ -7,54 +7,27 @@ import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
-import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
-import com.mola.cmd.proxy.app.acp.team.model.TeamError;
-import com.mola.cmd.proxy.app.acp.team.model.TeamErrorCode;
-import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
-import com.mola.cmd.proxy.app.acp.team.model.TeamMetricsSnapshot;
-import com.mola.cmd.proxy.app.acp.team.model.TeamOperationRecord;
-import com.mola.cmd.proxy.app.acp.team.model.TeamResourceSnapshot;
-import com.mola.cmd.proxy.app.acp.team.model.TeamState;
-import com.mola.cmd.proxy.app.acp.team.model.TeamTombstone;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventSink;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventType;
-import com.mola.cmd.proxy.app.acp.team.protocol.TeamCommandResult;
-import com.mola.cmd.proxy.app.acp.team.protocol.TeamCreateCommand;
-import com.mola.cmd.proxy.app.acp.team.protocol.TeamDeleteCommand;
-import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCreateSpec;
-import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCommand;
-import com.mola.cmd.proxy.app.acp.team.protocol.TeamQuery;
+import com.mola.cmd.proxy.app.acp.team.model.*;
+import com.mola.cmd.proxy.app.acp.team.protocol.*;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToDispatcher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
 import java.util.function.BiPredicate;
+import java.util.function.Consumer;
 import java.util.function.IntSupplier;
 import java.util.function.ToIntFunction;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Team 权威状态的最小生命周期容器。
@@ -966,6 +939,15 @@ public final class TeamManager implements AutoCloseable {
 
     @Override
     public void close() {
+        close(false);
+    }
+
+    /** 全局 stop 专用：Team 会话的记忆提取延迟到下一次启动恢复。 */
+    public void closeForShutdown() {
+        close(true);
+    }
+
+    private void close(boolean deferMemoryExtraction) {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
@@ -977,7 +959,11 @@ public final class TeamManager implements AutoCloseable {
             dispatcher.close();
         }
         talkToDispatchers.clear();
-        clientRegistry.closeAll();
+        if (deferMemoryExtraction) {
+            clientRegistry.closeAllForShutdown();
+        } else {
+            clientRegistry.closeAll();
+        }
         if (startupCoordinator != null) {
             startupCoordinator.close();
         }

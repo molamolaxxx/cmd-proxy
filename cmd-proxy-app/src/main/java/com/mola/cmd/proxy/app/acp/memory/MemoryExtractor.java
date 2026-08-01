@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * 记忆提取器，封装子 Client 的调用和结果解析。
@@ -89,12 +90,28 @@ public class MemoryExtractor {
      * session 结束时使用，确保不遗漏。
      */
     public void submitExtractFull(String workspacePath, List<ContextMessage> history) {
+        submitExtractFull(workspacePath, history, null, null);
+    }
+
+    public void submitExtractFull(String workspacePath, List<ContextMessage> history,
+                                  Runnable onSuccess,
+                                  Consumer<Throwable> onFailure) {
         if (history == null || history.isEmpty()) return;
         List<ContextMessage> snapshot = new ArrayList<>(history);
         try {
-            extractQueue.submit(() -> doFullExtract(workspacePath, snapshot));
+            extractQueue.submit(() -> {
+                try {
+                    if (!doFullExtract(workspacePath, snapshot)) {
+                        throw new IllegalStateException("记忆提取执行失败");
+                    }
+                    if (onSuccess != null) onSuccess.run();
+                } catch (Exception error) {
+                    if (onFailure != null) onFailure.accept(error);
+                }
+            });
         } catch (RejectedExecutionException e) {
             logger.warn("提取队列已满或已关闭，跳过本次全量提取");
+            if (onFailure != null) onFailure.accept(e);
         }
     }
 
@@ -106,17 +123,21 @@ public class MemoryExtractor {
         }
         List<ContextMessage> toExtract = history.subList(lastSize, history.size());
         logger.info("增量提取, 新消息数={}, 总消息数={}", toExtract.size(), history.size());
-        doExtract(workspacePath, toExtract);
-        lastExtractedSize.set(history.size());
+        if (doExtract(workspacePath, toExtract)) {
+            lastExtractedSize.set(history.size());
+        }
     }
 
-    private void doFullExtract(String workspacePath, List<ContextMessage> history) {
+    private boolean doFullExtract(String workspacePath, List<ContextMessage> history) {
         logger.info("全量提取, 消息数={}", history.size());
-        doExtract(workspacePath, history);
-        lastExtractedSize.set(history.size());
+        boolean success = doExtract(workspacePath, history);
+        if (success) {
+            lastExtractedSize.set(history.size());
+        }
+        return success;
     }
 
-    private void doExtract(String workspacePath, List<ContextMessage> history) {
+    private boolean doExtract(String workspacePath, List<ContextMessage> history) {
         String historyText = serializeHistory(history);
         MemoryIndex existingIndex;
         ReentrantLock snapshotLock = locks.lockFor(fileStore, workspacePath);
@@ -140,7 +161,7 @@ public class MemoryExtractor {
             List<MemoryAction> actions = parseActions(response);
             if (actions.isEmpty()) {
                 logger.info("无需保存的记忆");
-                return;
+                return true;
             }
 
             ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
@@ -154,8 +175,10 @@ public class MemoryExtractor {
                 lock.unlock();
             }
             logger.info("记忆提取完成, 操作数={}", actions.size());
+            return true;
         } catch (Exception e) {
             logger.error("记忆提取失败, workspacePath={}", workspacePath, e);
+            return false;
         }
     }
 
@@ -294,6 +317,11 @@ public class MemoryExtractor {
             extractQueue.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    /** 立即取消排队和正在等待的记忆模型调用，不参与进程 stop 的等待。 */
+    public void shutdownNow() {
+        extractQueue.shutdownNow();
     }
 
     // ==================== Skill 扫描 ====================

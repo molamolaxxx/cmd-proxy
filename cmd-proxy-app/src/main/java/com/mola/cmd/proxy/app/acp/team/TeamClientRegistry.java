@@ -51,10 +51,20 @@ public final class TeamClientRegistry {
     }
 
     public List<IOException> closeAll() {
+        return closeAll(false);
+    }
+
+    /** 全局 stop 专用：Team client 只落盘 pending，不提交新的记忆模型调用。 */
+    public List<IOException> closeAllForShutdown() {
+        return closeAll(true);
+    }
+
+    private List<IOException> closeAll(boolean deferMemoryExtraction) {
         List<IOException> errors = new ArrayList<>();
         for (Map.Entry<TeamClientKey, AcpClient> entry : clients.entrySet()) {
             if (clients.remove(entry.getKey(), entry.getValue())) {
-                close(entry.getKey(), entry.getValue(), errors);
+                close(entry.getKey(), entry.getValue(), errors,
+                        deferMemoryExtraction);
             }
         }
         return Collections.unmodifiableList(errors);
@@ -83,8 +93,17 @@ public final class TeamClientRegistry {
     }
 
     private void close(TeamClientKey key, AcpClient client, List<IOException> errors) {
+        close(key, client, errors, false);
+    }
+
+    private void close(TeamClientKey key, AcpClient client, List<IOException> errors,
+                       boolean deferMemoryExtraction) {
         try {
-            client.close();
+            if (deferMemoryExtraction) {
+                client.closeForShutdown();
+            } else {
+                client.close();
+            }
         } catch (IOException e) {
             errors.add(e);
             logger.warn("关闭 Team AcpClient 失败, key={}", key, e);

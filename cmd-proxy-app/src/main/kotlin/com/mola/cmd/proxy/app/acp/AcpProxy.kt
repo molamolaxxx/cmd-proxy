@@ -12,6 +12,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter
 import com.mola.cmd.proxy.app.acp.common.PathUtils
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager
 import com.mola.cmd.proxy.app.acp.memory.MemoryManagerRegistry
+import com.mola.cmd.proxy.app.acp.memory.PendingMemoryExtractionRecovery
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher
@@ -54,6 +55,9 @@ object AcpProxy {
 
     /** 普通、Team 与 sub-agent 共用的 manager/存储锁注册表。 */
     private val memoryManagers = MemoryManagerRegistry()
+
+    /** 防止共享 history namespace 的多个 client 在同一代际重复恢复同一 pending。 */
+    private val pendingMemoryRecoveryClaims = ConcurrentHashMap<String, String>()
 
     /** groupId -> AbilityReflectionService */
     private val abilityServices = ConcurrentHashMap<String, AbilityReflectionService>()
@@ -976,6 +980,21 @@ object AcpProxy {
         val mgr = memoryManagers.getOrCreate(groupId, memCfg, robot)
         client.setMemoryManager(mgr)
         setupTurnCallback(client, memCfg, mgr)
+        recoverPendingMemoryExtractions(client, mgr)
+    }
+
+    /**
+     * Client 已启动且 MemoryManager 已注入后，异步补偿上次 stop 留下的全量提取。
+     * 提交本身不阻塞 client READY；只有模型任务真正成功后才清除 pending。
+     */
+    private fun recoverPendingMemoryExtractions(client: AcpClient, manager: MemoryManager) {
+        PendingMemoryExtractionRecovery.recover(
+            client.historyManager,
+            client.clientIdentity.historyNamespace,
+            client.workspacePath,
+            manager,
+            pendingMemoryRecoveryClaims
+        )
     }
 
     /**
@@ -1266,15 +1285,16 @@ object AcpProxy {
         }
 
         // 关闭所有 AcpClient
-        registry.closeAll()
+        registry.closeAllForShutdown()
 
         // Team client 使用独立 registry，不能混入普通 registry 的 closeAll。
-        teamManager?.close()
+        teamManager?.closeForShutdown()
         teamManager = null
         teamCommandHandler = null
 
         // 清理内部状态
-        memoryManagers.shutdownAll()
+        memoryManagers.shutdownAllNow()
+        pendingMemoryRecoveryClaims.clear()
         abilityServices.clear()
         globalRobotRegistry.clear()
         globalGroupRobotRegistry.clear()

@@ -1,5 +1,7 @@
 package com.mola.cmd.proxy.app.acp.team.talkto;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.common.DirectJsonOutputHelper;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector;
@@ -9,15 +11,7 @@ import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import java.util.LinkedHashMap;
+import java.util.*;
 
 /**
  * 只暴露当前 Team 其他 member 的临时通讯录。
@@ -52,8 +46,8 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
         sb.append("你处于 Fast Team「").append(team.getName()).append("」中。");
         sb.append("talk_to 只能发送给下列同队成员，并且 target 必须使用不可变 teamMemberId。");
         sb.append("禁止使用来源 robotName、displayName、acpClientId、chatterId:robotName 或未列出的名称路由。\n");
-        sb.append("消息为异步投递：目标忙碌时进入该成员的 Team 专属 inbox；");
-        sb.append("已发送或已排队只表示路由层接收，不表示目标已处理。\n\n");
+        sb.append("消息为异步投递：目标忙碌时进入该成员的 Team 专属 inbox。\n\n");
+        appendRuntimeConstraints(sb);
         sb.append("同队联系人卡片（JSON 中 target 是唯一可用于路由的值）：\n");
         for (TeamContactRef contact : contacts) {
             Map<String, String> card = new LinkedHashMap<>();

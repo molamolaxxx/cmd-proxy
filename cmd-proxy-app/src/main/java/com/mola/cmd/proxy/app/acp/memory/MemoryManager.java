@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * 记忆系统门面类，主 Client 与记忆模块的唯一交互入口。
@@ -69,9 +70,14 @@ public class MemoryManager implements MemoryManagerBridge {
     }
 
     @Override
-    public void submitExtractFull(String workspacePath, List<ContextMessage> history) {
-        if (!config.isWriteEnabled() || history == null || history.isEmpty()) return;
-        extractor.submitExtractFull(workspacePath, history);
+    public void submitExtractFull(String workspacePath, List<ContextMessage> history,
+                                  Runnable onSuccess,
+                                  Consumer<Throwable> onFailure) {
+        if (!config.isWriteEnabled() || history == null || history.isEmpty()) {
+            if (onSuccess != null) onSuccess.run();
+            return;
+        }
+        extractor.submitExtractFull(workspacePath, history, onSuccess, onFailure);
     }
 
     @Override
@@ -223,5 +229,11 @@ public class MemoryManager implements MemoryManagerBridge {
     public void shutdown() {
         extractor.shutdown();
         dreamer.shutdown();
+    }
+
+    /** 进程 stop 使用：取消队列，不等待任何模型调用完成。 */
+    public void shutdownNow() {
+        extractor.shutdownNow();
+        dreamer.shutdownNow();
     }
 }

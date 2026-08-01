@@ -49,13 +49,26 @@ public final class MemoryManagerRegistry {
     }
 
     public void shutdownAll() {
+        shutdownAll(false);
+    }
+
+    /** 进程 stop 使用：保留 pending 标记并立即取消模型队列。 */
+    public void shutdownAllNow() {
+        shutdownAll(true);
+    }
+
+    private void shutdownAll(boolean immediate) {
         LinkedHashSet<MemoryManager> unique =
                 new LinkedHashSet<>(new ArrayList<>(managers.values()));
         unique.addAll(retiredManagers);
         managers.clear();
         retiredManagers.clear();
         for (MemoryManager manager : unique) {
-            manager.shutdown();
+            if (immediate) {
+                manager.shutdownNow();
+            } else {
+                manager.shutdown();
+            }
         }
     }
 }

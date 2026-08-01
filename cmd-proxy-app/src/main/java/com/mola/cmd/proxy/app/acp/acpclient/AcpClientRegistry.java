@@ -157,9 +157,22 @@ public class AcpClientRegistry {
      * 关闭所有 client，用于热重载前清理。
      */
     public void closeAll() {
+        closeAll(false);
+    }
+
+    /** 全局 stop 专用：各 client 只落盘 pending，不提交新的记忆模型调用。 */
+    public void closeAllForShutdown() {
+        closeAll(true);
+    }
+
+    private void closeAll(boolean deferMemoryExtraction) {
         for (Map.Entry<String, AcpClient> entry : clients.entrySet()) {
             try {
-                entry.getValue().close();
+                if (deferMemoryExtraction) {
+                    entry.getValue().closeForShutdown();
+                } else {
+                    entry.getValue().close();
+                }
             } catch (IOException e) {
                 logger.warn("关闭 AcpClient 失败, groupId={}", entry.getKey(), e);
             }

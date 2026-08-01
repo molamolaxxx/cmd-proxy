@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.acpclient;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * 记忆管理器桥接接口，定义在 acpclient 包中，由 memory 包实现。
@@ -25,7 +26,19 @@ public interface MemoryManagerBridge {
      * 提交全量记忆提取任务到异步队列。
      * 分析完整对话历史。session 结束时使用，确保不遗漏。
      */
-    void submitExtractFull(String workspacePath, List<ContextMessage> history);
+    default void submitExtractFull(String workspacePath,
+                                   List<ContextMessage> history) {
+        submitExtractFull(workspacePath, history, () -> {
+        }, ignored -> {
+        });
+    }
+
+    /**
+     * 提交可确认完成结果的全量提取任务。只有记忆索引实际更新完成（或模型判断
+     * 无需更新）后才调用 onSuccess；提交失败、队列取消或执行异常调用 onFailure。
+     */
+    void submitExtractFull(String workspacePath, List<ContextMessage> history,
+                           Runnable onSuccess, Consumer<Throwable> onFailure);
 
     /**
      * 递增 session 计数，用于 Dream（记忆整理）触发条件判断。

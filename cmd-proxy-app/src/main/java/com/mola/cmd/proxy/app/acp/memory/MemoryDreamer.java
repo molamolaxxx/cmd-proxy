@@ -389,4 +389,9 @@ public class MemoryDreamer {
             Thread.currentThread().interrupt();
         }
     }
+
+    /** 立即取消整理任务，不参与进程 stop 的等待。 */
+    public void shutdownNow() {
+        dreamQueue.shutdownNow();
+    }
 }

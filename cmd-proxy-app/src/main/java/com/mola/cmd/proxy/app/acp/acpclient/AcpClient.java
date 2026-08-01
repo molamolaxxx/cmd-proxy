@@ -128,9 +128,17 @@ public class AcpClient extends AbstractAcpClient {
      */
     AcpClient(AgentProvider agentProvider, String workspacePath,
               AcpClientIdentity clientIdentity, AcpRobotParam robotParam) {
+        this(agentProvider, workspacePath, clientIdentity, robotParam,
+                new ConversationHistoryManager(clientIdentity));
+    }
+
+    /** 包级测试挂点：允许注入隔离的历史目录，不改变生产构造行为。 */
+    AcpClient(AgentProvider agentProvider, String workspacePath,
+              AcpClientIdentity clientIdentity, AcpRobotParam robotParam,
+              ConversationHistoryManager historyManager) {
         super(agentProvider, workspacePath, clientIdentity, robotParam);
         this.robotParam = robotParam;
-        this.historyManager = new ConversationHistoryManager(clientIdentity);
+        this.historyManager = Objects.requireNonNull(historyManager, "historyManager");
         this.globalListener = new DefaultAcpResponseListener(clientIdentity.getTransportGroup());
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath, robotParam);
     }
@@ -414,20 +422,53 @@ public class AcpClient extends AbstractAcpClient {
 
     @Override
     public void close() throws IOException {
+        close(false);
+    }
+
+    /**
+     * 全局 stop 专用：历史和 pending 标记照常落盘，但不在关机路径提交记忆模型调用。
+     */
+    public void closeForShutdown() throws IOException {
+        close(true);
+    }
+
+    private void close(boolean deferMemoryExtraction) throws IOException {
         if (!beginClose()) {
             return;
         }
 
         try {
+            if (deferMemoryExtraction) {
+                // forceFlush 会触发 onTurnFlushed；关机时必须先阻断增量提取提交。
+                historyManager.setOnTurnFlushed(null);
+            }
             // 先落盘未保存的上下文，确保数据持久化
             historyManager.forceFlush(sessionId);
 
-            // 提交全量记忆提取到异步队列（队列会在 shutdown 时执行完）
+            // 先持久化 pending，再决定当前进程执行还是留给下次启动恢复。
             if (memoryManager != null && sessionId != null) {
                 try {
                     if (historyManager.getTurnCount() > initialTurnCount) {
-                        memoryManager.submitExtractFull(workspacePath, historyManager.getFullHistory(sessionId));
-                        memoryManager.incrementSessionCount(workspacePath);
+                        final String closingSessionId = sessionId;
+                        final int pendingTurnCount = historyManager.getTurnCount();
+                        historyManager.markMemoryExtractionPending(
+                                closingSessionId, pendingTurnCount);
+                        if (deferMemoryExtraction) {
+                            logger.info("关机延迟记忆提取, sessionId={}, turnCount={}",
+                                    closingSessionId, pendingTurnCount);
+                        } else {
+                            memoryManager.submitExtractFull(
+                                    workspacePath,
+                                    historyManager.getFullHistory(closingSessionId),
+                                    () -> {
+                                        historyManager.clearMemoryExtractionPending(
+                                                closingSessionId, pendingTurnCount);
+                                        memoryManager.incrementSessionCount(workspacePath);
+                                    },
+                                    error -> logger.warn(
+                                            "全量记忆提取未完成，保留 pending, sessionId={}",
+                                            closingSessionId, error));
+                        }
                     } else {
                         logger.info("本次 session 无新对话，跳过记忆提取, sessionId={}", sessionId);
                     }
