@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventSink;
@@ -52,6 +53,7 @@ public final class TeamManager implements AutoCloseable {
             new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Consumer<String> scheduleCleanup = ignored -> { };
+    private volatile ScheduleTaskManager scheduleTaskManager;
     private volatile Consumer<Set<String>> scheduleOrphanCleanup = ignored -> { };
     private volatile IntSupplier scheduleOwnerCount = () -> 0;
     private volatile ToIntFunction<String> scheduleTeamOwnerCount = ignored -> 0;
@@ -547,6 +549,10 @@ public final class TeamManager implements AutoCloseable {
         this.scheduleCleanup = cleanup == null ? ignored -> { } : cleanup;
     }
 
+    public void setScheduleTaskManager(ScheduleTaskManager scheduleTaskManager) {
+        this.scheduleTaskManager = scheduleTaskManager;
+    }
+
     public void setScheduleOrphanCleanup(
             Consumer<Set<String>> cleanup, IntSupplier ownerCount) {
         setScheduleOrphanCleanup(cleanup, ownerCount, ignored -> 0);
@@ -584,6 +590,11 @@ public final class TeamManager implements AutoCloseable {
      */
     public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
                                           String prompt) {
+        return executeScheduledPrompt(owner, taskId, null, prompt);
+    }
+
+    public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
+                                          String groupName, String prompt) {
         if (owner == null || !owner.isTeam() || prompt == null
                 || prompt.trim().isEmpty() || closed.get()
                 || startupCoordinator == null) {
@@ -615,22 +626,35 @@ public final class TeamManager implements AutoCloseable {
                 return false;
             }
 
-            publishMemberState(runtime, member.getTeamMemberId(),
-                    com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.STARTING, null);
-            clientRegistry.remove(team.getTeamId(), member.getTeamMemberId());
-            try {
-                old.close();
-            } catch (IOException ignored) {
-            }
+            String boundSessionId = scheduleTaskManager == null ? null
+                    : scheduleTaskManager.findGroupSession(owner, groupName);
+            AcpClient replacement = old;
+            if (boundSessionId == null || !boundSessionId.equals(old.getSessionId())) {
+                publishMemberState(runtime, member.getTeamMemberId(),
+                        com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.STARTING, null);
+                clientRegistry.remove(team.getTeamId(), member.getTeamMemberId());
+                try {
+                    old.close();
+                } catch (IOException ignored) {
+                }
 
-            TeamMemberDefinition starting = findMember(
-                    runtime.getDefinition(), member.getTeamMemberId());
-            AcpClient replacement = startupCoordinator.replaceMember(
-                    runtime, starting, TeamMemberStartOptions.newSession());
-            if (!clientRegistry.register(
-                    team.getTeamId(), member.getTeamMemberId(), replacement)) {
-                replacement.close();
-                throw new IOException("duplicate Team schedule replacement client");
+                TeamMemberDefinition starting = findMember(
+                        runtime.getDefinition(), member.getTeamMemberId());
+                TeamMemberStartOptions startOptions = boundSessionId == null
+                        ? TeamMemberStartOptions.newSession()
+                        : TeamMemberStartOptions.restore(boundSessionId);
+                replacement = startupCoordinator.replaceMember(
+                        runtime, starting, startOptions);
+                if (!clientRegistry.register(
+                        team.getTeamId(), member.getTeamMemberId(), replacement)) {
+                    replacement.close();
+                    throw new IOException("duplicate Team schedule replacement client");
+                }
+                if (boundSessionId == null && groupName != null
+                        && !groupName.trim().isEmpty() && scheduleTaskManager != null) {
+                    scheduleTaskManager.bindGroupSession(
+                            owner, groupName, replacement.getSessionId());
+                }
             }
             publishMemberState(runtime, member.getTeamMemberId(),
                     com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.READY, null);

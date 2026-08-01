@@ -19,6 +19,9 @@ public class ScheduledTask {
     /** 执行内容（发给 Agent 的 prompt） */
     private String prompt;
 
+    /** 可选的定时会话分组；同 owner 下同名任务复用同一 ACP session。 */
+    private String groupName;
+
     /** 调度配置 */
     private ScheduleConfig schedule;
 
@@ -67,6 +70,14 @@ public class ScheduledTask {
 
     public void setPrompt(String prompt) {
         this.prompt = prompt;
+    }
+
+    public String getGroupName() {
+        return groupName;
+    }
+
+    public void setGroupName(String groupName) {
+        this.groupName = groupName;
     }
 
     public ScheduleConfig getSchedule() {

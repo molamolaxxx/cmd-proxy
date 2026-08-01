@@ -40,7 +40,7 @@ public class ScheduleContextInjector {
         sb.append("你可以为用户设置和管理定时任务。\n\n");
 
         sb.append("设置任务（在回复中输出以下 JSON，独占一行，不要包裹在代码块中）：\n");
-        sb.append("{\"action\":\"schedule_task\",\"tasks\":[{\"title\":\"任务标题\",\"prompt\":\"执行内容\",\"schedule\":{\"type\":\"cron|once\",\"expr\":\"cron表达式或ISO时间戳或相对时间如+30m\"}}]}\n\n");
+        sb.append("{\"action\":\"schedule_task\",\"groupName\":\"可选，同一 owner 下同名任务复用同一会话\",\"tasks\":[{\"title\":\"任务标题\",\"prompt\":\"执行内容\",\"schedule\":{\"type\":\"cron|once\",\"expr\":\"cron表达式或ISO时间戳或相对时间如+30m\"}}]}\n\n");
 
         sb.append("查询任务列表：\n");
         sb.append("{\"action\":\"manage_schedule\",\"operation\":\"list\"}\n\n");
@@ -51,6 +51,7 @@ public class ScheduleContextInjector {
 
         sb.append("schedule.type 支持：cron（标准5位cron表达式，周期性）、once（一次性，expr为ISO时间戳如2026-05-06T09:00:00，或相对时间如+30s/+30m/+2h/+1d）\n");
         sb.append("tasks 数组可包含多个任务，一次创建多个定时任务。\n\n");
+        sb.append("groupName 可省略；指定后，同一 owner 下同名分组的定时任务会在同一会话中继续执行。\n\n");
         DirectJsonOutputHelper.appendUsageWarning(sb,
                 "管理定时任务",
                 "解析指令并执行对应的定时任务操作");

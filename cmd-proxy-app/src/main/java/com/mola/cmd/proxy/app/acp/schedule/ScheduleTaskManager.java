@@ -59,12 +59,15 @@ public class ScheduleTaskManager {
     private static final String SCHEDULES_BASE_DIR =
             com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("schedules");
     private static final String TASKS_FILE = "tasks.json";
+    private static final String GROUP_SESSIONS_FILE = "groups.json";
 
     /** 相对时间表达式：+30s, +30m, +2h, +1d */
     private static final Pattern RELATIVE_TIME_PATTERN = Pattern.compile("^\\+(\\d+)([smhd])$");
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type TASK_LIST_TYPE = new TypeToken<List<ScheduledTask>>() {}.getType();
+    private static final Type GROUP_SESSION_MAP_TYPE =
+            new TypeToken<Map<String, String>>() {}.getType();
 
     private final Path schedulesBaseDir;
 
@@ -73,6 +76,10 @@ public class ScheduleTaskManager {
 
     /** robotName -> 任务列表（内存缓存） */
     private final Map<String, List<ScheduledTask>> tasksByRobot = new ConcurrentHashMap<>();
+
+    /** persistencePath -> (groupName -> ACP sessionId) */
+    private final Map<String, Map<String, String>> groupSessionsByOwner =
+            new ConcurrentHashMap<>();
 
     /** robotName -> 是否有任务正在执行 */
     private final Map<String, Boolean> runningByRobot = new ConcurrentHashMap<>();
@@ -150,6 +157,11 @@ public class ScheduleTaskManager {
 
     public ScheduledTask createTask(ScheduleOwnerKey owner, String title, String prompt,
                                     ScheduleConfig config) {
+        return createTask(owner, title, prompt, config, null);
+    }
+
+    public ScheduledTask createTask(ScheduleOwnerKey owner, String title, String prompt,
+                                    ScheduleConfig config, String groupName) {
         ensureOwnerWritable(owner);
         String robotName = registerOwner(owner);
         ScheduledTask task = new ScheduledTask();
@@ -157,6 +169,7 @@ public class ScheduleTaskManager {
         task.setOwner(owner);
         task.setTitle(title);
         task.setPrompt(prompt);
+        task.setGroupName(normalizeGroupName(groupName));
         task.setSchedule(config);
         task.setStatus(ScheduledTask.STATUS_WAITING);
         task.setCreatedAt(System.currentTimeMillis());
@@ -265,6 +278,33 @@ public class ScheduleTaskManager {
         return target;
     }
 
+    public String findGroupSession(ScheduleOwnerKey owner, String groupName) {
+        String normalized = normalizeGroupName(groupName);
+        if (normalized == null) return null;
+        String storageId = registerOwner(owner);
+        Map<String, String> sessions = groupSessionsByOwner.get(storageId);
+        return sessions == null ? null : sessions.get(normalized);
+    }
+
+    public void bindGroupSession(ScheduleOwnerKey owner, String groupName,
+                                 String sessionId) {
+        String normalized = normalizeGroupName(groupName);
+        if (normalized == null) {
+            throw new IllegalArgumentException("groupName must not be blank");
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId must not be blank");
+        }
+        ensureOwnerWritable(owner);
+        String storageId = registerOwner(owner);
+        groupSessionsByOwner.computeIfAbsent(
+                storageId, ignored -> new ConcurrentHashMap<>())
+                .put(normalized, sessionId.trim());
+        persistGroupSessions(storageId);
+        logger.info("定时会话分组已绑定, owner={}, groupName={}, sessionId={}",
+                owner, normalized, sessionId);
+    }
+
     // ==================== 调度逻辑 ====================
 
     private void startScheduler() {
@@ -331,7 +371,8 @@ public class ScheduleTaskManager {
                         task.getTitle(), task.getPrompt());
                 ScheduleOwnerKey owner = ownerFor(robotName);
                 boolean triggered = scopedExecutionCallback != null
-                        ? scopedExecutionCallback.execute(owner, task.getId(), prompt)
+                        ? scopedExecutionCallback.execute(owner, task.getId(),
+                                task.getGroupName(), prompt)
                         : executionCallback.execute(robotName, task.getId(), prompt);
                 if (!triggered) {
                     // client 忙碌，回退状态，下一轮重试
@@ -408,6 +449,70 @@ public class ScheduleTaskManager {
         } catch (IOException e) {
             logger.error("扫描 schedules 目录失败", e);
         }
+        loadAllGroupSessions();
+    }
+
+    private void loadAllGroupSessions() {
+        if (!Files.exists(schedulesBaseDir)) return;
+        try (java.util.stream.Stream<Path> paths = Files.walk(schedulesBaseDir, 4)) {
+            paths.filter(Files::isRegularFile)
+                    .filter(path -> GROUP_SESSIONS_FILE.equals(
+                            path.getFileName().toString()))
+                    .forEach(this::loadGroupSessionsFile);
+        } catch (IOException e) {
+            logger.error("扫描定时会话分组失败", e);
+        }
+    }
+
+    private void loadGroupSessionsFile(Path file) {
+        String persistencePath = schedulesBaseDir.relativize(file.getParent())
+                .toString().replace(java.io.File.separatorChar, '/');
+        try {
+            ScheduleOwnerKey owner =
+                    ScheduleOwnerKey.fromPersistencePath(persistencePath);
+            Map<String, String> sessions = GSON.fromJson(
+                    new String(Files.readAllBytes(file), StandardCharsets.UTF_8),
+                    GROUP_SESSION_MAP_TYPE);
+            if (sessions == null || sessions.isEmpty()) return;
+            String storageId = registerOwner(owner);
+            Map<String, String> normalized = new ConcurrentHashMap<>();
+            for (Map.Entry<String, String> entry : sessions.entrySet()) {
+                String groupName = normalizeGroupName(entry.getKey());
+                String sessionId = entry.getValue();
+                if (groupName != null && sessionId != null
+                        && !sessionId.trim().isEmpty()) {
+                    normalized.put(groupName, sessionId.trim());
+                }
+            }
+            if (!normalized.isEmpty()) {
+                groupSessionsByOwner.put(storageId, normalized);
+            }
+        } catch (Exception e) {
+            logger.error("读取定时会话分组失败, file={}", file, e);
+        }
+    }
+
+    private void persistGroupSessions(String storageId) {
+        ScheduleOwnerKey owner = ownerFor(storageId);
+        Path dir = schedulesBaseDir.resolve(owner.getPersistencePath()).normalize();
+        if (!dir.startsWith(schedulesBaseDir)) {
+            throw new IllegalArgumentException(
+                    "schedule persistence path escapes base directory");
+        }
+        Path file = dir.resolve(GROUP_SESSIONS_FILE);
+        Map<String, String> sessions = groupSessionsByOwner.get(storageId);
+        try {
+            if (sessions == null || sessions.isEmpty()) {
+                Files.deleteIfExists(file);
+                return;
+            }
+            Files.createDirectories(dir);
+            Files.write(file, GSON.toJson(sessions)
+                    .getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "持久化定时会话分组失败, owner=" + owner, e);
+        }
     }
 
     private void persistTasks(String robotName) {
@@ -475,6 +580,7 @@ public class ScheduleTaskManager {
     public void cleanupOwner(ScheduleOwnerKey owner) {
         String storageId = registerOwner(owner);
         tasksByRobot.remove(storageId);
+        groupSessionsByOwner.remove(storageId);
         runningByRobot.remove(storageId);
         ownerKeys.remove(storageId);
         Path base = schedulesBaseDir;
@@ -484,6 +590,7 @@ public class ScheduleTaskManager {
         }
         try {
             Files.deleteIfExists(dir.resolve(TASKS_FILE));
+            Files.deleteIfExists(dir.resolve(GROUP_SESSIONS_FILE));
             Files.deleteIfExists(dir);
             if (owner.isTeam()) {
                 Path teamDir = dir.getParent();
@@ -623,6 +730,16 @@ public class ScheduleTaskManager {
         return owner;
     }
 
+    private static String normalizeGroupName(String groupName) {
+        if (groupName == null) return null;
+        String normalized = groupName.trim();
+        if (normalized.isEmpty()) return null;
+        if (normalized.length() > 100) {
+            throw new IllegalArgumentException("groupName length must be <= 100");
+        }
+        return normalized;
+    }
+
     /**
      * 生成任务 ID：t{时间戳秒数}_{title-slug}
      */
@@ -737,6 +854,9 @@ public class ScheduleTaskManager {
             sb.append(idx++).append(". ID: ").append(task.getId()).append("\n");
             sb.append("   标题: ").append(task.getTitle()).append("\n");
             sb.append("   内容: ").append(task.getPrompt()).append("\n");
+            if (task.getGroupName() != null) {
+                sb.append("   会话分组: ").append(task.getGroupName()).append("\n");
+            }
             sb.append("   调度: ").append(task.getSchedule().getType())
                     .append(" ").append(task.getSchedule().getExpr()).append("\n");
             sb.append("   状态: ").append(task.getStatus()).append("\n");
@@ -757,6 +877,9 @@ public class ScheduleTaskManager {
         sb.append("操作: ").append(operation).append("\n");
         sb.append("任务ID: ").append(task.getId()).append("\n");
         sb.append("标题: ").append(task.getTitle()).append("\n");
+        if (task.getGroupName() != null) {
+            sb.append("会话分组: ").append(task.getGroupName()).append("\n");
+        }
         if ("create".equals(operation)) {
             sb.append("调度: ").append(task.getSchedule().getType())
                     .append(" ").append(task.getSchedule().getExpr()).append("\n");
@@ -795,7 +918,8 @@ public class ScheduleTaskManager {
 
     @FunctionalInterface
     public interface ScopedScheduleExecutionCallback {
-        boolean execute(ScheduleOwnerKey owner, String taskId, String prompt);
+        boolean execute(ScheduleOwnerKey owner, String taskId,
+                        String groupName, String prompt);
     }
 
     // ==================== JSON 指令处理（供 AcpClient 调用） ====================
@@ -850,6 +974,8 @@ public class ScheduleTaskManager {
 
     private String handleCreate(JsonObject json, ScheduleOwnerKey owner) {
         JsonArray tasks = json.getAsJsonArray("tasks");
+        String groupName = json.has("groupName")
+                ? json.get("groupName").getAsString() : null;
         StringBuilder result = new StringBuilder();
 
         for (int i = 0; i < tasks.size(); i++) {
@@ -862,7 +988,8 @@ public class ScheduleTaskManager {
                     scheduleJson.get("type").getAsString(),
                     scheduleJson.get("expr").getAsString());
 
-            ScheduledTask created = createTask(owner, title, prompt, config);
+            ScheduledTask created = createTask(
+                    owner, title, prompt, config, groupName);
             result.append(formatOperationResult("create", created));
             if (i < tasks.size() - 1) result.append("\n");
         }

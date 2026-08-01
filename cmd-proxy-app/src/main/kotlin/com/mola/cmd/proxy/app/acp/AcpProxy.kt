@@ -310,6 +310,7 @@ object AcpProxy {
             startupCoordinator
         )
         manager.setScheduleCleanup(scheduleTaskManager::cleanupTeam)
+        manager.setScheduleTaskManager(scheduleTaskManager)
         manager.setScheduleOrphanCleanup(
             scheduleTaskManager::cleanupOrphanTeams,
             scheduleTaskManager::teamOwnerCount,
@@ -1204,14 +1205,14 @@ object AcpProxy {
      */
     fun startScheduler(groupRobotMap: Map<String, AcpRobotParam>) {
         // 设置执行回调：检查 client 状态，空闲则新建 session 并执行
-        scheduleTaskManager.setScopedExecutionCallback { owner, taskId, prompt ->
+        scheduleTaskManager.setScopedExecutionCallback { owner, taskId, groupName, prompt ->
             if (owner.isTeam) {
                 val manager = teamManager
                 if (manager == null) {
                     log.error("Team 定时任务执行失败：TeamManager 不存在, owner={}", owner)
                     false
                 } else {
-                    manager.executeScheduledPrompt(owner, taskId, prompt)
+                    manager.executeScheduledPrompt(owner, taskId, groupName, prompt)
                 }
             } else {
                 val robotName = owner.robotName
@@ -1231,14 +1232,42 @@ object AcpProxy {
                         robotName, client.state)
                     false
                 } else {
-                    registry.createSession(targetGroupId, null, null)
-                    val newClient = registry.getClient(targetGroupId)
-                    if (newClient != null) {
-                        featureInitializer.initialize(
-                            AcpClientFeatureInitializer.Context.main(targetGroupId),
-                            newClient, newClient.robotParam)
-                        newClient.send(
+                    val boundSessionId = scheduleTaskManager
+                        .findGroupSession(owner, groupName)
+                    if (boundSessionId == null) {
+                        registry.createSession(targetGroupId, null, null)
+                        val newClient = registry.getClient(targetGroupId)
+                        if (newClient != null) {
+                            featureInitializer.initialize(
+                                AcpClientFeatureInitializer.Context.main(targetGroupId),
+                                newClient, newClient.robotParam)
+                            if (!groupName.isNullOrBlank()) {
+                                scheduleTaskManager.bindGroupSession(
+                                    owner, groupName, newClient.sessionId)
+                            }
+                            newClient.send(
+                                prompt, null, PromptOptions.forScheduleExecution())
+                        }
+                    } else if (boundSessionId == client.sessionId) {
+                        client.send(
                             prompt, null, PromptOptions.forScheduleExecution())
+                    } else {
+                        try {
+                            registry.restoreSession(targetGroupId, boundSessionId)
+                            val restored = registry.getClient(targetGroupId)
+                                ?: throw IllegalStateException(
+                                    "恢复分组会话后 client 不存在")
+                            featureInitializer.initialize(
+                                AcpClientFeatureInitializer.Context.main(targetGroupId),
+                                restored, restored.robotParam)
+                            restored.send(
+                                prompt, null, PromptOptions.forScheduleExecution())
+                        } catch (e: Exception) {
+                            log.error(
+                                "定时会话分组恢复失败，等待下一轮重试, owner={}, groupName={}, sessionId={}",
+                                owner, groupName, boundSessionId, e)
+                            return@setScopedExecutionCallback false
+                        }
                     }
                     true
                 }
