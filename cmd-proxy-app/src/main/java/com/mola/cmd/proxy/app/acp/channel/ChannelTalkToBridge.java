@@ -18,8 +18,7 @@ public final class ChannelTalkToBridge {
     }
 
     private final Map<String, ChannelConfig> configs;
-    private final ClientResolver clientResolver;
-    private final TalkToDispatcher dispatcher;
+    private final ChannelBindingResolver bindingResolver;
     private final ChannelTalkToGateway gateway;
     private final ReentrantReadWriteLock inboundGate = new ReentrantReadWriteLock();
 
@@ -28,16 +27,27 @@ public final class ChannelTalkToBridge {
                                TalkToDispatcher dispatcher,
                                ChannelTalkToGateway gateway) {
         this.configs = configs;
-        this.clientResolver = clientRegistry::getClient;
-        this.dispatcher = dispatcher;
+        this.bindingResolver = new DefaultChannelBindingResolver(
+                clientRegistry, dispatcher, null);
+        this.gateway = gateway;
+    }
+
+    public ChannelTalkToBridge(Map<String, ChannelConfig> configs,
+                               ChannelBindingResolver bindingResolver,
+                               ChannelTalkToGateway gateway) {
+        this.configs = configs;
+        this.bindingResolver = bindingResolver;
         this.gateway = gateway;
     }
 
     ChannelTalkToBridge(Map<String, ChannelConfig> configs, ClientResolver clientResolver,
                         TalkToDispatcher dispatcher, ChannelTalkToGateway gateway) {
         this.configs = configs;
-        this.clientResolver = clientResolver;
-        this.dispatcher = dispatcher;
+        this.bindingResolver = binding -> {
+            AcpClient client = clientResolver.getClient(binding.getGroupId());
+            return client == null ? null : new ChannelBoundTarget(
+                    client, dispatcher, binding.getGroupId(), binding.getGroupId());
+        };
         this.gateway = gateway;
     }
 
@@ -51,12 +61,13 @@ public final class ChannelTalkToBridge {
             if (!config.isInboundEnabled()) {
                 return TalkToDispatcher.InboundDeliveryResult.rejected("channel inbound disabled");
             }
-            String groupId = config.getBinding().getGroupId();
-            String replyTarget = gateway.createRoute(event.getChannelId(), event.getReplyRoute());
-            AcpClient client = clientResolver.getClient(groupId);
+            String ownerKey = ownerKey(config.getBinding());
+            String replyTarget = gateway.createRoute(
+                    event.getChannelId(), event.getReplyRoute(), ownerKey);
+            ChannelBoundTarget target = bindingResolver.resolve(config.getBinding());
+            AcpClient client = target == null ? null : target.getClient();
             if (!isMainClient(client)) {
-                replyFailureAsync(replyTarget,
-                        "信道当前未绑定到可用的 MAIN ACP，请检查配置。", groupId);
+                replyFailureAsync(replyTarget, "信道当前未绑定到可用的 ACP，请检查配置。");
                 return TalkToDispatcher.InboundDeliveryResult.rejected("ACP binding not found");
             }
 
@@ -65,9 +76,10 @@ public final class ChannelTalkToBridge {
                     event.getReplyRoute().getChatType(), event.getReplyRoute().getChatId(),
                     event.getContent());
             TalkToDispatcher.InboundDeliveryResult result =
-                    dispatcher.deliverInbound(groupId, client, message);
+                    target.getDispatcher().deliverInbound(
+                            target.getRoutingKey(), client, message);
             if (result.getStatus() == TalkToDispatcher.InboundDeliveryResult.Status.REJECTED) {
-                replyFailureAsync(replyTarget, "当前处理队列已满，请稍后重试。", groupId);
+                replyFailureAsync(replyTarget, "当前处理队列已满，请稍后重试。");
             }
             return result;
         } finally {
@@ -96,14 +108,23 @@ public final class ChannelTalkToBridge {
         }
     }
 
-    private void replyFailureAsync(String replyTarget, String content, String groupId) {
-        java.util.concurrent.CompletableFuture.runAsync(() -> gateway.deliver(
-                new TalkToRequest(replyTarget, content, 0), "cmd-proxy", groupId));
+    private void replyFailureAsync(String replyTarget, String content) {
+        java.util.concurrent.CompletableFuture.runAsync(() -> gateway.deliverSystem(
+                new TalkToRequest(replyTarget, content, 0)));
     }
 
     private static boolean isMainClient(AcpClient client) {
         return client != null && client.getClientIdentity() != null
-                && client.getClientIdentity().getScope() == AcpClientIdentity.Scope.MAIN
+                && (client.getClientIdentity().getScope() == AcpClientIdentity.Scope.MAIN
+                    || client.getClientIdentity().getScope() == AcpClientIdentity.Scope.TEAM)
                 && (client.getRobotParam() == null || !client.getRobotParam().isOnlySubAgent());
+    }
+
+    private static String ownerKey(com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding binding) {
+        if (com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding.TYPE_TEAM_MEMBER
+                .equals(binding.getType())) {
+            return "team:" + binding.getTeamId().trim() + ":" + binding.getTeamMemberId().trim();
+        }
+        return binding.getGroupId().trim();
     }
 }

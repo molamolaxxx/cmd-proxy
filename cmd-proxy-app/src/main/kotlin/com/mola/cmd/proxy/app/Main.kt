@@ -200,22 +200,29 @@ private fun startAcpServices(config: JSONObject) {
 
     val chatterIdsJsonStr = chatterIdsArray.toJSONString()
     val allRobots = robotsArray.toJavaList(AcpRobotParam::class.java)
-    val robots = allRobots.filter { it.isEnabled }
-    // acpSyncRobots 发送启用的非 onlySubAgent robot
-    val robotsJsonStr = JSON.toJSONString(robots.filter { !it.isOnlySubAgent })
+    val enabledRobots = allRobots.filter { it.isEnabled }
+    require(enabledRobots.none { it.isOnlySubAgent && it.isOnlyTeamMember }) {
+        "onlySubAgent and onlyTeamMember cannot both be true"
+    }
+    // 普通运行集合保留 onlySubAgent 的独立 Ability 初始化，但排除 Team-only robot。
+    val runtimeRobots = enabledRobots.filter { !it.isOnlyTeamMember }
+    val mainRobots = runtimeRobots.filter { !it.isOnlySubAgent }
+    // 所有启用且非 onlySubAgent 的 robot 都可作为 Fast Team 来源。
+    val teamSourceRobots = enabledRobots.filter { !it.isOnlySubAgent }
+    val robotsJsonStr = JSON.toJSONString(mainRobots)
     val chatterIds = chatterIdsArray.toJavaList(String::class.java)
     val channels = config.getJSONArray("channels")
         ?.toJavaList(com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig::class.java)
         ?: emptyList()
 
-    if (robots.isEmpty()) {
+    if (enabledRobots.isEmpty()) {
         log.info("所有 robot 均已禁用，跳过 ACP 服务启动")
         return
     }
 
     // 笛卡尔积生成 groupId 列表: chatterId 和 acpId 字典序排序后拼接
     val groupIdList = chatterIds.flatMap { chatterId ->
-        robots.map { robot ->
+        runtimeRobots.map { robot ->
             val acpId = "acp-" + robot.name.replace(" ", "_")
                 .replace("\u3000", "_")
             listOf(chatterId, acpId).sorted().joinToString("")
@@ -224,7 +231,7 @@ private fun startAcpServices(config: JSONObject) {
 
     // 构建 groupId -> workDir 映射
     val groupWorkDirMap = chatterIds.flatMap { chatterId ->
-        robots.filter { it.workDir.isNotBlank() }.map { robot ->
+        runtimeRobots.filter { it.workDir.isNotBlank() }.map { robot ->
             val acpId = "acp-" + robot.name.replace(" ", "_")
                 .replace("\u3000", "_")
             val groupId = listOf(chatterId, acpId).sorted().joinToString("")
@@ -236,7 +243,17 @@ private fun startAcpServices(config: JSONObject) {
 
     // 构建 groupId -> AcpRobotParam 映射
     val groupRobotMap = chatterIds.flatMap { chatterId ->
-        robots.map { robot ->
+        runtimeRobots.map { robot ->
+            val acpId = "acp-" + robot.name.replace(" ", "_")
+                .replace("\u3000", "_")
+            val groupId = listOf(chatterId, acpId).sorted().joinToString("")
+            groupId to robot
+        }
+    }.toMap()
+
+    // Team 来源注册表与普通 runtime 分离；onlyTeamMember 不创建 MAIN client。
+    val teamSourceGroupRobotMap = chatterIds.flatMap { chatterId ->
+        teamSourceRobots.map { robot ->
             val acpId = "acp-" + robot.name.replace(" ", "_")
                 .replace("\u3000", "_")
             val groupId = listOf(chatterId, acpId).sorted().joinToString("")
@@ -246,7 +263,8 @@ private fun startAcpServices(config: JSONObject) {
 
     AcpProxy.start(
         groupIdList, robotsJsonStr, chatterIdsJsonStr,
-        groupWorkDirMap, groupRobotMap, channels)
+        groupWorkDirMap, groupRobotMap, teamSourceGroupRobotMap,
+        allRobots.map { it.name }.toSet(), channels)
 }
 
 private fun startConfigUiServer(config: JSONObject) {
@@ -267,7 +285,8 @@ private fun startConfigUiServer(config: JSONObject) {
             { AcpProxy.channelErrors() },
             { channelId, inboundAllowed ->
                 AcpProxy.setChannelInboundEnabled(channelId, inboundAllowed)
-            }
+            },
+            { AcpProxy.channelTeamBindingTargets() }
         )
         server.start()
     } catch (e: Exception) {

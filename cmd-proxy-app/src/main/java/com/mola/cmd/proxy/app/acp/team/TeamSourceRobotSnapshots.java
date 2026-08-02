@@ -23,8 +23,11 @@ final class TeamSourceRobotSnapshots {
 
     static String fingerprint(AcpRobotParam robot) {
         try {
+            com.google.gson.JsonObject runtimeConfig = GSON.toJsonTree(robot).getAsJsonObject();
+            // onlyTeamMember 只决定是否创建 MAIN ACP，不改变 Team client 的运行配置。
+            runtimeConfig.remove("onlyTeamMember");
             byte[] hash = MessageDigest.getInstance("SHA-256")
-                    .digest(GSON.toJson(robot).getBytes(StandardCharsets.UTF_8));
+                    .digest(GSON.toJson(runtimeConfig).getBytes(StandardCharsets.UTF_8));
             StringBuilder result = new StringBuilder(hash.length * 2);
             for (byte value : hash) {
                 result.append(String.format("%02x", value & 0xff));

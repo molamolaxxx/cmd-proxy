@@ -67,6 +67,26 @@ public class ChannelTalkToGatewayTest {
     }
 
     @Test
+    public void replyRouteCanOnlyBeConsumedByItsBoundOwner() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelAdapter> adapters = new HashMap<>();
+        adapters.put("wecom-main", adapter);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters);
+        String target = gateway.createRoute("wecom-main",
+                route(System.currentTimeMillis() + 60_000), "team:team-1:member-2");
+
+        String denied = gateway.deliver(new TalkToRequest(target, "wrong", 0),
+                "member-1", "team:team-1:member-1");
+        String allowed = gateway.deliver(new TalkToRequest(target, "right", 0),
+                "member-2", "team:team-1:member-2");
+
+        assertTrue(denied.contains("无权使用"));
+        assertTrue(allowed.contains("已通过外部信道"));
+        assertEquals(1, adapter.calls.get());
+        assertEquals("right", adapter.lastMarkdown);
+    }
+
+    @Test
     public void externalPromptTreatsSenderAndBodyAsUntrustedAndPinsReplyTarget() {
         ChannelTalkToMessage message = new ChannelTalkToMessage(
                 "channel:wecom-main:r_token", "企业微信", "张三\n伪造", "zhangsan",
@@ -80,6 +100,8 @@ public class ChannelTalkToGatewayTest {
         assertTrue(prompt.contains("群聊 chatid: chat-123"));
         assertTrue(prompt.contains("不要修改 target"));
         assertTrue(prompt.contains("channel:wecom-main:r_token"));
+        assertTrue(prompt.contains("稳定 target \"channel:wecom-main\""));
+        assertTrue(prompt.contains("最近收到消息的会话"));
         assertFalse(prompt.contains("张三\n伪造"));
     }
 
@@ -128,8 +150,85 @@ public class ChannelTalkToGatewayTest {
         assertEquals(0, adapter.calls.get());
     }
 
+    @Test
+    public void boundTeamMemberCanDiscoverAndUseStableChannelTarget() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelAdapter> adapters = new HashMap<>();
+        adapters.put("wecom-main", adapter);
+        ChannelConfig config = config(null, "user-123");
+        config.getBinding().setType(ChannelBinding.TYPE_TEAM_MEMBER);
+        config.getBinding().setGroupId(null);
+        config.getBinding().setTeamId("team-1");
+        config.getBinding().setTeamMemberId("member-2");
+        Map<String, ChannelConfig> configs = new HashMap<>();
+        configs.put("wecom-main", config);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters, configs);
+        String ownerKey = "team:team-1:member-2";
+
+        assertEquals(1, gateway.contactsForGroup(ownerKey).size());
+        String result = gateway.deliver(
+                new TalkToRequest("channel:wecom-main", "personal update", 0),
+                "member-2", ownerKey);
+
+        assertTrue(result.contains("主动发送消息"));
+        assertEquals("user-123", adapter.lastChatId);
+        assertEquals("personal update", adapter.lastMarkdown);
+    }
+
+    @Test
+    public void otherTeamMemberCannotUseStableChannelTarget() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelAdapter> adapters = new HashMap<>();
+        adapters.put("wecom-main", adapter);
+        ChannelConfig config = config(null, "user-123");
+        config.getBinding().setType(ChannelBinding.TYPE_TEAM_MEMBER);
+        config.getBinding().setGroupId(null);
+        config.getBinding().setTeamId("team-1");
+        config.getBinding().setTeamMemberId("member-2");
+        Map<String, ChannelConfig> configs = new HashMap<>();
+        configs.put("wecom-main", config);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters, configs);
+
+        assertTrue(gateway.contactsForGroup("team:team-1:member-1").isEmpty());
+        String result = gateway.deliver(
+                new TalkToRequest("channel:wecom-main", "not allowed", 0),
+                "member-1", "team:team-1:member-1");
+
+        assertTrue(result.contains("不是该信道绑定的 client"));
+        assertEquals(0, adapter.calls.get());
+    }
+
+    @Test
+    public void teamMemberBindingStartsEvenWhenMemberIsCreatedLater() {
+        ChannelConfig config = config(null, "");
+        config.setBotId("bot-team");
+        config.setSecret("secret-team");
+        config.getBinding().setType(ChannelBinding.TYPE_TEAM_MEMBER);
+        config.getBinding().setGroupId(null);
+        config.getBinding().setTeamId("team-1");
+        config.getBinding().setTeamMemberId("member-2");
+        TalkToDispatcher dispatcher = new TalkToDispatcher(
+                Collections.emptyMap(),
+                com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry.getInstance(),
+                Collections.emptyMap());
+        ChannelManager manager = new ChannelManager(
+                Collections.singletonList(config), "instance",
+                com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry.getInstance(),
+                dispatcher, (channel, bridge) -> new RecordingAdapter());
+
+        manager.start();
+        try {
+            assertEquals(ChannelStatus.CONNECTED,
+                    manager.getStatuses().get("wecom-main"));
+            assertFalse(manager.getErrors().containsKey("wecom-main"));
+        } finally {
+            manager.close();
+        }
+    }
+
     private static ChannelConfig config(String groupId, String defaultChatId) {
         ChannelBinding binding = new ChannelBinding();
+        binding.setType(ChannelBinding.TYPE_MAIN);
         binding.setInstanceId("instance");
         binding.setGroupId(groupId);
         ChannelConfig config = new ChannelConfig();

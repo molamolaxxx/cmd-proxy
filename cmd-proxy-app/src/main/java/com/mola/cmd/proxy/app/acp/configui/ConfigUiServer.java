@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
+import java.util.Map;
 
 /**
  * 内嵌轻量 HTTP 服务，提供 ACP 配置管理页面。
@@ -51,6 +52,7 @@ public class ConfigUiServer {
     private final Supplier<java.util.Map<String, String>> channelStatusSupplier;
     private final Supplier<java.util.Map<String, String>> channelErrorSupplier;
     private final BiFunction<String, Boolean, Boolean> channelInboundUpdater;
+    private final Supplier<List<Map<String, Object>>> channelBindingTargetSupplier;
     private HttpServer server;
     private ExecutorService executor;
 
@@ -70,7 +72,7 @@ public class ConfigUiServer {
                 java.util.Collections::emptyMap, java.util.Collections::emptyMap,
                 (channelId, enabled) -> {
                     throw new IllegalStateException("channel service is not running");
-                });
+                }, java.util.Collections::emptyList);
     }
 
     public ConfigUiServer(int port, Runnable refreshCallback,
@@ -80,7 +82,7 @@ public class ConfigUiServer {
         this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
                 channelErrorSupplier, (channelId, enabled) -> {
                     throw new IllegalStateException("channel service is not running");
-                });
+                }, java.util.Collections::emptyList);
     }
 
     public ConfigUiServer(int port, Runnable refreshCallback,
@@ -88,12 +90,24 @@ public class ConfigUiServer {
                           Supplier<java.util.Map<String, String>> channelStatusSupplier,
                           Supplier<java.util.Map<String, String>> channelErrorSupplier,
                           BiFunction<String, Boolean, Boolean> channelInboundUpdater) {
+        this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
+                channelErrorSupplier, channelInboundUpdater,
+                java.util.Collections::emptyList);
+    }
+
+    public ConfigUiServer(int port, Runnable refreshCallback,
+                          Consumer<String> refreshRobotCallback,
+                          Supplier<java.util.Map<String, String>> channelStatusSupplier,
+                          Supplier<java.util.Map<String, String>> channelErrorSupplier,
+                          BiFunction<String, Boolean, Boolean> channelInboundUpdater,
+                          Supplier<List<Map<String, Object>>> channelBindingTargetSupplier) {
         this.port = port;
         this.refreshCallback = refreshCallback;
         this.refreshRobotCallback = refreshRobotCallback;
         this.channelStatusSupplier = channelStatusSupplier;
         this.channelErrorSupplier = channelErrorSupplier;
         this.channelInboundUpdater = channelInboundUpdater;
+        this.channelBindingTargetSupplier = channelBindingTargetSupplier;
     }
 
     public void start() throws IOException {
@@ -109,6 +123,8 @@ public class ConfigUiServer {
         server.createContext("/api/config", proxied(this::handleConfig));
         server.createContext("/api/channels/status", proxied(this::handleChannelStatus));
         server.createContext("/api/channels/inbound", proxied(this::handleChannelInbound));
+        server.createContext("/api/channels/binding-targets",
+                proxied(this::handleChannelBindingTargets));
         server.createContext("/api/refresh", proxied(this::handleRefresh));
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
         server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
@@ -312,6 +328,17 @@ public class ConfigUiServer {
         }
         // 格式化写入
         JSONObject json = JSON.parseObject(body);
+        if (json.getJSONArray("robots") != null) {
+            for (int i = 0; i < json.getJSONArray("robots").size(); i++) {
+                JSONObject robot = json.getJSONArray("robots").getJSONObject(i);
+                if (robot != null && robot.getBooleanValue("onlySubAgent")
+                        && robot.getBooleanValue("onlyTeamMember")) {
+                    sendResponse(exchange, 400, "application/json",
+                            "{\"error\":\"onlySubAgent and onlyTeamMember cannot both be true\"}");
+                    return;
+                }
+            }
+        }
         preserveChannelSecrets(json);
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。
         json.remove("globalProxyEnabled");
@@ -365,6 +392,23 @@ public class ConfigUiServer {
             error.put("error", e.getMessage() == null ? "unknown error" : e.getMessage());
             sendResponse(exchange, 500, "application/json", JSON.toJSONString(error));
         }
+    }
+
+    private void handleChannelBindingTargets(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        JSONObject result = new JSONObject();
+        result.put("instanceId", CmdProxyHome.instanceId());
+        try {
+            List<Map<String, Object>> teams = channelBindingTargetSupplier.get();
+            result.put("teams", teams == null ? java.util.Collections.emptyList() : teams);
+        } catch (RuntimeException e) {
+            logger.warn("读取信道 Team 绑定目标失败", e);
+            result.put("teams", java.util.Collections.emptyList());
+        }
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
     private void maskChannelSecrets(JSONObject json) {

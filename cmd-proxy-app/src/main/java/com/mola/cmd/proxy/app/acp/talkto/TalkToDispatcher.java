@@ -442,12 +442,14 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 || targetClient == null || message == null) {
             return InboundDeliveryResult.rejected("invalid inbound delivery arguments");
         }
-        if (targetClient.getState() == AbstractAcpClient.State.READY) {
-            pushIncomingMessageCard(targetClient, message);
-            targetClient.send(message.buildPrompt(), null);
-            logger.info("talkTo external direct delivery: route={}, sender={}",
-                    routingKey, message.getSender());
-            return InboundDeliveryResult.direct();
+        synchronized (targetClient) {
+            if (targetClient.getState() == AbstractAcpClient.State.READY) {
+                pushIncomingMessageCard(targetClient, message);
+                targetClient.send(message.buildPrompt(), null);
+                logger.info("talkTo external direct delivery: route={}, sender={}",
+                        routingKey, message.getSender());
+                return InboundDeliveryResult.direct();
+            }
         }
         LinkedBlockingQueue<TalkToMessage> inbox = inboxes.computeIfAbsent(
                 routingKey, key -> new LinkedBlockingQueue<>(INBOX_CAPACITY));

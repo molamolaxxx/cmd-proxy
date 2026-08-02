@@ -154,6 +154,11 @@ public final class AcpResponseContentRenderer {
 
     public void onTalkToEvent(String eventType, String robotName,
                               String messageContent) {
+        sendCardContent(talkToCardContent(eventType, robotName, messageContent));
+    }
+
+    public static String talkToCardContent(String eventType, String robotName,
+                                           String messageContent) {
         String safeName = escapeMarkdown(robotName);
         String safeContent = sanitizeCodeFences(messageContent);
         String summary;
@@ -164,10 +169,10 @@ public final class AcpResponseContentRenderer {
         } else {
             summary = "💬 " + safeName;
         }
-        sendCardContent("<details class=\"tool-call\" open>"
+        return "<details class=\"tool-call\" open>"
                 + "<summary>" + summary + "</summary>"
                 + "<div class=\"tool-call-body\">\n\n```\n"
-                + safeContent + "\n```\n\n</div></details>\n");
+                + safeContent + "\n```\n\n</div></details>\n";
     }
 
     public void onCompactionEvent(String eventType, String provider) {

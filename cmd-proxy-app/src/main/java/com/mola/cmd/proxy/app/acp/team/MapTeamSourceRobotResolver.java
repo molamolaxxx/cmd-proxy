@@ -28,7 +28,7 @@ public final class MapTeamSourceRobotResolver implements TeamSourceRobotResolver
         if (robot == null || robot.getName() == null || robot.getName().trim().isEmpty()) {
             throw new TeamSourceResolutionException(
                     TeamErrorCode.SOURCE_ROBOT_NOT_FOUND,
-                    "sourceGroupId does not resolve to an active ordinary ACP robot");
+                    "sourceGroupId does not resolve to an enabled Fast Team source");
         }
         String expectedRobotId = "acp-" + robot.getName()
                 .replace(" ", "_").replace("\u3000", "_");
@@ -40,7 +40,7 @@ public final class MapTeamSourceRobotResolver implements TeamSourceRobotResolver
         if (!robot.isEnabled() || robot.isOnlySubAgent()) {
             throw new TeamSourceResolutionException(
                     TeamErrorCode.SOURCE_ROBOT_MISMATCH,
-                    "source robot is not an enabled ordinary ACP robot");
+                    "source robot is disabled or restricted to sub-agent use");
         }
         return robot;
     }

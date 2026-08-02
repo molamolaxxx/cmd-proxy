@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.channel;
 
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToContactProvider;
@@ -54,6 +55,10 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
     }
 
     public String createRoute(String channelId, ChannelReplyRoute route) {
+        return createRoute(channelId, route, null);
+    }
+
+    public String createRoute(String channelId, ChannelReplyRoute route, String ownerKey) {
         cleanupExpired();
         if (routes.size() >= maxRoutes) {
             routes.entrySet().stream()
@@ -67,7 +72,7 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         long now = System.currentTimeMillis();
         long routeExpiry = route.getExpiresAt() > 0 ? route.getExpiresAt() : now + ttlMs;
         routes.put(target, new RouteEntry(channelId, route, now,
-                Math.min(routeExpiry, now + ttlMs)));
+                Math.min(routeExpiry, now + ttlMs), ownerKey));
         return target;
     }
 
@@ -82,6 +87,14 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
 
     @Override
     public String deliver(TalkToRequest request, String senderName, String senderGroupId) {
+        return deliver(request, senderGroupId, false);
+    }
+
+    String deliverSystem(TalkToRequest request) {
+        return deliver(request, null, true);
+    }
+
+    private String deliver(TalkToRequest request, String senderGroupId, boolean system) {
         String target = request.getTarget();
         RouteEntry entry = routes.get(target);
         if (entry == null) {
@@ -90,6 +103,9 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         if (entry.expiresAt <= System.currentTimeMillis()) {
             routes.remove(target, entry);
             return failure("回复路由已过期。");
+        }
+        if (!system && entry.ownerKey != null && !entry.ownerKey.equals(senderGroupId)) {
+            return failure("当前 ACP 无权使用该回复路由。");
         }
         if (!entry.claimed.compareAndSet(false, true)) {
             return failure("回复路由正在发送或已消费，不能重复发送。");
@@ -119,9 +135,8 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         if (channelId == null) return failure("回复路由不存在、已过期或已消费。");
         ChannelConfig config = configs.get(channelId);
         if (config == null || !config.isEnabled()) return failure("信道不存在或未启用。");
-        if (config.getBinding() == null
-                || senderGroupId == null
-                || !senderGroupId.equals(config.getBinding().getGroupId())) {
+        if (senderGroupId == null
+                || !senderGroupId.equals(bindingOwnerKey(config.getBinding()))) {
             return failure("当前 ACP 不是该信道绑定的 client。");
         }
         String chatId = trim(config.getDefaultChatId());
@@ -145,8 +160,8 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         if (groupId == null) return Collections.emptyList();
         List<ExternalTalkToContact> result = new ArrayList<>();
         for (ChannelConfig config : configs.values()) {
-            if (!config.isEnabled() || config.getBinding() == null
-                    || !groupId.equals(config.getBinding().getGroupId())
+            if (!config.isEnabled()
+                    || !groupId.equals(bindingOwnerKey(config.getBinding()))
                     || trim(config.getDefaultChatId()).isEmpty()) continue;
             result.add(new ExternalTalkToContact(
                     PREFIX + config.getId(), config.getId(), "外部信道"));
@@ -181,19 +196,32 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         return value == null ? "" : value.trim();
     }
 
+    private static String bindingOwnerKey(ChannelBinding binding) {
+        if (binding == null) return "";
+        if (ChannelBinding.TYPE_TEAM_MEMBER.equals(binding.getType())) {
+            String teamId = trim(binding.getTeamId());
+            String memberId = trim(binding.getTeamMemberId());
+            return teamId.isEmpty() || memberId.isEmpty()
+                    ? "" : "team:" + teamId + ":" + memberId;
+        }
+        return trim(binding.getGroupId());
+    }
+
     private static final class RouteEntry {
         private final String channelId;
         private final ChannelReplyRoute route;
         private final long createdAt;
         private final long expiresAt;
+        private final String ownerKey;
         private final AtomicBoolean claimed = new AtomicBoolean(false);
 
         private RouteEntry(String channelId, ChannelReplyRoute route,
-                           long createdAt, long expiresAt) {
+                           long createdAt, long expiresAt, String ownerKey) {
             this.channelId = channelId;
             this.route = route;
             this.createdAt = createdAt;
             this.expiresAt = expiresAt;
+            this.ownerKey = ownerKey;
         }
     }
 }

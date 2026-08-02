@@ -20,14 +20,12 @@ public final class ChannelConfigFileStore {
     private ChannelConfigFileStore() { }
 
     /**
-     * Fills the channel's default target only when it is currently blank.
-     * The first discovered group wins so another group cannot silently reroute notifications.
-     *
-     * @return the effective configured target (the existing value or {@code discoveredChatId})
+     * Persists the most recently received conversation as the channel's proactive target.
+     * For WeCom this value is a group {@code chatid} or a direct-message {@code userid}.
      */
-    public static String fillDefaultChatIdIfBlank(String channelId, String discoveredChatId)
+    public static String setDefaultChatId(String channelId, String discoveredChatId)
             throws IOException {
-        return fillDefaultChatIdIfBlank(
+        return setDefaultChatId(
                 CmdProxyHome.resolve("acpConfig.json"), channelId, discoveredChatId);
     }
 
@@ -49,17 +47,14 @@ public final class ChannelConfigFileStore {
         }
     }
 
-    static String fillDefaultChatIdIfBlank(Path configPath, String channelId,
-                                           String discoveredChatId) throws IOException {
+    static String setDefaultChatId(Path configPath, String channelId,
+                                   String discoveredChatId) throws IOException {
         String cleanChannelId = requireText(channelId, "channelId");
         String cleanChatId = requireText(discoveredChatId, "discoveredChatId");
         synchronized (LOCK) {
             JSONObject root = JSON.parseObject(new String(
                     Files.readAllBytes(configPath), StandardCharsets.UTF_8));
             JSONObject matched = findChannel(root, cleanChannelId);
-
-            String existing = trim(matched.getString("defaultChatId"));
-            if (!existing.isEmpty()) return existing;
 
             matched.put("defaultChatId", cleanChatId);
             writeAtomically(configPath, JSON.toJSONString(root,

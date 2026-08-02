@@ -193,7 +193,7 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                     config.getId(), msgId);
             return;
         }
-        captureDefaultGroupChatId(chatType, chatId);
+        captureDefaultChatTarget(chatType, chatId, userId);
         ChannelReplyRoute route = new ChannelReplyRoute(
                 frame.getRequestId(), msgId, userId, chatId, chatType,
                 System.currentTimeMillis() + ROUTE_TTL_MS);
@@ -208,19 +208,23 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
         }
     }
 
-    private void captureDefaultGroupChatId(String chatType, String chatId) {
-        if (!"group".equals(chatType) || blank(chatId)
-                || !blank(config.getDefaultChatId())) return;
+    private void captureDefaultChatTarget(String chatType, String chatId, String userId) {
+        String target = defaultChatTarget(chatType, chatId, userId);
+        if (blank(target)) return;
         try {
-            String effective = ChannelConfigFileStore.fillDefaultChatIdIfBlank(
-                    config.getId(), chatId);
+            String effective = ChannelConfigFileStore.setDefaultChatId(
+                    config.getId(), target);
             config.setDefaultChatId(effective);
-            logger.info("channel default chat captured: channelId={}, chatType=group, chatId={}",
-                    config.getId(), effective);
+            logger.info("channel default chat updated: channelId={}, chatType={}",
+                    config.getId(), chatType);
         } catch (Exception e) {
             logger.error("channel default chat persist failed: channelId={}, errorCode=CHANNEL_CONFIG_WRITE_FAILED",
                     config.getId(), e);
         }
+    }
+
+    static String defaultChatTarget(String chatType, String chatId, String userId) {
+        return "group".equals(chatType) ? chatId : userId;
     }
 
     private void handleEvent(WeComFrame frame) {

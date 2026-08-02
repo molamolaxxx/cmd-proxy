@@ -34,6 +34,7 @@ import com.mola.cmd.proxy.app.acp.team.MapTeamSourceRobotResolver
 import com.mola.cmd.proxy.app.acp.team.TeamStartupCoordinator
 import com.mola.cmd.proxy.app.acp.team.event.RpcTeamEventSink
 import com.mola.cmd.proxy.app.acp.team.listener.TeamAcpResponseListener
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportDescriptor
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportProtocol
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToContextInjector
@@ -75,7 +76,7 @@ object AcpProxy {
     /** robotName → groupId 反向索引，用于 talkTo 查找目标 client */
     private val robotToGroupIdMap = ConcurrentHashMap<String, String>()
 
-    /** 普通 sourceGroupId → robot 配置，只供 Team 创建时校验和生成配置快照。 */
+    /** Team 可选 sourceGroupId → robot 配置，只供 Team 创建和恢复。 */
     private val globalGroupRobotRegistry = ConcurrentHashMap<String, AcpRobotParam>()
 
     /** TalkTo 消息投递器（全局单例） */
@@ -105,6 +106,9 @@ object AcpProxy {
     /** robot 级重载不得悄悄改变全实例 chatter 维度。 */
     private var activeChatterIds: List<String> = emptyList()
 
+    /** 包含禁用项的配置身份集合，用于允许既有 robot 做角色级热重载。 */
+    private val configuredRobotNames = ConcurrentHashMap.newKeySet<String>()
+
     private val shutdownHookRegistered = AtomicBoolean(false)
 
     @Synchronized
@@ -114,6 +118,8 @@ object AcpProxy {
         chatterIdsJson: String? = null,
         groupWorkDirMap: Map<String, String> = emptyMap(),
         groupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
+        teamSourceGroupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
+        configuredRobotNames: Set<String> = emptySet(),
         channels: List<ChannelConfig> = emptyList()
     ) {
         ensureShutdownHook()
@@ -126,6 +132,7 @@ object AcpProxy {
         } else {
             JSON.parseArray(chatterIdsJson, String::class.java).toList()
         }
+        this.configuredRobotNames.addAll(configuredRobotNames)
         // 注册命令
         CmdReceiver.register("acp", "acp") { param ->
             mutableMapOf<String, String>()
@@ -135,9 +142,9 @@ object AcpProxy {
         for ((groupId, robot) in groupRobotMap) {
             if (robot != null && robot.name.isNotBlank()) {
                 globalRobotRegistry[robot.name] = robot
-                globalGroupRobotRegistry[groupId] = robot
             }
         }
+        globalGroupRobotRegistry.putAll(teamSourceGroupRobotMap)
 
         // 构建 robotName → groupId 反向索引（取第一个）
         for ((groupId, robot) in groupRobotMap) {
@@ -178,12 +185,12 @@ object AcpProxy {
 
         // 冷加载：并行启动所有 groupId 的 client
         val latch = CountDownLatch(cmdGroupList.size)
-        val executor = Executors.newFixedThreadPool(
+        val executor = if (cmdGroupList.isEmpty()) null else Executors.newFixedThreadPool(
             minOf(cmdGroupList.size, Runtime.getRuntime().availableProcessors() * 2)
         )
 
         for (groupId in cmdGroupList) {
-            executor.submit {
+            executor?.submit {
                 try {
                     val workDir = groupWorkDirMap[groupId]
                     val robot = groupRobotMap[groupId]
@@ -216,7 +223,7 @@ object AcpProxy {
 
         // 等待所有 client 启动完成
         latch.await()
-        executor.shutdown()
+        executor?.shutdown()
         log.info("所有 ACP client 冷加载完成, 共 {} 个", cmdGroupList.size)
 
         // client 和普通 TalkTo dispatcher 均就绪后再开放外部消息入口。
@@ -225,6 +232,7 @@ object AcpProxy {
             CmdProxyHome.instanceId(),
             registry,
             talkToDispatcher,
+            teamManager,
             ChannelManager.AdapterFactory { channel, bridge ->
                 WeComChannelAdapter(channel, bridge)
             }
@@ -236,7 +244,7 @@ object AcpProxy {
         startScheduler(groupRobotMap)
 
         // 会话注册完成后，调用 acpSyncRobots 通知服务端同步 robot 信息
-        if (!robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank() && cmdGroupList.isNotEmpty()) {
+        if (!robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank()) {
             try {
                 publishAcpSyncRobots()
                 log.info("acpSyncRobots 回调已发送")
@@ -272,7 +280,8 @@ object AcpProxy {
 
     /** 注册实例级稳定 transport，并仅在权威状态恢复成功后开放业务命令。 */
     private fun initializeTeamTransport() {
-        teamTransportDescriptor = TeamTransportDescriptor.forInstance(CmdProxyHome.instanceId())
+        teamTransportDescriptor = TeamTransportDescriptor.forInstance(
+            CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
         val sourceResolver = MapTeamSourceRobotResolver(globalGroupRobotRegistry)
         val eventSink = RpcTeamEventSink()
         val teamRegistry = TeamClientRegistry()
@@ -361,7 +370,8 @@ object AcpProxy {
         teamCommandHandler = null
         if (recovered) {
             teamTransportDescriptor =
-                TeamTransportDescriptor.readyForBusiness(CmdProxyHome.instanceId())
+                TeamTransportDescriptor.readyForBusiness(
+                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
             teamCommandHandler =
                 TeamCommandHandler(manager, teamTransportDescriptor.transportGroup)
         }
@@ -1323,7 +1333,8 @@ object AcpProxy {
         // 用上一代 ready snapshot 误导 MolaChat。
         if (::teamTransportDescriptor.isInitialized) {
             teamTransportDescriptor =
-                TeamTransportDescriptor.forInstance(CmdProxyHome.instanceId())
+                TeamTransportDescriptor.forInstance(
+                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
             if (::acpSyncRobotsSnapshot.isInitialized) {
                 acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
             }
@@ -1359,6 +1370,7 @@ object AcpProxy {
         globalGroupRobotRegistry.clear()
         robotToGroupIdMap.clear()
         activeChatterIds = emptyList()
+        configuredRobotNames.clear()
 
         log.info("ACP 服务已停止")
     }
@@ -1370,6 +1382,38 @@ object AcpProxy {
     @JvmStatic
     fun channelErrors(): Map<String, String> =
         channelManager?.errors ?: emptyMap()
+
+    @JvmStatic
+    fun channelTeamBindingTargets(): List<Map<String, Any>> {
+        val manager = teamManager ?: return emptyList()
+        return manager.snapshotDefinitions()
+            .filter { team ->
+                team.state == com.mola.cmd.proxy.app.acp.team.model.TeamState.CREATING
+                        || team.state == com.mola.cmd.proxy.app.acp.team.model.TeamState.READY
+                        || team.state == com.mola.cmd.proxy.app.acp.team.model.TeamState.RECOVERING
+            }
+            .sortedBy { it.teamId }
+            .map { team ->
+                linkedMapOf<String, Any>(
+                    "id" to team.teamId,
+                    "name" to team.name,
+                    "state" to team.state.name,
+                    "members" to team.members
+                        .filter { member ->
+                            member.state != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.CLOSING
+                                    && member.state != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.CLOSED
+                        }
+                        .sortedWith(compareBy({ it.order }, { it.teamMemberId }))
+                        .map { member ->
+                            linkedMapOf<String, Any>(
+                                "id" to member.teamMemberId,
+                                "name" to member.displayName,
+                                "state" to member.state.name
+                            )
+                        }
+                )
+            }
+    }
 
     @JvmStatic
     fun setChannelInboundEnabled(channelId: String, enabled: Boolean): Boolean =
@@ -1395,47 +1439,61 @@ object AcpProxy {
      */
     @Synchronized
     fun reloadRobot(robotName: String, robot: AcpRobotParam, chatterIds: List<String>) {
-        log.info("开始 robot 级热重载: robot={}, enabled={}, onlySubAgent={}",
-            robotName, robot.isEnabled, robot.isOnlySubAgent)
+        log.info("开始 robot 级热重载: robot={}, enabled={}, onlySubAgent={}, onlyTeamMember={}",
+            robotName, robot.isEnabled, robot.isOnlySubAgent, robot.isOnlyTeamMember)
+
+        require(!(robot.isOnlySubAgent && robot.isOnlyTeamMember)) {
+            "onlySubAgent and onlyTeamMember cannot both be true"
+        }
 
         if (chatterIds != activeChatterIds) {
             throw IllegalStateException(
                 "chatterIds changed; use full ACP service refresh instead of robot refresh")
         }
-        if (!globalRobotRegistry.containsKey(robotName)) {
+        if (!configuredRobotNames.contains(robotName)) {
             throw IllegalStateException(
                 "robot identity changed or is not active; use full ACP service refresh")
         }
 
         // 1. 找到该 robot 的所有旧 groupId，逐一关闭
         val oldGroupIds = registry.getGroupIdsByRobot(robotName)
+        val remainsTeamSource = robot.isEnabled && !robot.isOnlySubAgent
         for (groupId in oldGroupIds) {
             registry.closeByGroupId(groupId)
-            memoryManagers.remove(groupId)
-            abilityServices.remove(groupId)
-            globalGroupRobotRegistry.remove(groupId)
+            // MAIN → Team-only 时 Team client 仍按 sourceGroupId 共用这些服务。
+            if (!remainsTeamSource) {
+                memoryManagers.remove(groupId)
+                abilityServices.remove(groupId)
+            }
             log.info("robot '{}' 旧 client 已关闭, groupId={}", robotName, groupId)
         }
+        globalGroupRobotRegistry.entries.removeIf { it.value.name == robotName }
+        robotToGroupIdMap.remove(robotName)
 
         // 2. 更新全局 robot 注册表
-        if (robot.isEnabled) {
+        if (robot.isEnabled && !robot.isOnlyTeamMember) {
             globalRobotRegistry[robotName] = robot
         } else {
             globalRobotRegistry.remove(robotName)
         }
 
-        // 3. 如果启用且非 onlySubAgent，重建所有 groupId 的 client
+        val acpId = "acp-" + robot.name.replace(" ", "_")
+            .replace("\u3000", "_")
+        val sourceGroupIds = chatterIds.map { chatterId ->
+            listOf(chatterId, acpId).sorted().joinToString("")
+        }
         if (robot.isEnabled && !robot.isOnlySubAgent) {
-            val acpId = "acp-" + robot.name.replace(" ", "_")
-                .replace("\u3000", "_")
+            sourceGroupIds.forEach { groupId -> globalGroupRobotRegistry[groupId] = robot }
+        } else {
+            teamManager?.disableSourceRobot(acpId)
+        }
 
-            val newGroupIds = chatterIds.map { chatterId ->
-                listOf(chatterId, acpId).sorted().joinToString("")
-            }
+        // 3. 只有普通 MAIN robot 才重建 client；Team-only 仅保留来源配置。
+        if (robot.isEnabled && !robot.isOnlySubAgent && !robot.isOnlyTeamMember) {
+            val newGroupIds = sourceGroupIds
 
             for (groupId in newGroupIds) {
                 try {
-                    globalGroupRobotRegistry[groupId] = robot
                     registry.createSession(groupId, robot.workDir, robot)
                     val client = registry.getClient(groupId) ?: continue
 
@@ -1454,10 +1512,8 @@ object AcpProxy {
             // 为新 groupId 注册命令处理器，确保 MolaChat 能发送命令到此 robot
             registerGroupCommands(newGroupIds)
         } else {
-            // 被禁用或是 onlySubAgent：不启动 client，只做 ability 反思
+            // 被禁用、Team-only 或 onlySubAgent：不启动 MAIN client。
             if (robot.isEnabled && robot.isOnlySubAgent) {
-                val acpId = "acp-" + robot.name.replace(" ", "_")
-                    .replace("\u3000", "_")
                 val groupId = chatterIds.firstOrNull()?.let { chatterId ->
                     listOf(chatterId, acpId).sorted().joinToString("")
                 }
@@ -1465,18 +1521,19 @@ object AcpProxy {
                     initAbilityReflectionStandalone(groupId, robot)
                 }
             }
-            // 清理该 robot 在 robotToGroupIdMap 中的记录
-            robotToGroupIdMap.remove(robotName)
         }
 
         // 4. 触发 acpSyncRobots 通知 MolaChat 更新 robot 信息
         try {
             val allRobots = globalRobotRegistry.values.filter {
-                it.isEnabled && !it.isOnlySubAgent
+                it.isEnabled && !it.isOnlySubAgent && !it.isOnlyTeamMember
             }
             val robotsJson = JSON.toJSONString(allRobots)
             val chatterIdsJson = JSON.toJSONString(chatterIds)
             acpSyncRobotsSnapshot.updateOrdinary(robotsJson, chatterIdsJson)
+            teamTransportDescriptor = TeamTransportDescriptor.readyForBusiness(
+                CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
+            acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
             publishAcpSyncRobots()
             log.info("acpSyncRobots 回调已发送 (robot级重载后)")
         } catch (e: Exception) {
@@ -1484,6 +1541,30 @@ object AcpProxy {
         }
 
         log.info("robot 级热重载完成: robot={}", robotName)
+    }
+
+    private fun teamMemberSourceDescriptors(): List<TeamMemberSourceDescriptor> {
+        val result = mutableListOf<TeamMemberSourceDescriptor>()
+        val robotsByName = globalGroupRobotRegistry.values
+            .filter { it.isEnabled && !it.isOnlySubAgent }
+            .associateBy { it.name }
+        for (chatterId in activeChatterIds.sorted()) {
+            for (robot in robotsByName.values.sortedBy { it.name }) {
+                val sourceRobotId = "acp-" + robot.name.replace(" ", "_")
+                    .replace("\u3000", "_")
+                val sourceGroupId = listOf(chatterId, sourceRobotId)
+                    .sorted().joinToString("")
+                if (globalGroupRobotRegistry[sourceGroupId] !== robot
+                    && globalGroupRobotRegistry[sourceGroupId]?.name != robot.name) {
+                    continue
+                }
+                result.add(TeamMemberSourceDescriptor(
+                    chatterId, sourceGroupId, sourceRobotId, robot.name,
+                    robot.name, robot.avatar, robot.signature, robot.isOnlyTeamMember
+                ))
+            }
+        }
+        return result
     }
 
     /**

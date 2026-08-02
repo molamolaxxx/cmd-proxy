@@ -15,6 +15,7 @@ import com.mola.cmd.proxy.app.acp.team.model.*;
 import com.mola.cmd.proxy.app.acp.team.protocol.*;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToDispatcher;
+import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,6 +52,7 @@ public final class TeamManager implements AutoCloseable {
     private final Object createQuotaLock = new Object();
     private final ConcurrentHashMap<String, TeamTalkToDispatcher> talkToDispatchers =
             new ConcurrentHashMap<>();
+    private volatile ExternalTalkToGateway externalGateway;
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Consumer<String> scheduleCleanup = ignored -> { };
     private volatile ScheduleTaskManager scheduleTaskManager;
@@ -530,9 +532,29 @@ public final class TeamManager implements AutoCloseable {
         if (runtime == null) {
             throw new IllegalArgumentException("Team runtime not found");
         }
-        return talkToDispatchers.computeIfAbsent(teamId,
+        TeamTalkToDispatcher dispatcher = talkToDispatchers.computeIfAbsent(teamId,
                 ignored -> new TeamTalkToDispatcher(
                         runtime, clientRegistry, eventSink, this::onMemberState));
+        ExternalTalkToGateway gateway = externalGateway;
+        if (gateway != null) dispatcher.registerExternalGateway(gateway);
+        return dispatcher;
+    }
+
+    /** Makes opaque channel reply routes available to current and future Team dispatchers. */
+    public synchronized void registerExternalGateway(ExternalTalkToGateway gateway) {
+        if (gateway == null) return;
+        externalGateway = gateway;
+        for (TeamTalkToDispatcher dispatcher : talkToDispatchers.values()) {
+            dispatcher.registerExternalGateway(gateway);
+        }
+    }
+
+    public synchronized void unregisterExternalGateway(ExternalTalkToGateway gateway) {
+        if (gateway == null || externalGateway != gateway) return;
+        externalGateway = null;
+        for (TeamTalkToDispatcher dispatcher : talkToDispatchers.values()) {
+            dispatcher.unregisterExternalGateway(gateway);
+        }
     }
 
     /**
@@ -870,6 +892,37 @@ public final class TeamManager implements AutoCloseable {
         } catch (Exception ignored) {
         } finally {
             runtime.getOperationLock().unlock();
+        }
+    }
+
+    /**
+     * Robot 总开关关闭或切为 onlySubAgent 时，停止所有引用该来源的 Team client。
+     * Team 定义保留为 ERROR，重新启用来源后可通过既有恢复/换会话流程重建。
+     */
+    public void disableSourceRobot(String sourceRobotId) {
+        if (sourceRobotId == null || sourceRobotId.trim().isEmpty() || closed.get()) {
+            return;
+        }
+        TeamError error = TeamError.of(TeamErrorCode.SOURCE_ROBOT_NOT_FOUND,
+                "source robot is disabled for Fast Team", true);
+        for (TeamDefinition definition : snapshotDefinitions()) {
+            for (TeamMemberDefinition member : definition.getMembers()) {
+                if (!sourceRobotId.equals(member.getSourceRobotId())) {
+                    continue;
+                }
+                clientRegistry.remove(definition.getTeamId(), member.getTeamMemberId())
+                        .ifPresent(client -> {
+                            try {
+                                client.close();
+                            } catch (IOException closeFailure) {
+                                logger.warn("关闭已禁用来源的 Team client 失败, teamId={}, memberId={}",
+                                        definition.getTeamId(), member.getTeamMemberId(),
+                                        closeFailure);
+                            }
+                        });
+                onMemberState(definition.getTeamId(), member.getTeamMemberId(),
+                        TeamMemberState.ERROR, error);
+            }
         }
     }
 

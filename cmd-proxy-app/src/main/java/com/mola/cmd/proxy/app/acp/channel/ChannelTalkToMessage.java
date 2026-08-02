@@ -21,6 +21,10 @@ public final class ChannelTalkToMessage extends TalkToMessage {
         this.chatId = chatId;
     }
 
+    public String getChannelDisplayName() {
+        return channelDisplayName;
+    }
+
     @Override
     public String buildPrompt() {
         return "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -37,7 +41,16 @@ public final class ChannelTalkToMessage extends TalkToMessage {
                 + "当前任务处理完后，只输出一次以下 target 的 talk_to JSON；content 是发回信道的最终 Markdown。\n"
                 + "不要发送中间进度，不要修改 target，也不要在脚本中等待。普通回答文本不会可靠地回复信道。\n"
                 + "{\"action\":\"talk_to\",\"target\":\"" + getSender()
-                + "\",\"content\":\"最终结果\"}\n";
+                + "\",\"content\":\"最终结果\"}\n\n"
+                + "若任务结束后又获得异步结果，需要再次主动通知，可使用稳定 target \""
+                + stableTarget() + "\"；它始终发送到该信道最近收到消息的会话。"
+                + "不要重复使用上面的一次性 r_ 回复 target。\n";
+    }
+
+    private String stableTarget() {
+        String target = getSender();
+        int routeMarker = target == null ? -1 : target.indexOf(":r_");
+        return routeMarker < 0 ? safe(target) : target.substring(0, routeMarker);
     }
 
     private static String safe(String value) {

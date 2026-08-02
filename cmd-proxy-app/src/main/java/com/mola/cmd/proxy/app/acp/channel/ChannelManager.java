@@ -7,6 +7,7 @@ import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
+import com.mola.cmd.proxy.app.acp.team.TeamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,25 +39,35 @@ public final class ChannelManager implements AutoCloseable {
     private final Map<String, String> errors = new ConcurrentHashMap<>();
     private final ChannelTalkToGateway gateway;
     private final ChannelTalkToBridge bridge;
+    private final TeamManager teamManager;
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     public ChannelManager(List<ChannelConfig> configuredChannels, String instanceId,
                           AcpClientRegistry clientRegistry, TalkToDispatcher dispatcher,
-                          AdapterFactory adapterFactory) {
+                          TeamManager teamManager, AdapterFactory adapterFactory) {
         this.configuredChannels = configuredChannels == null
                 ? Collections.emptyList() : configuredChannels;
         this.instanceId = instanceId;
         this.clientRegistry = clientRegistry;
         this.dispatcher = dispatcher;
         this.adapterFactory = adapterFactory;
+        this.teamManager = teamManager;
         this.gateway = new ChannelTalkToGateway(adapters, configs);
-        this.bridge = new ChannelTalkToBridge(configs, clientRegistry, dispatcher, gateway);
+        this.bridge = new ChannelTalkToBridge(configs,
+                new DefaultChannelBindingResolver(clientRegistry, dispatcher, teamManager), gateway);
+    }
+
+    public ChannelManager(List<ChannelConfig> configuredChannels, String instanceId,
+                          AcpClientRegistry clientRegistry, TalkToDispatcher dispatcher,
+                          AdapterFactory adapterFactory) {
+        this(configuredChannels, instanceId, clientRegistry, dispatcher, null, adapterFactory);
     }
 
     public void start() {
         if (!started.compareAndSet(false, true)) return;
         // Adapter.start() may synchronously receive a callback, so expose outbound routing first.
         dispatcher.registerExternalGateway(gateway);
+        if (teamManager != null) teamManager.registerExternalGateway(gateway);
         Set<String> ids = new HashSet<>();
         Set<String> botIds = new HashSet<>();
         for (ChannelConfig config : configuredChannels) {
@@ -113,15 +124,28 @@ public final class ChannelManager implements AutoCloseable {
         ChannelBinding binding = config.getBinding();
         if (binding == null) return "binding is required";
         if (!instanceId.equals(trim(binding.getInstanceId()))) return "binding.instanceId mismatch";
-        String groupId = trim(binding.getGroupId());
-        if (groupId.isEmpty()) return "binding.groupId is required";
-        AcpClient client = clientRegistry.getClient(groupId);
-        if (client == null) return "binding group client not found";
-        if (client.getClientIdentity().getScope() != AcpClientIdentity.Scope.MAIN) {
-            return "binding client must be MAIN";
-        }
-        if (client.getRobotParam() != null && client.getRobotParam().isOnlySubAgent()) {
-            return "binding client cannot be onlySubAgent";
+        if (ChannelBinding.TYPE_MAIN.equals(binding.getType())) {
+            if (!trim(binding.getTeamId()).isEmpty() || !trim(binding.getTeamMemberId()).isEmpty()) {
+                return "MAIN binding cannot contain team fields";
+            }
+            String groupId = trim(binding.getGroupId());
+            if (groupId.isEmpty()) return "binding.groupId is required";
+            AcpClient client = clientRegistry.getClient(groupId);
+            if (client == null) return "binding group client not found";
+            if (client.getClientIdentity().getScope() != AcpClientIdentity.Scope.MAIN) {
+                return "binding client must be MAIN";
+            }
+            if (client.getRobotParam() != null && client.getRobotParam().isOnlySubAgent()) {
+                return "binding client cannot be onlySubAgent";
+            }
+        } else if (ChannelBinding.TYPE_TEAM_MEMBER.equals(binding.getType())) {
+            if (!trim(binding.getGroupId()).isEmpty()) {
+                return "TEAM_MEMBER binding cannot contain groupId";
+            }
+            if (trim(binding.getTeamId()).isEmpty()) return "binding.teamId is required";
+            if (trim(binding.getTeamMemberId()).isEmpty()) return "binding.teamMemberId is required";
+        } else {
+            return "unsupported binding.type";
         }
         return null;
     }
@@ -148,6 +172,7 @@ public final class ChannelManager implements AutoCloseable {
     public void close() {
         if (!started.compareAndSet(true, false)) return;
         dispatcher.unregisterExternalGateway(gateway);
+        if (teamManager != null) teamManager.unregisterExternalGateway(gateway);
         for (ChannelAdapter adapter : adapters.values()) {
             try { adapter.stop(); } catch (RuntimeException e) {
                 logger.warn("channel stop failed: channelId={}", adapter.getChannelId(), e);

@@ -17,6 +17,7 @@ public class AcpRobotParam {
     private boolean abilityAutoRefresh = true;
     private List<SubAgentRef> subAgents;
     private boolean onlySubAgent;
+    private boolean onlyTeamMember;
     private boolean scheduleEnabled = false;
     private List<ContactRef> contacts;
     private String model;
@@ -142,6 +143,14 @@ public class AcpRobotParam {
 
     public void setOnlySubAgent(boolean onlySubAgent) {
         this.onlySubAgent = onlySubAgent;
+    }
+
+    public boolean isOnlyTeamMember() {
+        return onlyTeamMember;
+    }
+
+    public void setOnlyTeamMember(boolean onlyTeamMember) {
+        this.onlyTeamMember = onlyTeamMember;
     }
 
     public boolean isScheduleEnabled() {

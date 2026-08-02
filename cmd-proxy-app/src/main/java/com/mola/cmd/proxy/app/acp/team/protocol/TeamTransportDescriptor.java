@@ -19,9 +19,11 @@ public final class TeamTransportDescriptor {
     private final boolean businessCommandsReady;
     private final List<String> commands;
     private final TeamLimits limits;
+    private final List<TeamMemberSourceDescriptor> teamMemberSources;
 
     private TeamTransportDescriptor(String cmdProxyInstanceId, String transportGroup,
-                                    boolean businessCommandsReady) {
+                                    boolean businessCommandsReady,
+                                    List<TeamMemberSourceDescriptor> teamMemberSources) {
         this.schemaVersion = TeamDefinition.SCHEMA_VERSION;
         this.cmdProxyInstanceId = cmdProxyInstanceId;
         this.transportGroup = transportGroup;
@@ -30,6 +32,10 @@ public final class TeamTransportDescriptor {
         this.eventCommand = TeamTransportProtocol.EVENT_COMMAND;
         this.businessCommandsReady = businessCommandsReady;
         this.limits = TeamLimits.system();
+        this.teamMemberSources = Collections.unmodifiableList(
+                teamMemberSources == null
+                        ? Collections.emptyList()
+                        : new java.util.ArrayList<>(teamMemberSources));
         this.commands = businessCommandsReady
                 ? Collections.unmodifiableList(Arrays.asList(
                         TeamTransportProtocol.DESCRIBE_COMMAND,
@@ -49,15 +55,27 @@ public final class TeamTransportDescriptor {
     }
 
     public static TeamTransportDescriptor forInstance(String instanceId) {
+        return forInstance(instanceId, Collections.emptyList());
+    }
+
+    public static TeamTransportDescriptor forInstance(
+            String instanceId, List<TeamMemberSourceDescriptor> teamMemberSources) {
         String normalized = requireSafeInstanceId(instanceId);
         return new TeamTransportDescriptor(
-                normalized, TeamTransportProtocol.TRANSPORT_PREFIX + normalized, false);
+                normalized, TeamTransportProtocol.TRANSPORT_PREFIX + normalized,
+                false, teamMemberSources);
     }
 
     public static TeamTransportDescriptor readyForBusiness(String instanceId) {
+        return readyForBusiness(instanceId, Collections.emptyList());
+    }
+
+    public static TeamTransportDescriptor readyForBusiness(
+            String instanceId, List<TeamMemberSourceDescriptor> teamMemberSources) {
         String normalized = requireSafeInstanceId(instanceId);
         return new TeamTransportDescriptor(
-                normalized, TeamTransportProtocol.TRANSPORT_PREFIX + normalized, true);
+                normalized, TeamTransportProtocol.TRANSPORT_PREFIX + normalized,
+                true, teamMemberSources);
     }
 
     public String getSchemaVersion() {
@@ -94,6 +112,10 @@ public final class TeamTransportDescriptor {
 
     public TeamLimits getLimits() {
         return limits;
+    }
+
+    public List<TeamMemberSourceDescriptor> getTeamMemberSources() {
+        return teamMemberSources;
     }
 
     private static String requireSafeInstanceId(String instanceId) {
