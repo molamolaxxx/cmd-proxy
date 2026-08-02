@@ -110,6 +110,7 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 <div class="toggle-row"><div><div class="toggle-label">全局 HTTP 代理</div><div class="toggle-desc">关闭会关闭所有 Agent 的代理；开启会启用已配置代理地址的 Agent</div></div><label class="switch"><input type="checkbox" id="globalProxy" onchange="applyGlobalProxy()"><span class="slider"></span></label></div>
 </div></div>
 <div class="card"><div class="card-header"><h2>Chatter ID 列表</h2><button class="btn btn-secondary btn-sm" onclick="addChatterId()"><span class="material-icons">add</span>添加</button></div><div class="card-body"><div id="chatterList" class="chip-list"></div></div></div>
+<div class="card"><div class="card-header"><h2>外部信道</h2><button class="btn btn-secondary btn-sm" onclick="addChannel()"><span class="material-icons">add</span>添加企业微信信道</button></div><div class="card-body"><div id="channelList"></div></div></div>
 <div id="robotList"></div>
 </div>
 <button class="btn-fab" onclick="openRobotDialog(-1)" title="添加 Robot"><span class="material-icons">add</span></button>
@@ -147,7 +148,8 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 <script>
 // 端口兜底值取当前页面实际端口，避免多环境下写回错误端口
 function currentPort(){return parseInt(location.port)||10528}
-var config={robots:[],chatterIds:[],configUi:{enabled:true,port:currentPort()}};
+var config={robots:[],chatterIds:[],channels:[],configUi:{enabled:true,port:currentPort()}};
+var channelRuntime={instanceId:'',statuses:{},errors:{}};
 var editIdx=-1;
 var currentDirPath='';
 var dirTargetInputId='dWorkDir';
@@ -228,17 +230,23 @@ async function loadConfig(){
 try{var r=await api('/api/config');config=await r.json();
 if(!config.robots)config.robots=[];
 if(!config.chatterIds)config.chatterIds=[];
+if(!config.channels)config.channels=[];
 if(!config.configUi)config.configUi={enabled:true,port:currentPort()};
 }catch(e){showSnackbar('加载失败:'+e.message)}
+await loadChannelStatus();
 clearDirty();
 render();
+}
+
+async function loadChannelStatus(){
+try{var r=await api('/api/channels/status');if(r.ok)channelRuntime=await r.json()}catch(e){channelRuntime={instanceId:(curInstance&&curInstance.instanceId)||'',statuses:{},errors:{}}}
 }
 
 function render(){
 document.getElementById('cfgPort').value=config.configUi.port||currentPort();
 document.getElementById('cfgEnabled').checked=config.configUi.enabled!==false;
 document.getElementById('globalProxy').checked=isAllConfiguredProxiesEnabled();
-renderChatters();renderRobots();
+renderChatters();renderChannels();renderRobots();
 }
 
 function hasProxyAddress(robot){return !!(robot.httpProxy&&robot.httpProxy.trim())}
@@ -269,6 +277,64 @@ return '<div class="card"'+cardStyle+'><div class="card-header"><div style="disp
 
 function addChatterId(){var id=prompt('请输入 Chatter ID:');if(id&&id.trim()){config.chatterIds.push(id.trim());markDirty();render()}}
 function removeChatter(i){config.chatterIds.splice(i,1);markDirty();render()}
+
+function availableGroups(){
+var out=[];
+(config.chatterIds||[]).forEach(function(chatter){
+(config.robots||[]).filter(function(r){return r.enabled!==false&&!r.onlySubAgent}).forEach(function(r){
+var acp='acp-'+(r.name||'').replace(/ |　/g,'_');
+out.push({id:[chatter,acp].sort().join(''),label:(r.name||'未命名')+' / '+chatter});
+});
+});
+return out;
+}
+
+function renderChannels(){
+var c=document.getElementById('channelList');
+if(!config.channels.length){c.innerHTML='<div style="color:#9e9e9e;font-size:14px">暂无信道。主动发送需配置默认用户 ID 或群聊 chatId。</div>';return}
+var groups=availableGroups();
+c.innerHTML=config.channels.map(function(ch,i){
+if(!ch.binding)ch.binding={instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:''};
+var status=(channelRuntime.statuses&&channelRuntime.statuses[ch.id])||'STOPPED';
+var error=(channelRuntime.errors&&channelRuntime.errors[ch.id])||'';
+var opts='<option value="">选择 MAIN ACP</option>'+groups.map(function(g){return '<option value="'+esc(g.id)+'"'+(g.id===ch.binding.groupId?' selected':'')+'>'+esc(g.label)+'</option>'}).join('');
+return '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:14px;margin-bottom:12px">'
++'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div><b>'+esc(ch.id||'未命名信道')+'</b> <span class="env-badge" id="channelStatus_'+i+'">'+esc(status)+'</span> <span id="channelError_'+i+'" style="color:#d32f2f;font-size:12px">'+esc(error)+'</span></div><button class="btn btn-danger btn-sm" onclick="deleteChannel('+i+')"><span class="material-icons">delete</span></button></div>'
++'<div class="grid-2">'
++'<div class="field-group"><label>信道 ID *</label><input value="'+esc(ch.id||'')+'" oninput="config.channels['+i+'].id=this.value.trim();markDirty()" placeholder="wecom-main"></div>'
++'<div class="field-group"><label>绑定 MAIN ACP *</label><select onchange="config.channels['+i+'].binding.groupId=this.value;config.channels['+i+'].binding.instanceId=channelRuntime.instanceId;markDirty()">'+opts+'</select></div>'
++'<div class="field-group"><label>Bot ID *</label><input value="'+esc(ch.botId||'')+'" oninput="config.channels['+i+'].botId=this.value.trim();markDirty()"></div>'
++'<div class="field-group"><label>Secret *</label><input type="password" value="'+esc(ch.secret||'')+'" oninput="config.channels['+i+'].secret=this.value;markDirty()" placeholder="保存后自动掩码"></div>'
++'<div class="field-group"><label>默认用户 ID / 群 chatId</label><input value="'+esc(ch.defaultChatId||'')+'" oninput="config.channels['+i+'].defaultChatId=this.value.trim();markDirty()" placeholder="用于主动 talkTo"></div>'
++'<div class="field-group"><label>WebSocket URL</label><input value="'+esc(ch.wsUrl||'wss://openws.work.weixin.qq.com')+'" oninput="config.channels['+i+'].wsUrl=this.value.trim();markDirty()"></div>'
++'</div><div class="toggle-row"><div><div class="toggle-label">接收外来消息</div><div style="color:#757575;font-size:12px">关闭后消息不会进入绑定的 ACP，主动发送不受影响</div></div><label class="switch"><input type="checkbox" '+(ch.inboundEnabled!==false?'checked':'')+' onchange="toggleChannelInbound('+i+',this,event)"><span class="slider"></span></label></div>'
++'<div class="toggle-row"><div><div class="toggle-label">启用信道</div></div><label class="switch"><input type="checkbox" '+(ch.enabled!==false?'checked':'')+' onchange="config.channels['+i+'].enabled=this.checked;markDirty()"><span class="slider"></span></label></div></div>';
+}).join('');
+}
+
+function addChannel(){
+config.channels.push({id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',binding:{instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:''}});
+markDirty();renderChannels();
+}
+function deleteChannel(i){if(confirm('确定删除该信道？')){config.channels.splice(i,1);markDirty();renderChannels()}}
+
+async function toggleChannelInbound(i,input,e){
+if(e)e.stopPropagation();
+var ch=config.channels[i],previous=ch.inboundEnabled!==false,enabled=input.checked;
+ch.inboundEnabled=enabled;
+try{var r=await api('/api/channels/inbound',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channelId:ch.id,inboundEnabled:enabled})});var d=await r.json();
+if(!r.ok||!d.ok)throw new Error(d.error||'切换失败');
+showSnackbar(enabled?'已允许外来消息进入 ACP':'已关闭外来消息输入');
+}catch(err){ch.inboundEnabled=previous;input.checked=previous;showSnackbar('切换失败:'+err.message)}
+}
+
+async function refreshChannelStatuses(){
+await loadChannelStatus();
+(config.channels||[]).forEach(function(ch,i){
+var status=document.getElementById('channelStatus_'+i);if(status)status.textContent=(channelRuntime.statuses&&channelRuntime.statuses[ch.id])||'STOPPED';
+var error=document.getElementById('channelError_'+i);if(error)error.textContent=(channelRuntime.errors&&channelRuntime.errors[ch.id])||'';
+});
+}
 function deleteRobot(i){if(confirm('确定删除「'+(config.robots[i].name||'')+'」?')){config.robots.splice(i,1);markDirty();render()}}
 function toggleRobot(i){config.robots[i].enabled=!config.robots[i].enabled;markDirty();render();showSnackbar('Robot「'+config.robots[i].name+'」已'+(config.robots[i].enabled?'启用':'禁用')+ '，请点击刷新按钮使之生效')}
 
@@ -502,6 +568,7 @@ if(dirty){e.preventDefault();e.returnValue=''}
 (async function init(){
 await loadInstances(false);
 await loadConfig();
+setInterval(refreshChannelStatuses,5000);
 })();
 
 async function updateVersion(){

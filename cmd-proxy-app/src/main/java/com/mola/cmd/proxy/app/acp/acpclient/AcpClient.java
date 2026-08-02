@@ -970,7 +970,8 @@ public class AcpClient extends AbstractAcpClient {
         try {
             java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
                     robotParam != null ? robotParam.getContacts() : null;
-            String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
+            String resultText = talkToDispatcher.deliver(
+                    request, senderName, senderChatterId, groupId, contacts);
             // 在发送方前端推送 talkTo 卡片
             if (!talkToDispatcher.managesTalkToEvents()) {
                 listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
@@ -1089,7 +1090,8 @@ public class AcpClient extends AbstractAcpClient {
         try {
             java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
                     robotParam != null ? robotParam.getContacts() : null;
-            String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
+            String resultText = talkToDispatcher.deliver(
+                    request, senderName, senderChatterId, groupId, contacts);
             if (!talkToDispatcher.managesTalkToEvents()) {
                 listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
             }
@@ -1135,7 +1137,8 @@ public class AcpClient extends AbstractAcpClient {
 
             logger.info("批量 talkTo 指令: {} → {}", senderName, request.getTarget());
             try {
-                String resultText = talkToDispatcher.deliver(request, senderName, senderChatterId, contacts);
+                String resultText = talkToDispatcher.deliver(
+                        request, senderName, senderChatterId, groupId, contacts);
                 if (!talkToDispatcher.managesTalkToEvents()) {
                     listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
                 }
@@ -1168,7 +1171,7 @@ public class AcpClient extends AbstractAcpClient {
         String robotName = talkToRoutingName();
         if (robotName == null || robotName.isEmpty()) return;
 
-        TalkToMessage pending = talkToDispatcher.pollInbox(robotName);
+        TalkToMessage pending = talkToDispatcher.pollInbox(robotName, groupId);
         if (pending != null) {
             logger.info("从 inbox 投递消息: from={}, to={}", pending.getSender(), robotName);
             // 先推送来信卡片到前端

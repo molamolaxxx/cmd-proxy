@@ -87,6 +87,7 @@ private fun startAcp() {
         val defaultConfig = JSONObject()
         defaultConfig["robots"] = JSON.parseArray("[]")
         defaultConfig["chatterIds"] = JSON.parseArray("[]")
+        defaultConfig["channels"] = JSON.parseArray("[]")
         defaultConfig["configUi"] = JSON.parseObject("""{"enabled":true}""")
         content = JSON.toJSONString(defaultConfig, SerializerFeature.PrettyFormat)
         file.bufferedWriter().use { writer -> writer.write(content) }
@@ -203,6 +204,9 @@ private fun startAcpServices(config: JSONObject) {
     // acpSyncRobots 发送启用的非 onlySubAgent robot
     val robotsJsonStr = JSON.toJSONString(robots.filter { !it.isOnlySubAgent })
     val chatterIds = chatterIdsArray.toJavaList(String::class.java)
+    val channels = config.getJSONArray("channels")
+        ?.toJavaList(com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig::class.java)
+        ?: emptyList()
 
     if (robots.isEmpty()) {
         log.info("所有 robot 均已禁用，跳过 ACP 服务启动")
@@ -240,7 +244,9 @@ private fun startAcpServices(config: JSONObject) {
         }
     }.toMap()
 
-    AcpProxy.start(groupIdList, robotsJsonStr, chatterIdsJsonStr, groupWorkDirMap, groupRobotMap)
+    AcpProxy.start(
+        groupIdList, robotsJsonStr, chatterIdsJsonStr,
+        groupWorkDirMap, groupRobotMap, channels)
 }
 
 private fun startConfigUiServer(config: JSONObject) {
@@ -253,7 +259,16 @@ private fun startConfigUiServer(config: JSONObject) {
     val actualPort = if (activeConfigUiPort > 0) activeConfigUiPort
         else PortAllocator.allocate("ConfigUI", desiredConfigUiPort(config))
     try {
-        val server = ConfigUiServer(actualPort, { reloadAcpServices() }, { name -> reloadRobot(name) })
+        val server = ConfigUiServer(
+            actualPort,
+            { reloadAcpServices() },
+            { name -> reloadRobot(name) },
+            { AcpProxy.channelStatuses().mapValues { it.value.name } },
+            { AcpProxy.channelErrors() },
+            { channelId, inboundAllowed ->
+                AcpProxy.setChannelInboundEnabled(channelId, inboundAllowed)
+            }
+        )
         server.start()
     } catch (e: Exception) {
         log.error("ConfigUI 启动失败, port={}", actualPort, e)

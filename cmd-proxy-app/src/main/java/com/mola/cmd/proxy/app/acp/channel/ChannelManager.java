@@ -1,0 +1,171 @@
+package com.mola.cmd.proxy.app.acp.channel;
+
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
+import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/** Instance-scoped channel lifecycle owner. One invalid channel does not stop ACP clients. */
+public final class ChannelManager implements AutoCloseable {
+    private static final Logger logger = LoggerFactory.getLogger(ChannelManager.class);
+
+    public interface AdapterFactory {
+        ChannelAdapter create(ChannelConfig config, ChannelTalkToBridge bridge);
+    }
+
+    private final List<ChannelConfig> configuredChannels;
+    private final String instanceId;
+    private final AcpClientRegistry clientRegistry;
+    private final TalkToDispatcher dispatcher;
+    private final AdapterFactory adapterFactory;
+    private final Map<String, ChannelConfig> configs = new ConcurrentHashMap<>();
+    private final Map<String, ChannelAdapter> adapters = new ConcurrentHashMap<>();
+    private final Map<String, ChannelStatus> statuses = new ConcurrentHashMap<>();
+    private final Map<String, String> errors = new ConcurrentHashMap<>();
+    private final ChannelTalkToGateway gateway;
+    private final ChannelTalkToBridge bridge;
+    private final AtomicBoolean started = new AtomicBoolean(false);
+
+    public ChannelManager(List<ChannelConfig> configuredChannels, String instanceId,
+                          AcpClientRegistry clientRegistry, TalkToDispatcher dispatcher,
+                          AdapterFactory adapterFactory) {
+        this.configuredChannels = configuredChannels == null
+                ? Collections.emptyList() : configuredChannels;
+        this.instanceId = instanceId;
+        this.clientRegistry = clientRegistry;
+        this.dispatcher = dispatcher;
+        this.adapterFactory = adapterFactory;
+        this.gateway = new ChannelTalkToGateway(adapters, configs);
+        this.bridge = new ChannelTalkToBridge(configs, clientRegistry, dispatcher, gateway);
+    }
+
+    public void start() {
+        if (!started.compareAndSet(false, true)) return;
+        // Adapter.start() may synchronously receive a callback, so expose outbound routing first.
+        dispatcher.registerExternalGateway(gateway);
+        Set<String> ids = new HashSet<>();
+        Set<String> botIds = new HashSet<>();
+        for (ChannelConfig config : configuredChannels) {
+            String error = validate(config, ids, botIds);
+            String channelId = config == null ? "<null>" : trim(config.getId());
+            if (error != null) {
+                if (!channelId.isEmpty()) {
+                    statuses.put(channelId, ChannelStatus.ERROR);
+                    errors.put(channelId, error);
+                }
+                logger.error("channel config rejected: channelId={}, errorCode=CHANNEL_CONFIG_INVALID, reason={}",
+                        channelId, error);
+                continue;
+            }
+            if (!config.isEnabled()) {
+                configs.put(config.getId(), config);
+                statuses.put(config.getId(), ChannelStatus.STOPPED);
+                continue;
+            }
+            configs.put(config.getId(), config);
+            ChannelAdapter adapter = null;
+            try {
+                adapter = adapterFactory.create(config, bridge);
+                if (adapter == null) throw new IllegalStateException("adapter factory returned null");
+                adapters.put(config.getId(), adapter);
+                statuses.put(config.getId(), ChannelStatus.CONNECTING);
+                adapter.start();
+                statuses.put(config.getId(), adapter.getStatus());
+            } catch (RuntimeException e) {
+                adapters.remove(config.getId());
+                if (adapter != null) {
+                    try { adapter.stop(); } catch (RuntimeException ignored) { }
+                }
+                statuses.put(config.getId(), ChannelStatus.ERROR);
+                String redacted = redact(e.getMessage(), config.getSecret());
+                errors.put(config.getId(), redacted);
+                logger.error("channel start failed: channelId={}, errorCode=CHANNEL_CONFIG_INVALID, reason={}",
+                        config.getId(), redacted);
+            }
+        }
+    }
+
+    private String validate(ChannelConfig config, Set<String> ids, Set<String> botIds) {
+        if (config == null) return "channel is null";
+        String id = trim(config.getId());
+        if (id.isEmpty()) return "channel.id is required";
+        config.setId(id);
+        if (!ids.add(id)) return "duplicate channel.id";
+        if (!ChannelConfig.TYPE_WECOM_WS.equals(config.getType())) return "unsupported channel.type";
+        if (!config.isEnabled()) return null;
+        if (trim(config.getBotId()).isEmpty()) return "botId is required";
+        if (!botIds.add(config.getBotId())) return "duplicate enabled botId";
+        if (trim(config.getSecret()).isEmpty()) return "secret is required";
+        ChannelBinding binding = config.getBinding();
+        if (binding == null) return "binding is required";
+        if (!instanceId.equals(trim(binding.getInstanceId()))) return "binding.instanceId mismatch";
+        String groupId = trim(binding.getGroupId());
+        if (groupId.isEmpty()) return "binding.groupId is required";
+        AcpClient client = clientRegistry.getClient(groupId);
+        if (client == null) return "binding group client not found";
+        if (client.getClientIdentity().getScope() != AcpClientIdentity.Scope.MAIN) {
+            return "binding client must be MAIN";
+        }
+        if (client.getRobotParam() != null && client.getRobotParam().isOnlySubAgent()) {
+            return "binding client cannot be onlySubAgent";
+        }
+        return null;
+    }
+
+    public ChannelTalkToBridge getBridge() { return bridge; }
+    public ChannelTalkToGateway getGateway() { return gateway; }
+
+    public boolean setInboundEnabled(String channelId, boolean enabled) {
+        return bridge.setInboundEnabled(channelId, enabled);
+    }
+
+    public Map<String, ChannelStatus> getStatuses() {
+        Map<String, ChannelStatus> snapshot = new LinkedHashMap<>();
+        for (Map.Entry<String, ChannelStatus> entry : statuses.entrySet()) {
+            ChannelAdapter adapter = adapters.get(entry.getKey());
+            snapshot.put(entry.getKey(), adapter == null ? entry.getValue() : adapter.getStatus());
+        }
+        return snapshot;
+    }
+
+    public Map<String, String> getErrors() { return new LinkedHashMap<>(errors); }
+
+    @Override
+    public void close() {
+        if (!started.compareAndSet(true, false)) return;
+        dispatcher.unregisterExternalGateway(gateway);
+        for (ChannelAdapter adapter : adapters.values()) {
+            try { adapter.stop(); } catch (RuntimeException e) {
+                logger.warn("channel stop failed: channelId={}", adapter.getChannelId(), e);
+            }
+        }
+        adapters.clear();
+        gateway.clear();
+        for (String id : configs.keySet()) statuses.put(id, ChannelStatus.STOPPED);
+        configs.clear();
+    }
+
+    private static String trim(String value) { return value == null ? "" : value.trim(); }
+    private static String safe(String value) {
+        return value == null || value.trim().isEmpty() ? "unknown error" : value;
+    }
+
+    private static String redact(String value, String secret) {
+        String result = safe(value);
+        return secret == null || secret.isEmpty() ? result : result.replace(secret, "***");
+    }
+}

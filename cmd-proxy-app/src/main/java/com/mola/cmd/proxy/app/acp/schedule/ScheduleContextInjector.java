@@ -13,7 +13,6 @@ import org.slf4j.LoggerFactory;
  * 不注入的场景：
  * <ul>
  *   <li>robot 配置 scheduleEnabled = false</li>
- *   <li>当前对话是定时任务触发的执行场景（防止套娃）</li>
  * </ul>
  */
 public class ScheduleContextInjector {
@@ -24,17 +23,14 @@ public class ScheduleContextInjector {
      * 构建定时任务能力描述文本，注入到主 Agent prompt 中。
      *
      * @param scheduleEnabled     该 robot 是否启用定时任务
-     * @param isScheduleExecution 当前是否为定时任务触发的执行场景
+     * @param isScheduleExecution 当前是否为定时任务触发的执行场景；执行场景也需要
+     *                            保留该能力上下文，便于后续人工接续会话
      * @return 格式化的能力描述文本，不注入时返回 ""
      */
     public String buildContext(boolean scheduleEnabled, boolean isScheduleExecution) {
         if (!scheduleEnabled) {
             return "";
         }
-        if (isScheduleExecution) {
-            return "";
-        }
-
         StringBuilder sb = new StringBuilder();
         sb.append("\n<scheduled-tasks>\n");
         sb.append("你可以为用户设置和管理定时任务。\n\n");

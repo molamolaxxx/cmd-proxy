@@ -22,6 +22,10 @@ import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions
 import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher
+import com.mola.cmd.proxy.app.acp.channel.ChannelManager
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus
+import com.mola.cmd.proxy.app.acp.channel.wecom.WeComChannelAdapter
 import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry
 import com.mola.cmd.proxy.app.acp.team.TeamCommandHandler
 import com.mola.cmd.proxy.app.acp.team.TeamManager
@@ -77,6 +81,9 @@ object AcpProxy {
     /** TalkTo 消息投递器（全局单例） */
     private lateinit var talkToDispatcher: TalkToDispatcher
 
+    /** 当前实例的外部信道生命周期；只绑定普通 MAIN client。 */
+    private var channelManager: ChannelManager? = null
+
     /** 普通与 Team client 共用的完整能力挂点编排器。 */
     private lateinit var featureInitializer: AcpClientFeatureInitializer
 
@@ -106,7 +113,8 @@ object AcpProxy {
         robotsJson: String? = null,
         chatterIdsJson: String? = null,
         groupWorkDirMap: Map<String, String> = emptyMap(),
-        groupRobotMap: Map<String, AcpRobotParam> = emptyMap()
+        groupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
+        channels: List<ChannelConfig> = emptyList()
     ) {
         ensureShutdownHook()
         if (teamManager != null) {
@@ -210,6 +218,19 @@ object AcpProxy {
         latch.await()
         executor.shutdown()
         log.info("所有 ACP client 冷加载完成, 共 {} 个", cmdGroupList.size)
+
+        // client 和普通 TalkTo dispatcher 均就绪后再开放外部消息入口。
+        channelManager = ChannelManager(
+            channels,
+            CmdProxyHome.instanceId(),
+            registry,
+            talkToDispatcher,
+            ChannelManager.AdapterFactory { channel, bridge ->
+                WeComChannelAdapter(channel, bridge)
+            }
+        ).also { it.start() }
+        log.info("外部信道启动完成, configured={}, statuses={}",
+            channels.size, channelManager?.statuses ?: emptyMap<String, ChannelStatus>())
 
         // 启动定时任务调度器
         startScheduler(groupRobotMap)
@@ -1148,7 +1169,8 @@ object AcpProxy {
      * 初始化 TalkTo 支持（如果该 robot 配置了通讯录或系统中有多个 robot）。
      */
     private fun initTalkToSupport(groupId: String, client: AcpClient, robot: AcpRobotParam?) {
-        val injector = TalkToContextInjector()
+        // dispatcher 同时提供动态外部通讯录；信道在 client 初始化后注册也能在首轮被发现。
+        val injector = TalkToContextInjector(talkToDispatcher, groupId)
         client.setTalkToSupport(talkToDispatcher, injector, globalRobotRegistry)
         log.info("TalkTo 支持初始化完成, groupId={}, contacts={}",
             groupId, robot?.contacts?.map { it.name } ?: emptyList<String>())
@@ -1285,6 +1307,14 @@ object AcpProxy {
     fun stop() {
         log.info("正在停止 ACP 服务...")
 
+        // 先关闭外部入口、心跳和重连，避免 ACP client 关闭后仍收到新事件。
+        try {
+            channelManager?.close()
+        } catch (e: Exception) {
+            log.warn("停止外部信道失败", e)
+        }
+        channelManager = null
+
         // 先停止周期发布，避免 stop 撤销 ready 后旧代际 heartbeat 继续重放。
         acpSyncRobotsHeartbeat?.close()
         acpSyncRobotsHeartbeat = null
@@ -1332,6 +1362,19 @@ object AcpProxy {
 
         log.info("ACP 服务已停止")
     }
+
+    @JvmStatic
+    fun channelStatuses(): Map<String, ChannelStatus> =
+        channelManager?.statuses ?: emptyMap()
+
+    @JvmStatic
+    fun channelErrors(): Map<String, String> =
+        channelManager?.errors ?: emptyMap()
+
+    @JvmStatic
+    fun setChannelInboundEnabled(channelId: String, enabled: Boolean): Boolean =
+        channelManager?.setInboundEnabled(channelId, enabled)
+            ?: throw IllegalStateException("channel service is not running")
 
     private fun ensureShutdownHook() {
         if (shutdownHookRegistered.compareAndSet(false, true)) {

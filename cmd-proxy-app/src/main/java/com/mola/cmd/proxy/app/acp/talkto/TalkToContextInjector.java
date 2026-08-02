@@ -4,6 +4,7 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.common.DirectJsonOutputHelper;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
+import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +31,18 @@ public class TalkToContextInjector {
             com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("ability");
     private static final String ABILITY_FILE = "ability.md";
     private static final int ABILITY_SUMMARY_MAX_CHARS = 200;
+    private final ExternalTalkToContactProvider externalContactProvider;
+    private final String groupId;
+
+    public TalkToContextInjector() {
+        this(null, null);
+    }
+
+    public TalkToContextInjector(ExternalTalkToContactProvider externalContactProvider,
+                                 String groupId) {
+        this.externalContactProvider = externalContactProvider;
+        this.groupId = groupId;
+    }
 
     /**
      * 构建通讯录上下文，注入到 prompt 中。
@@ -78,6 +91,28 @@ public class TalkToContextInjector {
                     }
                     sb.append("\n");
                     if (firstContactName == null) firstContactName = contact.getName();
+                    hasContacts = true;
+                }
+            }
+        }
+
+        if (externalContactProvider != null && groupId != null) {
+            List<ExternalTalkToContact> externalContacts =
+                    externalContactProvider.contactsForGroup(groupId);
+            if (externalContacts != null) {
+                for (ExternalTalkToContact contact : externalContacts) {
+                    if (contact == null || contact.getTarget() == null
+                            || contact.getTarget().trim().isEmpty()) continue;
+                    if (!hasContacts) {
+                        sb.append("你的通讯录成员：\n");
+                    }
+                    sb.append("- ").append(contact.getDisplayName())
+                            .append("（target: ").append(contact.getTarget()).append("）");
+                    if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
+                        sb.append(": ").append(contact.getRemark());
+                    }
+                    sb.append("\n");
+                    if (firstContactName == null) firstContactName = contact.getTarget();
                     hasContacts = true;
                 }
             }

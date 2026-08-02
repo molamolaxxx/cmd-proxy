@@ -8,6 +8,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
+import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import com.mola.cmd.proxy.client.provider.CmdReceiver;
@@ -19,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -30,7 +32,7 @@ import java.util.concurrent.LinkedBlockingQueue;
  *   <li>管理每个 robot 的 inbox 队列</li>
  * </ol>
  */
-public class TalkToDispatcher {
+public class TalkToDispatcher implements ExternalTalkToContactProvider {
 
     private static final Logger logger = LoggerFactory.getLogger(TalkToDispatcher.class);
 
@@ -49,6 +51,9 @@ public class TalkToDispatcher {
     private final Map<String, AcpRobotParam> robotRegistry;
     private final AcpClientRegistry clientRegistry;
     private final Map<String, String> robotToGroupId;
+
+    /** 普通 MAIN dispatcher 可注册的外部端点；Team dispatcher 不注册。 */
+    private final List<ExternalTalkToGateway> externalGateways = new CopyOnWriteArrayList<>();
 
     /** 每个 robot 的 inbox 队列，key 为 robotName */
     private final ConcurrentHashMap<String, LinkedBlockingQueue<TalkToMessage>> inboxes =
@@ -206,7 +211,19 @@ public class TalkToDispatcher {
      * @return 执行结果文本，作为 follow-up prompt 回注发送方
      */
     public String deliver(TalkToRequest request, String senderName, String senderChatterId, List<ContactRef> contacts) {
+        return deliver(request, senderName, senderChatterId, null, contacts);
+    }
+
+    public String deliver(TalkToRequest request, String senderName, String senderChatterId,
+                          String senderGroupId, List<ContactRef> contacts) {
         String target = request.getTarget();
+
+        // 外部端点必须先于包含冒号的跨 chatter 兼容格式判断。
+        for (ExternalTalkToGateway gateway : externalGateways) {
+            if (gateway.supports(target)) {
+                return gateway.deliver(request, senderName, senderGroupId);
+            }
+        }
 
         // 查找通讯录中是否有该 target 的远程配置
         ContactRef remoteContact = findRemoteContact(target, contacts);
@@ -230,6 +247,30 @@ public class TalkToDispatcher {
 
         // 本地投递
         return deliverLocal(request, senderName);
+    }
+
+    public void registerExternalGateway(ExternalTalkToGateway gateway) {
+        if (gateway != null && !externalGateways.contains(gateway)) {
+            externalGateways.add(gateway);
+        }
+    }
+
+    public void unregisterExternalGateway(ExternalTalkToGateway gateway) {
+        externalGateways.remove(gateway);
+    }
+
+    @Override
+    public List<ExternalTalkToContact> contactsForGroup(String groupId) {
+        List<ExternalTalkToContact> contacts = new java.util.ArrayList<>();
+        for (ExternalTalkToGateway gateway : externalGateways) {
+            if (gateway instanceof ExternalTalkToContactProvider) {
+                List<ExternalTalkToContact> provided =
+                        ((ExternalTalkToContactProvider) gateway).contactsForGroup(groupId);
+                if (provided != null) contacts.addAll(provided);
+            }
+        }
+        contacts.sort(java.util.Comparator.comparing(ExternalTalkToContact::getTarget));
+        return java.util.Collections.unmodifiableList(contacts);
     }
 
     /**
@@ -391,6 +432,33 @@ public class TalkToDispatcher {
         return inbox.offer(message);
     }
 
+    /**
+     * 将已经解析到明确 MAIN client 的来信复用普通 TalkTo 队列语义。
+     * routingKey 应使用稳定 groupId，避免同名 robot 的多个 client 串队列。
+     */
+    public InboundDeliveryResult deliverInbound(String routingKey, AcpClient targetClient,
+                                                 TalkToMessage message) {
+        if (routingKey == null || routingKey.trim().isEmpty()
+                || targetClient == null || message == null) {
+            return InboundDeliveryResult.rejected("invalid inbound delivery arguments");
+        }
+        if (targetClient.getState() == AbstractAcpClient.State.READY) {
+            pushIncomingMessageCard(targetClient, message);
+            targetClient.send(message.buildPrompt(), null);
+            logger.info("talkTo external direct delivery: route={}, sender={}",
+                    routingKey, message.getSender());
+            return InboundDeliveryResult.direct();
+        }
+        LinkedBlockingQueue<TalkToMessage> inbox = inboxes.computeIfAbsent(
+                routingKey, key -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
+        if (inbox.offer(message)) {
+            return InboundDeliveryResult.queued(inbox.size());
+        }
+        logger.warn("talkTo external inbox full: route={}, sender={}",
+                routingKey, message.getSender());
+        return InboundDeliveryResult.rejected("inbox full");
+    }
+
     // ==================== Inbox 管理 ====================
 
     /**
@@ -404,6 +472,42 @@ public class TalkToDispatcher {
         LinkedBlockingQueue<TalkToMessage> inbox = inboxes.get(robotName);
         if (inbox == null) return null;
         return inbox.poll();
+    }
+
+    /** groupId 精确队列优先，随后兼容原有 robotName 队列。 */
+    public TalkToMessage pollInbox(String routingName, String groupId) {
+        TalkToMessage message = pollInbox(groupId);
+        return message != null ? message : pollInbox(routingName);
+    }
+
+    public static final class InboundDeliveryResult {
+        public enum Status { DIRECT, QUEUED, REJECTED }
+
+        private final Status status;
+        private final int queuePosition;
+        private final String reason;
+
+        private InboundDeliveryResult(Status status, int queuePosition, String reason) {
+            this.status = status;
+            this.queuePosition = queuePosition;
+            this.reason = reason;
+        }
+
+        public static InboundDeliveryResult direct() {
+            return new InboundDeliveryResult(Status.DIRECT, 0, null);
+        }
+
+        public static InboundDeliveryResult queued(int queuePosition) {
+            return new InboundDeliveryResult(Status.QUEUED, queuePosition, null);
+        }
+
+        public static InboundDeliveryResult rejected(String reason) {
+            return new InboundDeliveryResult(Status.REJECTED, 0, reason);
+        }
+
+        public Status getStatus() { return status; }
+        public int getQueuePosition() { return queuePosition; }
+        public String getReason() { return reason; }
     }
 
     /**

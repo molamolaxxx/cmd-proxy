@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.configui;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
 import com.mola.cmd.proxy.app.utils.CmdProxyHome;
 import com.sun.net.httpserver.HttpExchange;
@@ -28,6 +29,8 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.BiFunction;
+import java.util.function.Supplier;
 
 /**
  * 内嵌轻量 HTTP 服务，提供 ACP 配置管理页面。
@@ -40,10 +43,14 @@ public class ConfigUiServer {
             com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("acpConfig.json");
 
     private static final String UPDATE_JAR_URL = "https://106.54.193.10/download/cmd-proxy.jar";
+    private static final String SECRET_MASK = "********";
 
     private final int port;
     private final Runnable refreshCallback;
     private final Consumer<String> refreshRobotCallback;
+    private final Supplier<java.util.Map<String, String>> channelStatusSupplier;
+    private final Supplier<java.util.Map<String, String>> channelErrorSupplier;
+    private final BiFunction<String, Boolean, Boolean> channelInboundUpdater;
     private HttpServer server;
     private ExecutorService executor;
 
@@ -59,9 +66,34 @@ public class ConfigUiServer {
      * @param refreshRobotCallback 按 robot 维度刷新的回调
      */
     public ConfigUiServer(int port, Runnable refreshCallback, Consumer<String> refreshRobotCallback) {
+        this(port, refreshCallback, refreshRobotCallback,
+                java.util.Collections::emptyMap, java.util.Collections::emptyMap,
+                (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
+    }
+
+    public ConfigUiServer(int port, Runnable refreshCallback,
+                          Consumer<String> refreshRobotCallback,
+                          Supplier<java.util.Map<String, String>> channelStatusSupplier,
+                          Supplier<java.util.Map<String, String>> channelErrorSupplier) {
+        this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
+                channelErrorSupplier, (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
+    }
+
+    public ConfigUiServer(int port, Runnable refreshCallback,
+                          Consumer<String> refreshRobotCallback,
+                          Supplier<java.util.Map<String, String>> channelStatusSupplier,
+                          Supplier<java.util.Map<String, String>> channelErrorSupplier,
+                          BiFunction<String, Boolean, Boolean> channelInboundUpdater) {
         this.port = port;
         this.refreshCallback = refreshCallback;
         this.refreshRobotCallback = refreshRobotCallback;
+        this.channelStatusSupplier = channelStatusSupplier;
+        this.channelErrorSupplier = channelErrorSupplier;
+        this.channelInboundUpdater = channelInboundUpdater;
     }
 
     public void start() throws IOException {
@@ -75,6 +107,8 @@ public class ConfigUiServer {
         server.createContext("/api/instances", this::handleInstances);
         // REST API：带 instance 参数且非本环境时，转发到目标环境的 ConfigUI
         server.createContext("/api/config", proxied(this::handleConfig));
+        server.createContext("/api/channels/status", proxied(this::handleChannelStatus));
+        server.createContext("/api/channels/inbound", proxied(this::handleChannelInbound));
         server.createContext("/api/refresh", proxied(this::handleRefresh));
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
         server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
@@ -265,6 +299,7 @@ public class ConfigUiServer {
         String raw = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
         // 通过 fastjson 解析再序列化，确保输出标准 JSON（消除尾逗号等非标准语法）
         JSONObject json = JSON.parseObject(raw);
+        maskChannelSecrets(json);
         String content = JSON.toJSONString(json, SerializerFeature.PrettyFormat);
         sendResponse(exchange, 200, "application/json", content);
     }
@@ -277,12 +312,108 @@ public class ConfigUiServer {
         }
         // 格式化写入
         JSONObject json = JSON.parseObject(body);
+        preserveChannelSecrets(json);
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。
         json.remove("globalProxyEnabled");
         String formatted = JSON.toJSONString(json, SerializerFeature.PrettyFormat, SerializerFeature.SortField);
         Path path = Paths.get(CONFIG_PATH);
         Files.write(path, formatted.getBytes(StandardCharsets.UTF_8));
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+    }
+
+    private void handleChannelStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        JSONObject result = new JSONObject();
+        result.put("instanceId", CmdProxyHome.instanceId());
+        result.put("statuses", channelStatusSupplier.get());
+        result.put("errors", channelErrorSupplier.get());
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleChannelInbound(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject request = JSON.parseObject(readBody(exchange));
+            String channelId = request == null ? null : request.getString("channelId");
+            if (isBlank(channelId) || !request.containsKey("inboundEnabled")) {
+                sendResponse(exchange, 400, "application/json",
+                        "{\"error\":\"channelId and inboundEnabled are required\"}");
+                return;
+            }
+            boolean enabled = request.getBooleanValue("inboundEnabled");
+            boolean previous = channelInboundUpdater.apply(channelId.trim(), enabled);
+            try {
+                ChannelConfigFileStore.setInboundEnabled(channelId.trim(), enabled);
+            } catch (Exception persistFailure) {
+                try {
+                    channelInboundUpdater.apply(channelId.trim(), previous);
+                } catch (Exception rollbackFailure) {
+                    persistFailure.addSuppressed(rollbackFailure);
+                }
+                throw persistFailure;
+            }
+            sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+        } catch (Exception e) {
+            logger.error("切换信道入站状态失败", e);
+            JSONObject error = new JSONObject();
+            error.put("error", e.getMessage() == null ? "unknown error" : e.getMessage());
+            sendResponse(exchange, 500, "application/json", JSON.toJSONString(error));
+        }
+    }
+
+    private void maskChannelSecrets(JSONObject json) {
+        com.alibaba.fastjson.JSONArray channels = json.getJSONArray("channels");
+        if (channels == null) return;
+        for (int i = 0; i < channels.size(); i++) {
+            JSONObject channel = channels.getJSONObject(i);
+            if (channel != null && !isBlank(channel.getString("secret"))) {
+                channel.put("secret", SECRET_MASK);
+            }
+        }
+    }
+
+    /** Mask or blank means keep the prior secret for the same channel id. */
+    private void preserveChannelSecrets(JSONObject submitted) throws IOException {
+        com.alibaba.fastjson.JSONArray channels = submitted.getJSONArray("channels");
+        if (channels == null) return;
+        JSONObject previous = readConfigObject();
+        java.util.Map<String, String> previousSecrets = new java.util.HashMap<>();
+        com.alibaba.fastjson.JSONArray oldChannels = previous.getJSONArray("channels");
+        if (oldChannels != null) {
+            for (int i = 0; i < oldChannels.size(); i++) {
+                JSONObject old = oldChannels.getJSONObject(i);
+                if (old != null && !isBlank(old.getString("id"))) {
+                    previousSecrets.put(old.getString("id"), old.getString("secret"));
+                }
+            }
+        }
+        for (int i = 0; i < channels.size(); i++) {
+            JSONObject channel = channels.getJSONObject(i);
+            if (channel == null) continue;
+            String secret = channel.getString("secret");
+            if (isBlank(secret) || SECRET_MASK.equals(secret)) {
+                String oldSecret = previousSecrets.get(channel.getString("id"));
+                if (!isBlank(oldSecret)) channel.put("secret", oldSecret);
+                else channel.remove("secret");
+            }
+        }
+    }
+
+    private JSONObject readConfigObject() throws IOException {
+        Path path = Paths.get(CONFIG_PATH);
+        if (!Files.exists(path)) return new JSONObject();
+        String raw = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+        return isBlank(raw) ? new JSONObject() : JSON.parseObject(raw);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
     }
 
     private void handleRefresh(HttpExchange exchange) throws IOException {

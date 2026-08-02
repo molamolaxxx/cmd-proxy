@@ -8,7 +8,7 @@ package com.mola.cmd.proxy.app.acp.acpclient;
  */
 public class PromptOptions {
 
-    /** 是否为定时任务触发的执行场景（防止套娃：不注入定时任务上下文） */
+    /** 是否为定时任务触发的执行场景。能力上下文仍按普通首轮规则注入。 */
     private boolean scheduleExecution;
 
     public PromptOptions() {
