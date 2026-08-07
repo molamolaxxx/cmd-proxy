@@ -30,6 +30,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.BiFunction;
+import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import java.util.Map;
 
@@ -53,6 +54,7 @@ public class ConfigUiServer {
     private final Supplier<java.util.Map<String, String>> channelErrorSupplier;
     private final BiFunction<String, Boolean, Boolean> channelInboundUpdater;
     private final Supplier<List<Map<String, Object>>> channelBindingTargetSupplier;
+    private final BiConsumer<String, String> refreshChannelCallback;
     private HttpServer server;
     private ExecutorService executor;
 
@@ -64,7 +66,7 @@ public class ConfigUiServer {
 
     /**
      * @param port            监听端口
-     * @param refreshCallback 刷新回调，保存配置后触发 ACP 服务重载
+     * @param refreshCallback 用户点击“刷新服务”后触发 ACP 服务重载
      * @param refreshRobotCallback 按 robot 维度刷新的回调
      */
     public ConfigUiServer(int port, Runnable refreshCallback, Consumer<String> refreshRobotCallback) {
@@ -72,7 +74,10 @@ public class ConfigUiServer {
                 java.util.Collections::emptyMap, java.util.Collections::emptyMap,
                 (channelId, enabled) -> {
                     throw new IllegalStateException("channel service is not running");
-                }, java.util.Collections::emptyList);
+                }, java.util.Collections::emptyList,
+                (previousId, channelId) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
     }
 
     public ConfigUiServer(int port, Runnable refreshCallback,
@@ -82,7 +87,10 @@ public class ConfigUiServer {
         this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
                 channelErrorSupplier, (channelId, enabled) -> {
                     throw new IllegalStateException("channel service is not running");
-                }, java.util.Collections::emptyList);
+                }, java.util.Collections::emptyList,
+                (previousId, channelId) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
     }
 
     public ConfigUiServer(int port, Runnable refreshCallback,
@@ -92,7 +100,10 @@ public class ConfigUiServer {
                           BiFunction<String, Boolean, Boolean> channelInboundUpdater) {
         this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
                 channelErrorSupplier, channelInboundUpdater,
-                java.util.Collections::emptyList);
+                java.util.Collections::emptyList,
+                (previousId, channelId) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
     }
 
     public ConfigUiServer(int port, Runnable refreshCallback,
@@ -101,6 +112,20 @@ public class ConfigUiServer {
                           Supplier<java.util.Map<String, String>> channelErrorSupplier,
                           BiFunction<String, Boolean, Boolean> channelInboundUpdater,
                           Supplier<List<Map<String, Object>>> channelBindingTargetSupplier) {
+        this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
+                channelErrorSupplier, channelInboundUpdater, channelBindingTargetSupplier,
+                (previousId, channelId) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
+    }
+
+    public ConfigUiServer(int port, Runnable refreshCallback,
+                          Consumer<String> refreshRobotCallback,
+                          Supplier<java.util.Map<String, String>> channelStatusSupplier,
+                          Supplier<java.util.Map<String, String>> channelErrorSupplier,
+                          BiFunction<String, Boolean, Boolean> channelInboundUpdater,
+                          Supplier<List<Map<String, Object>>> channelBindingTargetSupplier,
+                          BiConsumer<String, String> refreshChannelCallback) {
         this.port = port;
         this.refreshCallback = refreshCallback;
         this.refreshRobotCallback = refreshRobotCallback;
@@ -108,6 +133,7 @@ public class ConfigUiServer {
         this.channelErrorSupplier = channelErrorSupplier;
         this.channelInboundUpdater = channelInboundUpdater;
         this.channelBindingTargetSupplier = channelBindingTargetSupplier;
+        this.refreshChannelCallback = refreshChannelCallback;
     }
 
     public void start() throws IOException {
@@ -127,6 +153,7 @@ public class ConfigUiServer {
                 proxied(this::handleChannelBindingTargets));
         server.createContext("/api/refresh", proxied(this::handleRefresh));
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
+        server.createContext("/api/refresh-channel", proxied(this::handleRefreshChannel));
         server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
         server.createContext("/api/update-jar", proxied(this::handleUpdateJar));
         server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
@@ -494,6 +521,32 @@ public class ConfigUiServer {
             logger.error("按 robot 刷新服务失败", e);
             sendResponse(exchange, 500, "application/json",
                     "{\"error\":\"" + e.getMessage().replace("\"", "'") + "\"}");
+        }
+    }
+
+    private void handleRefreshChannel(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject json = JSON.parseObject(readBody(exchange));
+            String channelId = json == null ? null : json.getString("channelId");
+            String previousChannelId = json == null ? null : json.getString("previousChannelId");
+            String current = channelId == null ? "" : channelId.trim();
+            String previous = previousChannelId == null ? "" : previousChannelId.trim();
+            if (current.isEmpty() && previous.isEmpty()) {
+                sendResponse(exchange, 400, "application/json",
+                        "{\"error\":\"channelId 不能为空\"}");
+                return;
+            }
+            refreshChannelCallback.accept(previous, current);
+            sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+        } catch (Exception e) {
+            logger.error("按 channel 刷新服务失败", e);
+            String message = e.getMessage() == null ? "unknown error" : e.getMessage();
+            sendResponse(exchange, 500, "application/json",
+                    "{\"error\":\"" + message.replace("\"", "'") + "\"}");
         }
     }
 

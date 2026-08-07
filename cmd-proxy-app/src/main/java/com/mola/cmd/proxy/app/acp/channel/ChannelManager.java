@@ -110,6 +110,81 @@ public final class ChannelManager implements AutoCloseable {
         }
     }
 
+    /**
+     * Replaces one configured channel without disturbing other channel connections.
+     * {@code previousChannelId} may differ from the new id when a channel is renamed.
+     * A {@code null} config removes the previous channel.
+     */
+    public synchronized void reloadChannel(String previousChannelId, ChannelConfig config) {
+        if (!started.get()) throw new IllegalStateException("channel manager is not running");
+        String previousId = trim(previousChannelId);
+        String newId = config == null ? "" : trim(config.getId());
+        if (previousId.isEmpty() && newId.isEmpty()) {
+            throw new IllegalArgumentException("channel id is required");
+        }
+
+        if (config != null) {
+            Set<String> ids = new HashSet<>();
+            Set<String> botIds = new HashSet<>();
+            for (ChannelConfig existing : configs.values()) {
+                String existingId = trim(existing.getId());
+                if (existingId.equals(previousId)) continue;
+                ids.add(existingId);
+                if (existing.isEnabled()) botIds.add(trim(existing.getBotId()));
+            }
+            String error = validate(config, ids, botIds);
+            if (error != null) throw new IllegalArgumentException(error);
+        }
+
+        if (!previousId.isEmpty()) removeChannel(previousId);
+        if (!newId.isEmpty() && !newId.equals(previousId)) removeChannel(newId);
+        if (config == null) {
+            logger.info("channel removed: channelId={}", previousId);
+            return;
+        }
+
+        configs.put(config.getId(), config);
+        errors.remove(config.getId());
+        if (!config.isEnabled()) {
+            statuses.put(config.getId(), ChannelStatus.STOPPED);
+            logger.info("channel reloaded: channelId={}, status=STOPPED", config.getId());
+            return;
+        }
+
+        ChannelAdapter adapter = null;
+        try {
+            adapter = adapterFactory.create(config, bridge);
+            if (adapter == null) throw new IllegalStateException("adapter factory returned null");
+            adapters.put(config.getId(), adapter);
+            statuses.put(config.getId(), ChannelStatus.CONNECTING);
+            adapter.start();
+            statuses.put(config.getId(), adapter.getStatus());
+            logger.info("channel reloaded: channelId={}, status={}",
+                    config.getId(), adapter.getStatus());
+        } catch (RuntimeException e) {
+            adapters.remove(config.getId(), adapter);
+            if (adapter != null) {
+                try { adapter.stop(); } catch (RuntimeException ignored) { }
+            }
+            statuses.put(config.getId(), ChannelStatus.ERROR);
+            String redacted = redact(e.getMessage(), config.getSecret());
+            errors.put(config.getId(), redacted);
+            throw new IllegalStateException(redacted, e);
+        }
+    }
+
+    private void removeChannel(String channelId) {
+        ChannelAdapter old = adapters.remove(channelId);
+        if (old != null) {
+            try { old.stop(); } catch (RuntimeException e) {
+                logger.warn("channel stop failed during reload: channelId={}", channelId, e);
+            }
+        }
+        configs.remove(channelId);
+        statuses.remove(channelId);
+        errors.remove(channelId);
+    }
+
     private String validate(ChannelConfig config, Set<String> ids, Set<String> botIds) {
         if (config == null) return "channel is null";
         String id = trim(config.getId());

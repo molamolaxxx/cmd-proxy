@@ -36,6 +36,22 @@ public class TeamManagerTest {
     }
 
     @Test
+    public void recoveryMigratesPersistedTransportGroupBeforePublishingRuntime()
+            throws Exception {
+        TeamStore store = store();
+        store.saveTeam(definition("team-1"));
+        TeamManager manager = new TeamManager(store, new TeamClientRegistry());
+
+        assertEquals(1, manager.recoverPersistedDefinitions("team-acp-new-instance"));
+
+        TeamDefinition runtime = manager.getRuntime("team-1").get().getDefinition();
+        TeamDefinition persisted = store.loadTeam("team-1").get();
+        assertEquals("team-acp-new-instance", runtime.getTransportGroup());
+        assertEquals("team-acp-new-instance", persisted.getTransportGroup());
+        assertEquals(2L, persisted.getVersion());
+    }
+
+    @Test
     public void registryRequiresMatchingTeamIdentityAndIsIsolatedFromMainRegistry() {
         TeamClientRegistry registry = new TeamClientRegistry();
         AcpClient client = teamClient("team-1", "member-1");

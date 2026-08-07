@@ -20,12 +20,13 @@ public final class ChannelConfigFileStore {
     private ChannelConfigFileStore() { }
 
     /**
-     * Persists the most recently received conversation as the channel's proactive target.
+     * Initializes an empty proactive target from the first received conversation.
+     * An existing manual or previously discovered target is never overwritten.
      * For WeCom this value is a group {@code chatid} or a direct-message {@code userid}.
      */
-    public static String setDefaultChatId(String channelId, String discoveredChatId)
+    public static String setDefaultChatIdIfEmpty(String channelId, String discoveredChatId)
             throws IOException {
-        return setDefaultChatId(
+        return setDefaultChatIdIfEmpty(
                 CmdProxyHome.resolve("acpConfig.json"), channelId, discoveredChatId);
     }
 
@@ -47,8 +48,8 @@ public final class ChannelConfigFileStore {
         }
     }
 
-    static String setDefaultChatId(Path configPath, String channelId,
-                                   String discoveredChatId) throws IOException {
+    static String setDefaultChatIdIfEmpty(Path configPath, String channelId,
+                                          String discoveredChatId) throws IOException {
         String cleanChannelId = requireText(channelId, "channelId");
         String cleanChatId = requireText(discoveredChatId, "discoveredChatId");
         synchronized (LOCK) {
@@ -56,6 +57,10 @@ public final class ChannelConfigFileStore {
                     Files.readAllBytes(configPath), StandardCharsets.UTF_8));
             JSONObject matched = findChannel(root, cleanChannelId);
 
+            String existingChatId = trim(matched.getString("defaultChatId"));
+            if (!existingChatId.isEmpty()) {
+                return existingChatId;
+            }
             matched.put("defaultChatId", cleanChatId);
             writeAtomically(configPath, JSON.toJSONString(root,
                     SerializerFeature.PrettyFormat, SerializerFeature.SortField));

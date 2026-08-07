@@ -360,7 +360,8 @@ object AcpProxy {
         teamManager = manager
         var recovered = false
         try {
-            val recoveredCount = manager.recoverPersistedDefinitions()
+            val recoveredCount = manager.recoverPersistedDefinitions(
+                teamTransportDescriptor.transportGroup)
             manager.startResourceReaper()
             recovered = true
             log.info("Team 持久定义恢复完成, count={}", recoveredCount)
@@ -1224,7 +1225,9 @@ object AcpProxy {
         val runtime = manager.getRuntime(context.teamId)
             .orElseThrow { IllegalStateException("Team runtime 不存在: ${context.teamId}") }
         val dispatcher = manager.getOrCreateTalkToDispatcher(context.teamId)
-        val injector = TeamTalkToContextInjector(runtime, context.teamMemberId)
+        val channelOwnerKey = "team:${context.teamId}:${context.teamMemberId}"
+        val injector = TeamTalkToContextInjector(
+            runtime, context.teamMemberId, dispatcher, channelOwnerKey)
         // emptyMap 刻意阻断普通/跨 chatter registry；Team injector 不读取该参数。
         client.setTalkToSupport(dispatcher, injector, emptyMap())
         log.info("Team talkTo 严格队内支持初始化完成, teamId={}, memberId={}, contacts={}, robot={}",
@@ -1419,6 +1422,13 @@ object AcpProxy {
     fun setChannelInboundEnabled(channelId: String, enabled: Boolean): Boolean =
         channelManager?.setInboundEnabled(channelId, enabled)
             ?: throw IllegalStateException("channel service is not running")
+
+    @JvmStatic
+    @Synchronized
+    fun reloadChannel(previousChannelId: String, config: ChannelConfig?) {
+        channelManager?.reloadChannel(previousChannelId, config)
+            ?: throw IllegalStateException("channel service is not running")
+    }
 
     private fun ensureShutdownHook() {
         if (shutdownHookRegistered.compareAndSet(false, true)) {

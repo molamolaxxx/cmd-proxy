@@ -286,7 +286,10 @@ private fun startConfigUiServer(config: JSONObject) {
             { channelId, inboundAllowed ->
                 AcpProxy.setChannelInboundEnabled(channelId, inboundAllowed)
             },
-            { AcpProxy.channelTeamBindingTargets() }
+            { AcpProxy.channelTeamBindingTargets() },
+            { previousChannelId, channelId ->
+                reloadChannel(previousChannelId, channelId)
+            }
         )
         server.start()
     } catch (e: Exception) {
@@ -365,6 +368,28 @@ private fun reloadRobot(robotName: String) {
         AcpProxy.reloadRobot(robotName, robot, chatterIds)
     } catch (e: Exception) {
         log.error("robot 级热重载失败, robot={}", robotName, e)
+        throw e
+    }
+}
+
+/** Reloads one external channel from the persisted configuration. */
+private fun reloadChannel(previousChannelId: String, channelId: String) {
+    try {
+        val file = File(CmdProxyHome.pathOf("acpConfig.json"))
+        val content = file.readText(Charset.forName("UTF-8"))
+        if (content.isBlank()) throw IllegalArgumentException("配置文件为空")
+        val config: JSONObject = JSON.parseObject(content)
+        val channels = config.getJSONArray("channels")
+            ?.toJavaList(com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig::class.java)
+            ?: emptyList()
+        val channel = channels.firstOrNull { it.id?.trim() == channelId }
+        if (channel == null && channelId.isNotBlank()) {
+            throw IllegalArgumentException("channel '$channelId' 在配置中不存在")
+        }
+        AcpProxy.reloadChannel(previousChannelId, channel)
+    } catch (e: Exception) {
+        log.error("channel 级热重载失败, previousChannelId={}, channelId={}",
+            previousChannelId, channelId, e)
         throw e
     }
 }

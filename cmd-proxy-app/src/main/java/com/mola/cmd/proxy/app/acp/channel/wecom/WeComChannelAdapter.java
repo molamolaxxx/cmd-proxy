@@ -212,10 +212,10 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
         String target = defaultChatTarget(chatType, chatId, userId);
         if (blank(target)) return;
         try {
-            String effective = ChannelConfigFileStore.setDefaultChatId(
+            String effective = ChannelConfigFileStore.setDefaultChatIdIfEmpty(
                     config.getId(), target);
             config.setDefaultChatId(effective);
-            logger.info("channel default chat updated: channelId={}, chatType={}",
+            logger.info("channel default chat resolved: channelId={}, chatType={}",
                     config.getId(), chatType);
         } catch (Exception e) {
             logger.error("channel default chat persist failed: channelId={}, errorCode=CHANNEL_CONFIG_WRITE_FAILED",

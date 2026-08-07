@@ -15,6 +15,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -54,7 +55,7 @@ public class TeamRecoveryTest {
     }
 
     @Test
-    public void creatingResumesStartupButFailedStaysBlocked() throws Exception {
+    public void creatingResumesStartup() throws Exception {
         RecoveryFixture creatingFixture = fixture();
         creatingFixture.store.saveTeam(
                 definition(creatingFixture.resolver));
@@ -63,7 +64,10 @@ public class TeamRecoveryTest {
         assertEquals(TeamState.READY,
                 creatingFixture.store.loadTeam("team-1").get().getState());
         creatingFixture.manager.close();
+    }
 
+    @Test
+    public void retryableFailedRestartsThroughRecovering() throws Exception {
         RecoveryFixture failedFixture = fixture();
         TeamDefinition creating = definition(failedFixture.resolver);
         TeamError error = TeamError.of(
@@ -73,17 +77,72 @@ public class TeamRecoveryTest {
                 TeamState.FAILED, creating.getMembers(), error, 2L));
         failedFixture.manager.recoverPersistedDefinitions();
 
-        Thread.sleep(50L);
-        assertEquals(0, failedFixture.starts.get());
-        assertEquals(TeamState.FAILED,
+        assertTrue(failedFixture.events.await(2, TimeUnit.SECONDS));
+        assertEquals(2, failedFixture.starts.get());
+        assertEquals(TeamState.READY,
                 failedFixture.manager.getRuntime("team-1").get()
                         .getDefinition().getState());
-        assertFalse(failedFixture.manager.getRuntime("team-1").get()
-                .isAcceptingRequests());
+        assertEquals("TEAM_RECOVERY_STARTED",
+                failedFixture.published.get(0).getType().name());
+        assertEquals("TEAM_RECOVERED",
+                failedFixture.published.get(1).getType().name());
         failedFixture.manager.close();
     }
 
+    @Test
+    public void nonRetryableFailedStaysBlocked() throws Exception {
+        RecoveryFixture fixture = fixture();
+        TeamDefinition creating = definition(fixture.resolver);
+        TeamError error = TeamError.of(
+                TeamErrorCode.CLIENT_START_FAILED, "failed before restart", false);
+        fixture.store.saveTeam(creating);
+        fixture.store.saveTeam(creating.transitionWithMembers(
+                TeamState.FAILED, creating.getMembers(), error, 2L));
+
+        fixture.manager.recoverPersistedDefinitions();
+
+        Thread.sleep(50L);
+        assertEquals(0, fixture.starts.get());
+        assertEquals(TeamState.FAILED,
+                fixture.manager.getRuntime("team-1").get()
+                        .getDefinition().getState());
+        assertFalse(fixture.manager.getRuntime("team-1").get()
+                .isAcceptingRequests());
+        fixture.manager.close();
+    }
+
+    @Test
+    public void retryableFailedDoesNotLoopWhenRecoveryFailsAgain() throws Exception {
+        RecoveryFixture fixture = fixture(true);
+        TeamDefinition creating = definition(fixture.resolver);
+        TeamError error = TeamError.of(
+                TeamErrorCode.CLIENT_START_FAILED, "failed before restart", true);
+        fixture.store.saveTeam(creating);
+        fixture.store.saveTeam(creating.transitionWithMembers(
+                TeamState.FAILED, creating.getMembers(), error, 2L));
+
+        fixture.manager.recoverPersistedDefinitions();
+
+        assertTrue(fixture.events.await(2, TimeUnit.SECONDS));
+        assertEquals(TeamState.FAILED,
+                fixture.manager.getRuntime("team-1").get()
+                        .getDefinition().getState());
+        assertEquals("TEAM_RECOVERY_STARTED",
+                fixture.published.get(0).getType().name());
+        assertEquals("TEAM_RECOVERY_FAILED",
+                fixture.published.get(1).getType().name());
+        int startsAfterFailure = fixture.starts.get();
+        Thread.sleep(100L);
+        assertEquals(2, startsAfterFailure);
+        assertEquals(startsAfterFailure, fixture.starts.get());
+        fixture.manager.close();
+    }
+
     private RecoveryFixture fixture() throws Exception {
+        return fixture(false);
+    }
+
+    private RecoveryFixture fixture(boolean failStarts) throws Exception {
         TeamStore store = new TeamStore(
                 temporaryFolder.newFolder().toPath());
         Map<String, AcpRobotParam> robots = new HashMap<>();
@@ -96,6 +155,9 @@ public class TeamRecoveryTest {
         TeamStartupCoordinator coordinator = new TeamStartupCoordinator(
                 resolver, (runtime, member, snapshot, options, created) -> {
             starts.incrementAndGet();
+            if (failStarts) {
+                throw new IOException("member recovery failed");
+            }
             AcpClient client = client(
                     runtime.getDefinition(), member, snapshot.copyRobotParam());
             created.accept(client);

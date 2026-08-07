@@ -135,12 +135,18 @@ public final class TeamManager implements AutoCloseable {
     }
 
     public int recoverPersistedDefinitions() throws IOException {
+        return recoverPersistedDefinitions(null);
+    }
+
+    public int recoverPersistedDefinitions(String currentTransportGroup) throws IOException {
         ensureOpen();
         List<TeamDefinition> persistedDefinitions = store.loadTeams();
         logger.info("team_recovery action=load root={} persistedTeams={}",
                 store.getTeamsRoot(), persistedDefinitions.size());
         int added = 0;
-        for (TeamDefinition definition : persistedDefinitions) {
+        for (TeamDefinition persistedDefinition : persistedDefinitions) {
+            TeamDefinition definition = migrateTransportGroup(
+                    persistedDefinition, currentTransportGroup);
             logger.info("team_recovery action=inspect teamId={} ownerChatterId={}"
                             + " state={} version={} transportGroup={}",
                     definition.getTeamId(), definition.getOwnerChatterId(),
@@ -153,10 +159,13 @@ public final class TeamManager implements AutoCloseable {
                 continue;
             }
             TeamDefinition recovered = definition;
-            if (definition.getState() == TeamState.READY) {
+            if (definition.getState() == TeamState.READY
+                    || isRetryableFailedTeam(definition)) {
                 metrics.recoveryStarted();
-                recovered = definition.transitionTo(
-                        TeamState.RECOVERING, null, System.currentTimeMillis());
+                recovered = definition.transitionWithMembers(
+                        TeamState.RECOVERING,
+                        markMembersStarting(definition.getMembers()),
+                        null, System.currentTimeMillis());
                 store.saveTeam(recovered);
             }
             TeamRuntime runtime = new TeamRuntime(recovered);
@@ -178,6 +187,39 @@ public final class TeamManager implements AutoCloseable {
             }
         }
         return added;
+    }
+
+    private static boolean isRetryableFailedTeam(TeamDefinition definition) {
+        return definition.getState() == TeamState.FAILED
+                && definition.getLastError() != null
+                && definition.getLastError().isRetryable();
+    }
+
+    private static List<TeamMemberDefinition> markMembersStarting(
+            List<TeamMemberDefinition> members) {
+        List<TeamMemberDefinition> starting = new ArrayList<>();
+        for (TeamMemberDefinition member : members) {
+            starting.add(member.withState(TeamMemberState.STARTING, null, null));
+        }
+        return starting;
+    }
+
+    private TeamDefinition migrateTransportGroup(TeamDefinition definition,
+                                                 String currentTransportGroup)
+            throws IOException {
+        if (definition.getState().isTerminal()
+                || currentTransportGroup == null
+                || currentTransportGroup.trim().isEmpty()
+                || currentTransportGroup.equals(definition.getTransportGroup())) {
+            return definition;
+        }
+        TeamDefinition migrated = definition.withTransportGroup(
+                currentTransportGroup, System.currentTimeMillis());
+        store.saveTeam(migrated);
+        logger.info("team_recovery action=migrate_transport teamId={} oldGroup={} newGroup={} version={}",
+                definition.getTeamId(), definition.getTransportGroup(),
+                currentTransportGroup, migrated.getVersion());
+        return migrated;
     }
 
     public void startResourceReaper() {
@@ -1687,8 +1729,8 @@ public final class TeamManager implements AutoCloseable {
         }
         requireText(transportGroup, "transportGroup");
         List<TeamMemberCreateSpec> members = command.getMembers();
-        if (members == null || members.size() < 2 || members.size() > 6) {
-            throw new IllegalArgumentException("members size must be between 2 and 6");
+        if (members == null || members.isEmpty() || members.size() > 6) {
+            throw new IllegalArgumentException("members size must be between 1 and 6");
         }
         Set<String> memberIds = new HashSet<>();
         Set<String> sourceGroups = new HashSet<>();

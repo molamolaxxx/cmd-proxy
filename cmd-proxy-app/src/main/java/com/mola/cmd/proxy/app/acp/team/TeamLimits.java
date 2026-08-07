@@ -27,9 +27,9 @@ public final class TeamLimits {
         if (maxActiveTeams < 1) {
             throw new IllegalArgumentException("maxActiveTeams must be positive");
         }
-        if (maxMembersPerTeam < 2 || maxMembersPerTeam > 6) {
+        if (maxMembersPerTeam < 1 || maxMembersPerTeam > 6) {
             throw new IllegalArgumentException(
-                    "maxMembersPerTeam must be between 2 and 6");
+                    "maxMembersPerTeam must be between 1 and 6");
         }
         if (maxTotalMembers < maxMembersPerTeam) {
             throw new IllegalArgumentException(
@@ -42,7 +42,7 @@ public final class TeamLimits {
 
     public static TeamLimits system() {
         int membersPerTeam = bounded(ENV_MAX_MEMBERS_PER_TEAM,
-                PROP_MAX_MEMBERS_PER_TEAM, 6, 2, 6);
+                PROP_MAX_MEMBERS_PER_TEAM, 6, 1, 6);
         return new TeamLimits(
                 positive(ENV_MAX_ACTIVE_TEAMS, PROP_MAX_ACTIVE_TEAMS, 20),
                 membersPerTeam,

@@ -303,9 +303,11 @@ var c=document.getElementById('channelList');
 if(!config.channels.length){c.innerHTML='<div style="color:#9e9e9e;font-size:14px">暂无信道。主动发送需配置默认用户 ID 或群聊 chatId。</div>';return}
 var groups=availableGroups();
 c.innerHTML=config.channels.map(function(ch,i){
+if(!Object.prototype.hasOwnProperty.call(ch,'_runtimeId'))Object.defineProperty(ch,'_runtimeId',{value:ch.id||'',writable:true,enumerable:false});
 if(!ch.binding)ch.binding={type:'',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''};
-var status=(channelRuntime.statuses&&channelRuntime.statuses[ch.id])||'STOPPED';
-var error=(channelRuntime.errors&&channelRuntime.errors[ch.id])||'';
+var runtimeId=ch._runtimeId;
+var status=(runtimeId&&channelRuntime.statuses&&channelRuntime.statuses[runtimeId])||'STOPPED';
+var error=(runtimeId&&channelRuntime.errors&&channelRuntime.errors[runtimeId])||'';
 var opts='<option value="">选择 MAIN ACP</option>'+groups.map(function(g){return '<option value="'+esc(g.id)+'"'+(g.id===ch.binding.groupId?' selected':'')+'>'+esc(g.label)+'</option>'}).join('');
 var bindType=ch.binding.type||'';
 var bindTypeOpts='<option value="">选择绑定类型</option><option value="MAIN"'+(bindType==='MAIN'?' selected':'')+'>MAIN ACP</option><option value="TEAM_MEMBER"'+(bindType==='TEAM_MEMBER'?' selected':'')+'>Fast Team 成员</option>';
@@ -323,7 +325,7 @@ var bindFields=bindType==='MAIN'
 ?'<div class="field-group"><label>Team（ID · 名称）*</label><select onchange="setChannelTeam('+i+',this.value)">'+teamOpts+'</select></div><div class="field-group"><label>Team Member（ID · 名称）*</label><select onchange="setChannelTeamMember('+i+',this.value)">'+memberOpts+'</select></div>'
 :'';
 return '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:14px;margin-bottom:12px">'
-+'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div><b>'+esc(ch.id||'未命名信道')+'</b> <span class="env-badge" id="channelStatus_'+i+'">'+esc(status)+'</span> <span id="channelError_'+i+'" style="color:#d32f2f;font-size:12px">'+esc(error)+'</span></div><button class="btn btn-danger btn-sm" onclick="deleteChannel('+i+')"><span class="material-icons">delete</span></button></div>'
++'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div><b>'+esc(ch.id||'未命名信道')+'</b> <span class="env-badge" id="channelStatus_'+i+'">'+esc(status)+'</span> <span id="channelError_'+i+'" style="color:#d32f2f;font-size:12px">'+esc(error)+'</span></div><div style="display:flex;gap:8px"><button class="btn btn-secondary btn-sm" onclick="refreshChannel('+i+',this)" title="保存配置并只刷新此信道"><span class="material-icons">refresh</span></button><button class="btn btn-danger btn-sm" onclick="deleteChannel('+i+')"><span class="material-icons">delete</span></button></div></div>'
 +'<div class="grid-2">'
 +'<div class="field-group"><label>信道 ID *</label><input value="'+esc(ch.id||'')+'" oninput="config.channels['+i+'].id=this.value.trim();markDirty()" placeholder="wecom-main"></div>'
 +'<div class="field-group"><label>绑定类型 *</label><select onchange="setChannelBindingType('+i+',this.value)">'+bindTypeOpts+'</select></div>'
@@ -338,7 +340,8 @@ return '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:14px;marg
 }
 
 function addChannel(){
-config.channels.push({id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',binding:{type:'MAIN',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''}});
+var ch={id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',binding:{type:'MAIN',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''}};
+Object.defineProperty(ch,'_runtimeId',{value:'',writable:true,enumerable:false});config.channels.push(ch);
 markDirty();renderChannels();
 }
 function setChannelBindingType(i,type){
@@ -356,11 +359,28 @@ config.channels[i].binding.teamMemberId=memberId;markDirty();
 }
 function deleteChannel(i){if(confirm('确定删除该信道？')){config.channels.splice(i,1);markDirty();renderChannels()}}
 
+async function refreshChannel(i,btn){
+var ch=config.channels[i];if(!ch)return;
+if(!confirm('确定刷新信道「'+(ch.id||'')+'」的服务？'))return;
+if(!Object.prototype.hasOwnProperty.call(ch,'_runtimeId'))Object.defineProperty(ch,'_runtimeId',{value:ch.id||'',writable:true,enumerable:false});
+var previousId=ch._runtimeId||'',channelId=(ch.id||'').trim();
+btn.disabled=true;btn.innerHTML='<span class="material-icons">hourglass_top</span>';
+var ok=await saveConfig(true);
+if(!ok){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>';return}
+try{var r=await api('/api/refresh-channel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({previousChannelId:previousId,channelId:channelId})});var d=await r.json();
+if(!r.ok||!d.ok)throw new Error(d.error||'刷新失败');
+ch._runtimeId=channelId;
+await loadChannelStatus();renderChannels();showSnackbar('配置已保存，信道「'+channelId+'」已刷新');
+}catch(e){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>';showSnackbar('信道刷新失败:'+e.message)}
+}
+
 async function toggleChannelInbound(i,input,e){
 if(e)e.stopPropagation();
 var ch=config.channels[i],previous=ch.inboundEnabled!==false,enabled=input.checked;
 ch.inboundEnabled=enabled;
-try{var r=await api('/api/channels/inbound',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channelId:ch.id,inboundEnabled:enabled})});var d=await r.json();
+var runtimeId=ch._runtimeId||'';
+if(!runtimeId){markDirty();showSnackbar('入站设置已修改，保存并刷新信道后生效');return}
+try{var r=await api('/api/channels/inbound',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channelId:runtimeId,inboundEnabled:enabled})});var d=await r.json();
 if(!r.ok||!d.ok)throw new Error(d.error||'切换失败');
 showSnackbar(enabled?'已允许外来消息进入 ACP':'已关闭外来消息输入');
 }catch(err){ch.inboundEnabled=previous;input.checked=previous;showSnackbar('切换失败:'+err.message)}
@@ -369,8 +389,9 @@ showSnackbar(enabled?'已允许外来消息进入 ACP':'已关闭外来消息输
 async function refreshChannelStatuses(){
 await loadChannelStatus();
 (config.channels||[]).forEach(function(ch,i){
-var status=document.getElementById('channelStatus_'+i);if(status)status.textContent=(channelRuntime.statuses&&channelRuntime.statuses[ch.id])||'STOPPED';
-var error=document.getElementById('channelError_'+i);if(error)error.textContent=(channelRuntime.errors&&channelRuntime.errors[ch.id])||'';
+var runtimeId=ch._runtimeId;
+var status=document.getElementById('channelStatus_'+i);if(status)status.textContent=(channelRuntime.statuses&&channelRuntime.statuses[runtimeId])||'STOPPED';
+var error=document.getElementById('channelError_'+i);if(error)error.textContent=(channelRuntime.errors&&channelRuntime.errors[runtimeId])||'';
 });
 }
 function deleteRobot(i){if(confirm('确定删除「'+(config.robots[i].name||'')+'」?')){config.robots.splice(i,1);markDirty();render()}}

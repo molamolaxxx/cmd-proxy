@@ -15,6 +15,14 @@ import static org.junit.Assert.*;
 public class TeamTransportProtocolTest {
 
     @Test
+    public void limitsAllowSingleMemberTeams() {
+        TeamLimits limits = new TeamLimits(1, 1, 1);
+
+        assertEquals(1, limits.getMaxMembersPerTeam());
+        assertEquals(1, limits.getMaxTotalMembers());
+    }
+
+    @Test
     public void derivesStableInstanceScopedTransportGroup() {
         TeamTransportDescriptor descriptor =
                 TeamTransportDescriptor.forInstance("home-mola-.cmd-proxy");

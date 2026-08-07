@@ -31,12 +31,35 @@ public class TeamModelTest {
         assertEquals(200L, ready.getUpdatedAt());
     }
 
+    @Test
+    public void transportMigrationCreatesANewVersionWithoutMutatingOriginal() {
+        TeamDefinition original = definition();
+
+        TeamDefinition migrated = original.withTransportGroup("team-acp-new", 200L);
+
+        assertEquals("team-acp-instance", original.getTransportGroup());
+        assertEquals(1L, original.getVersion());
+        assertEquals("team-acp-new", migrated.getTransportGroup());
+        assertEquals(2L, migrated.getVersion());
+        assertEquals(200L, migrated.getUpdatedAt());
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void definitionRejectsDuplicateMemberIds() {
         TeamDefinition.creating("team-1", "owner-1", "Team",
                 "team-acp-instance", "request-1",
                 Arrays.asList(member("member-1", "One"),
                         member("member-1", "Two")), 100L);
+    }
+
+    @Test
+    public void definitionAcceptsSingleMember() {
+        TeamDefinition definition = TeamDefinition.creating(
+                "team-1", "owner-1", "Team", "team-acp-instance", "request-1",
+                Collections.singletonList(member("member-1", "One")), 100L);
+
+        assertEquals(1, definition.getMembers().size());
+        assertEquals("member-1", definition.getMembers().get(0).getTeamMemberId());
     }
 
     @Test(expected = IllegalStateException.class)

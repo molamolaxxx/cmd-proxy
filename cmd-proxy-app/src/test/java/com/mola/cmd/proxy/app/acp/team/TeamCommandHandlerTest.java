@@ -35,6 +35,18 @@ public class TeamCommandHandlerTest {
     }
 
     @Test
+    public void singleMemberCreateIsAcceptedAndPersisted() throws Exception {
+        Fixture fixture = fixture();
+
+        Map<String, String> result = fixture.handler.handleCreate(
+                "rpc-1", one(createSingleMemberJson("request-1", "Solo Team")));
+
+        assertEquals("true", result.get("accepted"));
+        assertEquals("ACCEPTED", result.get("code"));
+        assertEquals(1, fixture.store.loadTeam("team-1").get().getMembers().size());
+    }
+
+    @Test
     public void sameRequestWithDifferentPayloadIsRejected() throws Exception {
         Fixture fixture = fixture();
         fixture.handler.handleCreate("rpc-1", one(createJson("request-1", "Team")));
@@ -152,6 +164,19 @@ public class TeamCommandHandlerTest {
                 + "\"sourceGroupId\":\"group-1\",\"order\":0},"
                 + "{\"teamMemberId\":\"member-2\",\"sourceRobotId\":\"acp-Robot_Two\","
                 + "\"sourceGroupId\":\"group-2\",\"order\":1}"
+                + "]}";
+    }
+
+    private static String createSingleMemberJson(String requestId, String name) {
+        return "{"
+                + "\"schemaVersion\":\"1\","
+                + "\"requestId\":\"" + requestId + "\","
+                + "\"teamId\":\"team-1\","
+                + "\"ownerChatterId\":\"owner-1\","
+                + "\"name\":\"" + name + "\","
+                + "\"members\":["
+                + "{\"teamMemberId\":\"member-1\",\"sourceRobotId\":\"acp-Robot_One\","
+                + "\"sourceGroupId\":\"group-1\",\"order\":0}"
                 + "]}";
     }
 

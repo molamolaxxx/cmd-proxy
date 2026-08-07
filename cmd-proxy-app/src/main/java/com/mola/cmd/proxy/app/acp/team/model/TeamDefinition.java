@@ -88,6 +88,15 @@ public final class TeamDefinition {
                 createdAt, timestamp, deletedAt, lastError, deleteRequestId);
     }
 
+    public TeamDefinition withTransportGroup(String newTransportGroup, long timestamp) {
+        if (state.isTerminal()) {
+            throw new IllegalStateException("terminal team cannot update transportGroup");
+        }
+        return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
+                state, version + 1L, newTransportGroup, createRequestId, members,
+                createdAt, timestamp, deletedAt, lastError, deleteRequestId);
+    }
+
     public TeamDefinition transitionWithMembers(TeamState newState,
                                                 List<TeamMemberDefinition> newMembers,
                                                 TeamError error, long timestamp) {
@@ -113,8 +122,8 @@ public final class TeamDefinition {
 
     private static List<TeamMemberDefinition> copyAndValidateMembers(
             List<TeamMemberDefinition> members) {
-        if (members == null || members.size() < 2 || members.size() > 6) {
-            throw new IllegalArgumentException("members size must be between 2 and 6");
+        if (members == null || members.isEmpty() || members.size() > 6) {
+            throw new IllegalArgumentException("members size must be between 1 and 6");
         }
         List<TeamMemberDefinition> copy = new ArrayList<>(members);
         Set<String> ids = new HashSet<>();
