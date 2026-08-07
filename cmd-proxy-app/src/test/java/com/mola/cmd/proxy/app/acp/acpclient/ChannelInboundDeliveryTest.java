@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
 
 import static org.junit.Assert.*;
 
@@ -55,6 +56,32 @@ public class ChannelInboundDeliveryTest {
         assertNull(dispatcher.pollInbox("another-group"));
     }
 
+    @Test
+    public void localAttachmentsSurviveDirectAndQueuedInboundDelivery() {
+        TalkToDispatcher dispatcher = dispatcher();
+        FakeClient ready = new FakeClient("ready-group");
+        ready.setReady();
+        ChannelTalkToMessage direct = new ChannelTalkToMessage(
+                "channel:wecom:r-direct", "wecom", "sender", "user-1",
+                "group", "chat-1", "text", "inspect", null,
+                Arrays.asList("/workspace/current.png"));
+
+        assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.DIRECT,
+                dispatcher.deliverInbound("ready-group", ready, direct).getStatus());
+        assertEquals(Arrays.asList("/workspace/current.png"), ready.lastLocalFiles);
+
+        FakeClient busy = new FakeClient("busy-group");
+        busy.setBusy();
+        ChannelTalkToMessage queued = new ChannelTalkToMessage(
+                "channel:wecom:r-queued", "wecom", "sender", "user-1",
+                "group", "chat-1", "text", "inspect quote", null,
+                Arrays.asList("/workspace/quote.png"));
+        assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.QUEUED,
+                dispatcher.deliverInbound("busy-group", busy, queued).getStatus());
+        assertEquals(Arrays.asList("/workspace/quote.png"),
+                dispatcher.pollInbox("busy-group").getLocalAttachments());
+    }
+
     private static ChannelTalkToMessage message(String route) {
         return new ChannelTalkToMessage("channel:wecom:" + route,
                 "企业微信", "sender", "user-1", "group", "chat-1", "hello");
@@ -67,6 +94,7 @@ public class ChannelInboundDeliveryTest {
 
     private static final class FakeClient extends AcpClient {
         private String lastPrompt;
+        private List<String> lastLocalFiles = Collections.emptyList();
 
         private FakeClient(String groupId) {
             super(new FakeProvider(), System.getProperty("java.io.tmpdir"), groupId, robot());
@@ -85,6 +113,13 @@ public class ChannelInboundDeliveryTest {
         @Override
         public void send(String userInput, List<Map<String, String>> files) {
             this.lastPrompt = userInput;
+            state.set(State.BUSY);
+        }
+
+        @Override
+        public void sendLocalFiles(String userInput, List<String> localFiles) {
+            this.lastPrompt = userInput;
+            this.lastLocalFiles = localFiles;
             state.set(State.BUSY);
         }
     }

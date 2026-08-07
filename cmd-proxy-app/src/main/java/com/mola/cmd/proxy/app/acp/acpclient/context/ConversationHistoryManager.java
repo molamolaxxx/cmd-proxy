@@ -270,6 +270,16 @@ public class ConversationHistoryManager {
         return Collections.unmodifiableSet(fileAbsolutePaths);
     }
 
+    /** Registers files that were already safely staged by an external channel. */
+    public void registerLocalFiles(Collection<String> localFiles) {
+        if (localFiles == null) return;
+        for (String value : localFiles) {
+            if (value == null || value.trim().isEmpty()) continue;
+            Path path = Paths.get(value).toAbsolutePath().normalize();
+            if (Files.isRegularFile(path)) fileAbsolutePaths.add(path.toString());
+        }
+    }
+
     // ==================== 落盘 ====================
 
     /**

@@ -351,6 +351,15 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     public void send(String userInput, List<Map<String, String>> files, PromptOptions options) {
+        sendInternal(userInput, files, Collections.emptyList(), options);
+    }
+
+    public void sendLocalFiles(String userInput, List<String> localFiles) {
+        sendInternal(userInput, null, localFiles, PromptOptions.defaults());
+    }
+
+    private void sendInternal(String userInput, List<Map<String, String>> files,
+                              Collection<String> localFiles, PromptOptions options) {
         if (userInput == null || userInput.trim().isEmpty()) {
             globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
@@ -366,6 +375,7 @@ public class AcpClient extends AbstractAcpClient {
         // 记录本轮新上传的图片路径（用于 inline image block）
         Set<String> previousFiles = new HashSet<>(historyManager.getFileAbsolutePaths());
         historyManager.saveFiles(sessionId, files);
+        historyManager.registerLocalFiles(localFiles);
         Set<String> newImagePaths = new LinkedHashSet<>();
         for (String path : historyManager.getFileAbsolutePaths()) {
             if (!previousFiles.contains(path) && isImageFile(path)) {
@@ -1177,7 +1187,7 @@ public class AcpClient extends AbstractAcpClient {
             // 先推送来信卡片到前端
             talkToDispatcher.pushIncomingMessageCard(this, pending);
             // 再发送消息，会再次进入 BUSY 状态
-            send(pending.buildPrompt(), null);
+            sendLocalFiles(pending.buildPrompt(), pending.getLocalAttachments());
         }
     }
 

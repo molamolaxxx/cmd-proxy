@@ -324,7 +324,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         if (targetClient.getState() == AbstractAcpClient.State.READY) {
             // 直接投递：先推送来信卡片到目标前端
             pushIncomingMessageCard(targetClient, senderName, content);
-            targetClient.send(message.buildPrompt(), null);
+            sendInboundMessage(targetClient, message);
             logger.info("talkTo 直接投递: {} → {}", senderName, target);
             return "[talkTo 结果]\n已成功将消息发送给 " + target + "。对方会处理你的请求，你可以继续当前工作。";
         } else {
@@ -445,7 +445,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         synchronized (targetClient) {
             if (targetClient.getState() == AbstractAcpClient.State.READY) {
                 pushIncomingMessageCard(targetClient, message);
-                targetClient.send(message.buildPrompt(), null);
+                sendInboundMessage(targetClient, message);
                 logger.info("talkTo external direct delivery: route={}, sender={}",
                         routingKey, message.getSender());
                 return InboundDeliveryResult.direct();
@@ -482,8 +482,16 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         return message != null ? message : pollInbox(routingName);
     }
 
+    protected static void sendInboundMessage(AcpClient targetClient, TalkToMessage message) {
+        if (message.getLocalAttachments().isEmpty()) {
+            targetClient.send(message.buildPrompt(), null);
+        } else {
+            targetClient.sendLocalFiles(message.buildPrompt(), message.getLocalAttachments());
+        }
+    }
+
     public static final class InboundDeliveryResult {
-        public enum Status { DIRECT, QUEUED, REJECTED }
+        public enum Status { DIRECT, QUEUED, SAVED, REJECTED }
 
         private final Status status;
         private final int queuePosition;
@@ -501,6 +509,10 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
 
         public static InboundDeliveryResult queued(int queuePosition) {
             return new InboundDeliveryResult(Status.QUEUED, queuePosition, null);
+        }
+
+        public static InboundDeliveryResult saved() {
+            return new InboundDeliveryResult(Status.SAVED, 0, null);
         }
 
         public static InboundDeliveryResult rejected(String reason) {

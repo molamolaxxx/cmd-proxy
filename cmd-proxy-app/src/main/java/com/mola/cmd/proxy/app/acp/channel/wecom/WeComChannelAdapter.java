@@ -23,6 +23,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
@@ -47,6 +51,9 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
     private final ChannelTalkToBridge bridge;
     private final OkHttpClient httpClient;
     private final ScheduledExecutorService scheduler;
+    private final ExecutorService inboundExecutor;
+    private final WeComInboundMessageParser messageParser = new WeComInboundMessageParser();
+    private final WeComMediaDownloader mediaDownloader;
     private final AtomicReference<ChannelStatus> status =
             new AtomicReference<>(ChannelStatus.STOPPED);
     private final AtomicBoolean stopped = new AtomicBoolean(true);
@@ -75,6 +82,15 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                 return thread;
             }
         });
+        this.inboundExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(32), new ThreadFactory() {
+            @Override public Thread newThread(Runnable runnable) {
+                Thread thread = new Thread(runnable, "wecom-inbound-" + config.getId());
+                thread.setDaemon(true);
+                return thread;
+            }
+        }, new ThreadPoolExecutor.AbortPolicy());
+        this.mediaDownloader = new WeComMediaDownloader(httpClient);
     }
 
     @Override public String getChannelId() { return config.getId(); }
@@ -173,24 +189,53 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                     config.getId(), msgId);
             return;
         }
+        try {
+            inboundExecutor.submit(() -> processMessage(frame));
+        } catch (RejectedExecutionException e) {
+            if (!blank(msgId)) seenMessages.remove(msgId);
+            logger.warn("channel inbound queue full: channelId={}, msgid={}, errorCode=CHANNEL_INBOUND_BUSY",
+                    config.getId(), msgId);
+        }
+    }
+
+    private void processMessage(WeComFrame frame) {
+        JsonObject body = frame.getBody();
+        String msgId = WeComProtocol.string(body, "msgid");
         String msgType = WeComProtocol.string(body, "msgtype");
-        if (!"text".equals(msgType)) {
-            logger.info("channel non-text ignored: channelId={}, msgid={}, msgtype={}",
-                    config.getId(), msgId, msgType);
+        if (!bridge.isInboundEnabled(config.getId())) {
+            logger.info("channel inbound ignored while disabled: channelId={}, msgid={}",
+                    config.getId(), msgId);
             return;
         }
-        JsonObject text = object(body, "text");
         JsonObject from = object(body, "from");
-        String content = WeComProtocol.string(text, "content");
         String userId = WeComProtocol.string(from, "userid");
         String displayName = firstNonBlank(
                 WeComProtocol.string(from, "name"),
                 WeComProtocol.string(from, "alias"), userId);
         String chatId = WeComProtocol.string(body, "chatid");
         String chatType = WeComProtocol.string(body, "chattype");
-        if (blank(content) || blank(userId) || blank(frame.getRequestId())) {
-            logger.warn("channel text missing fields: channelId={}, msgid={}, errorCode=CHANNEL_FRAME_INVALID",
+        if (blank(msgId) || blank(userId) || blank(frame.getRequestId())) {
+            logger.warn("channel message missing fields: channelId={}, msgid={}, errorCode=CHANNEL_FRAME_INVALID",
                     config.getId(), msgId);
+            return;
+        }
+        WeComInboundMessageParser.ParsedMessage parsed;
+        try {
+            parsed = messageParser.parse(body, mediaDownloader);
+        } catch (Exception e) {
+            seenMessages.remove(msgId);
+            logger.warn("channel media processing failed: channelId={}, msgid={}, msgtype={}, errorCode=CHANNEL_MEDIA_FAILED",
+                    config.getId(), msgId, msgType, e);
+            return;
+        }
+        if (parsed == null) {
+            logger.info("channel message type ignored: channelId={}, msgid={}, msgtype={}",
+                    config.getId(), msgId, msgType);
+            return;
+        }
+        if (blank(parsed.getText()) && parsed.getAttachments().isEmpty()) {
+            logger.warn("channel message has no readable content: channelId={}, msgid={}, msgtype={}",
+                    config.getId(), msgId, msgType);
             return;
         }
         captureDefaultChatTarget(chatType, chatId, userId);
@@ -199,7 +244,13 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                 System.currentTimeMillis() + ROUTE_TTL_MS);
         try {
             TalkToDispatcher.InboundDeliveryResult result = bridge.onEvent(new ChannelEvent(
-                    config.getId(), msgId, userId, displayName, content, route));
+                    config.getId(), msgId, userId, displayName, parsed.getMessageType(),
+                    parsed.getText(), parsed.getQuote(), parsed.getAttachments(), route));
+            if (result.getStatus() == TalkToDispatcher.InboundDeliveryResult.Status.REJECTED
+                    && result.getReason() != null
+                    && result.getReason().startsWith("attachment staging failed")) {
+                seenMessages.remove(msgId);
+            }
             logger.info("channel inbound delivered: channelId={}, msgid={}, delivery={}",
                     config.getId(), msgId, result.getStatus().name().toLowerCase());
         } catch (RuntimeException e) {
@@ -390,6 +441,7 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
         socket = null;
         if (current != null) current.close(1000, "stopped");
         scheduler.shutdownNow();
+        inboundExecutor.shutdownNow();
         httpClient.dispatcher().executorService().shutdown();
         httpClient.connectionPool().evictAll();
     }

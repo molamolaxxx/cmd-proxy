@@ -9,6 +9,9 @@ import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 
 import java.util.Map;
+import java.util.Collections;
+import java.util.List;
+import java.io.IOException;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /** Resolves the current bound MAIN client for every event and enters the shared TalkTo inbox. */
@@ -20,6 +23,7 @@ public final class ChannelTalkToBridge {
     private final Map<String, ChannelConfig> configs;
     private final ChannelBindingResolver bindingResolver;
     private final ChannelTalkToGateway gateway;
+    private final WorkspaceAttachmentStore attachmentStore = new WorkspaceAttachmentStore();
     private final ReentrantReadWriteLock inboundGate = new ReentrantReadWriteLock();
 
     public ChannelTalkToBridge(Map<String, ChannelConfig> configs,
@@ -61,20 +65,39 @@ public final class ChannelTalkToBridge {
             if (!config.isInboundEnabled()) {
                 return TalkToDispatcher.InboundDeliveryResult.rejected("channel inbound disabled");
             }
-            String ownerKey = ownerKey(config.getBinding());
-            String replyTarget = gateway.createRoute(
-                    event.getChannelId(), event.getReplyRoute(), ownerKey);
             ChannelBoundTarget target = bindingResolver.resolve(config.getBinding());
             AcpClient client = target == null ? null : target.getClient();
             if (!isMainClient(client)) {
+                String replyTarget = gateway.createRoute(event.getChannelId(),
+                        event.getReplyRoute(), ownerKey(config.getBinding()));
                 replyFailureAsync(replyTarget, "信道当前未绑定到可用的 ACP，请检查配置。");
                 return TalkToDispatcher.InboundDeliveryResult.rejected("ACP binding not found");
             }
 
+            List<String> localAttachments = Collections.emptyList();
+            try {
+                localAttachments = attachmentStore.save(client.getWorkspacePath(),
+                        event.getChannelId(), event.getEventId(), event.getAttachments());
+            } catch (IOException e) {
+                String replyTarget = gateway.createRoute(event.getChannelId(),
+                        event.getReplyRoute(), ownerKey(config.getBinding()));
+                replyFailureAsync(replyTarget, "附件下载或保存失败，请稍后重试。");
+                return TalkToDispatcher.InboundDeliveryResult.rejected(
+                        "attachment staging failed: " + e.getMessage());
+            }
+            if (!event.shouldInvokeAcp()) {
+                return TalkToDispatcher.InboundDeliveryResult.saved();
+            }
+
+            String ownerKey = ownerKey(config.getBinding());
+            String replyTarget = gateway.createRoute(
+                    event.getChannelId(), event.getReplyRoute(), ownerKey);
+
             ChannelTalkToMessage message = new ChannelTalkToMessage(
                     replyTarget, config.getId(), event.getSenderDisplayName(), event.getSenderId(),
                     event.getReplyRoute().getChatType(), event.getReplyRoute().getChatId(),
-                    event.getContent());
+                    event.getMessageType(), event.getContent(), event.getQuotedMessage(),
+                    localAttachments);
             TalkToDispatcher.InboundDeliveryResult result =
                     target.getDispatcher().deliverInbound(
                             target.getRoutingKey(), client, message);
@@ -105,6 +128,16 @@ public final class ChannelTalkToBridge {
             return previous;
         } finally {
             inboundGate.writeLock().unlock();
+        }
+    }
+
+    public boolean isInboundEnabled(String channelId) {
+        inboundGate.readLock().lock();
+        try {
+            ChannelConfig config = configs.get(channelId);
+            return config != null && config.getBinding() != null && config.isInboundEnabled();
+        } finally {
+            inboundGate.readLock().unlock();
         }
     }
 

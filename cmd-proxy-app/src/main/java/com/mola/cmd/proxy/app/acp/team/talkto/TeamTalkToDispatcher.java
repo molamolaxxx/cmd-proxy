@@ -189,7 +189,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                                     "DELIVERED", null, null, null));
                     publishCard(target, sender, TeamEventType.TALK_TO_RECEIVE,
                             messageId, content, "DELIVERED", null);
-                    targetClient.send(message.buildPrompt(), null);
+                    sendInboundMessage(targetClient, message);
                     return "[talkTo 结果]\n已成功将消息发送给同队成员 "
                             + target.getDisplayName() + "（" + target.getTeamMemberId()
                             + "）。对方会处理你的请求，你可以继续当前工作。";
@@ -262,7 +262,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                 stateObserver.onState(runtime.getDefinition().getTeamId(), teamMemberId,
                         TeamMemberState.BUSY, null);
                 pushIncomingMessageCard(targetClient, message);
-                targetClient.send(message.buildPrompt(), null);
+                sendInboundMessage(targetClient, message);
                 return InboundDeliveryResult.direct();
             }
         }

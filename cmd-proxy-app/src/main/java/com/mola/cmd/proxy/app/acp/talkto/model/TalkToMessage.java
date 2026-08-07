@@ -1,5 +1,9 @@
 package com.mola.cmd.proxy.app.acp.talkto.model;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 /**
  * inbox 中排队的 talkTo 消息。
  */
@@ -17,17 +21,28 @@ public class TalkToMessage {
     /** 入队时间戳 */
     private final long enqueuedAt;
 
+    /** Stable local paths already staged before the message enters an inbox. */
+    private final List<String> localAttachments;
+
     public TalkToMessage(String sender, String content, int depth) {
+        this(sender, content, depth, Collections.emptyList());
+    }
+
+    public TalkToMessage(String sender, String content, int depth,
+                         List<String> localAttachments) {
         this.sender = sender;
         this.content = content;
         this.depth = depth;
         this.enqueuedAt = System.currentTimeMillis();
+        this.localAttachments = localAttachments == null ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(localAttachments));
     }
 
     public String getSender() { return sender; }
     public String getContent() { return content; }
     public int getDepth() { return depth; }
     public long getEnqueuedAt() { return enqueuedAt; }
+    public List<String> getLocalAttachments() { return localAttachments; }
 
     /**
      * 构建投递给目标 robot 的 prompt 文本。
