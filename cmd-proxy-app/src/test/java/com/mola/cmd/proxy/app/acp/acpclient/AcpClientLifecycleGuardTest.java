@@ -61,6 +61,34 @@ public class AcpClientLifecycleGuardTest {
         assertEquals(1, delegate.callbacks.get());
     }
 
+    @Test
+    public void guardedListenerIsolatesDelegateFailuresForEveryCallback() {
+        LifecycleGuardedAcpResponseListener listener =
+                new LifecycleGuardedAcpResponseListener(
+                        new ThrowingListener(), () -> true);
+
+        listener.onMessage("message");
+        listener.onToolCall("id", "tool", "completed", new JsonObject());
+        listener.onSubAgentEvent("AGENT_COMPLETE", "agent", "detail");
+        listener.onScheduleEvent("SCHEDULE_CREATE", "detail", true);
+        listener.onTalkToEvent("TALK_TO_RECEIVE", "robot", "content");
+        listener.onCompactionEvent("COMPACTION_COMPLETED", "provider");
+        listener.onComplete("complete");
+        listener.onError(new RuntimeException("acp error"));
+    }
+
+    private static final class ThrowingListener implements AcpResponseListener {
+        private void fail() { throw new RuntimeException("transport closed"); }
+        @Override public void onMessage(String text) { fail(); }
+        @Override public void onToolCall(String id, String title, String status, JsonObject update) { fail(); }
+        @Override public void onSubAgentEvent(String type, String agent, String detail) { fail(); }
+        @Override public void onScheduleEvent(String type, String detail, boolean expanded) { fail(); }
+        @Override public void onTalkToEvent(String type, String robot, String content) { fail(); }
+        @Override public void onCompactionEvent(String type, String provider) { fail(); }
+        @Override public void onComplete(String response) { fail(); }
+        @Override public void onError(Exception error) { fail(); }
+    }
+
     private static final class TestClient extends AbstractAcpClient {
         private TestClient() {
             super(new KiroCliAgentProvider(), ".",

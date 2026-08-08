@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
 
@@ -70,6 +71,35 @@ public class TeamEventContractTest {
         assertEquals("team-acp-instance", group.get());
         assertEquals(event.getEventId(), response.get().getCmdId());
         assertEquals(event.getEventId(), response.get().getResultMap().get("eventId"));
+    }
+
+    @Test
+    public void rpcSinkRetriesAndDoesNotPropagateTransportFailure() {
+        AtomicInteger attempts = new AtomicInteger();
+        RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> {
+            if (attempts.incrementAndGet() < 3) {
+                throw new RuntimeException("closed channel");
+            }
+        });
+
+        sink.publish(TeamEventEnvelope.next(new TeamRuntime(definition()), null, null,
+                TeamEventType.TEAM_SNAPSHOT_READY, Collections.emptyMap()));
+
+        assertEquals(3, attempts.get());
+    }
+
+    @Test
+    public void rpcSinkDropsEventWithoutPropagatingAfterRetryExhaustion() {
+        AtomicInteger attempts = new AtomicInteger();
+        RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> {
+            attempts.incrementAndGet();
+            throw new RuntimeException("closed channel");
+        });
+
+        sink.publish(TeamEventEnvelope.next(new TeamRuntime(definition()), null, null,
+                TeamEventType.TEAM_SNAPSHOT_READY, Collections.emptyMap()));
+
+        assertEquals(3, attempts.get());
     }
 
     private static TeamDefinition definition() {

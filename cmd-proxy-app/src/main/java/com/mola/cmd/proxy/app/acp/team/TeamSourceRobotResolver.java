@@ -21,12 +21,9 @@ public interface TeamSourceRobotResolver {
         TeamMemberCreateSpec spec = new TeamMemberCreateSpec(
                 member.getTeamMemberId(), member.getSourceRobotId(),
                 member.getSourceGroupId(), member.getOrder());
-        TeamSourceRobotSnapshot snapshot = snapshot(spec);
-        if (!member.getConfigFingerprint().equals(snapshot.getConfigFingerprint())) {
-            throw new TeamSourceResolutionException(
-                    com.mola.cmd.proxy.app.acp.team.model.TeamErrorCode.VERSION_CONFLICT,
-                    "source robot configuration fingerprint changed");
-        }
-        return snapshot;
+        // Team definition pins source identity, but runtime configuration follows the
+        // current service generation. A full ACP service refresh/restart therefore
+        // recreates Team clients with the latest source robot configuration.
+        return snapshot(spec);
     }
 }

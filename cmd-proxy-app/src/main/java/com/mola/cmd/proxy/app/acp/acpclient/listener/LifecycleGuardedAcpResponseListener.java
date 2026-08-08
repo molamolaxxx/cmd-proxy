@@ -1,6 +1,8 @@
 package com.mola.cmd.proxy.app.acp.acpclient.listener;
 
 import com.google.gson.JsonObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -10,6 +12,9 @@ import java.util.function.BooleanSupplier;
  * 关闭或替换 client 后，旧 turn 的迟到事件会被静默丢弃。
  */
 public final class LifecycleGuardedAcpResponseListener implements AcpResponseListener {
+
+    private static final Logger logger = LoggerFactory.getLogger(
+            LifecycleGuardedAcpResponseListener.class);
 
     private final AcpResponseListener delegate;
     private final BooleanSupplier active;
@@ -22,41 +27,56 @@ public final class LifecycleGuardedAcpResponseListener implements AcpResponseLis
 
     @Override
     public void onMessage(String text) {
-        if (active.getAsBoolean()) delegate.onMessage(text);
+        forward("onMessage", () -> delegate.onMessage(text));
     }
 
     @Override
     public void onToolCall(String toolCallId, String title, String status, JsonObject update) {
-        if (active.getAsBoolean()) delegate.onToolCall(toolCallId, title, status, update);
+        forward("onToolCall", () -> delegate.onToolCall(toolCallId, title, status, update));
     }
 
     @Override
     public void onSubAgentEvent(String eventType, String agentName, String detail) {
-        if (active.getAsBoolean()) delegate.onSubAgentEvent(eventType, agentName, detail);
+        forward("onSubAgentEvent", () -> delegate.onSubAgentEvent(eventType, agentName, detail));
     }
 
     @Override
     public void onScheduleEvent(String eventType, String detail, boolean expanded) {
-        if (active.getAsBoolean()) delegate.onScheduleEvent(eventType, detail, expanded);
+        forward("onScheduleEvent", () -> delegate.onScheduleEvent(eventType, detail, expanded));
     }
 
     @Override
     public void onTalkToEvent(String eventType, String robotName, String content) {
-        if (active.getAsBoolean()) delegate.onTalkToEvent(eventType, robotName, content);
+        forward("onTalkToEvent", () -> delegate.onTalkToEvent(eventType, robotName, content));
     }
 
     @Override
     public void onCompactionEvent(String eventType, String provider) {
-        if (active.getAsBoolean()) delegate.onCompactionEvent(eventType, provider);
+        forward("onCompactionEvent", () -> delegate.onCompactionEvent(eventType, provider));
     }
 
     @Override
     public void onComplete(String fullResponse) {
-        if (active.getAsBoolean()) delegate.onComplete(fullResponse);
+        forward("onComplete", () -> delegate.onComplete(fullResponse));
     }
 
     @Override
     public void onError(Exception error) {
-        if (active.getAsBoolean()) delegate.onError(error);
+        forward("onError", () -> delegate.onError(error));
+    }
+
+    private void forward(String callback, Runnable action) {
+        if (!active.getAsBoolean()) {
+            return;
+        }
+        try {
+            action.run();
+        } catch (RuntimeException error) {
+            // Listener delivery is a side effect. It must not turn a healthy ACP
+            // response into a client ERROR or terminate the ACP process.
+            logger.warn("AcpResponseListener callback failed; ACP processing continues,"
+                            + " callback={}, errorType={}, error={}",
+                    callback, error.getClass().getSimpleName(), error.getMessage());
+        }
     }
 }

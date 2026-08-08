@@ -229,7 +229,11 @@ public final class TeamStartupCoordinator implements AutoCloseable {
                 if (client == null) {
                     throw new IllegalStateException("Team member starter returned null");
                 }
-                return new StartedMember(member, client, null);
+                // Persist the configuration generation actually used by the new
+                // client so the definition remains an accurate runtime snapshot.
+                TeamMemberDefinition refreshed = member.withConfigFingerprint(
+                        snapshot.getConfigFingerprint());
+                return new StartedMember(refreshed, client, null);
             } catch (Exception e) {
                 closeQuietly(created.get());
                 return new StartedMember(member, null, e);

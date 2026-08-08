@@ -116,7 +116,9 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         resultMap.put("groupId", groupId);
         resultMap.put("content", content);
         resultMap.put("end", end ? "Y" : "N");
-        CmdReceiver.INSTANCE.callback("acp", "acp",
-                new CmdResponseContent(UUID.randomUUID().toString(), resultMap));
+        CmdResponseContent response = new CmdResponseContent(
+                UUID.randomUUID().toString(), resultMap);
+        RpcCallbackRetry.run("ACP response group=" + groupId, () ->
+                CmdReceiver.INSTANCE.callback("acp", "acp", response));
     }
 }

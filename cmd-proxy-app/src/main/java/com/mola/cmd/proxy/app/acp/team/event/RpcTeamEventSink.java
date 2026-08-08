@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.team.event;
 
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportProtocol;
+import com.mola.cmd.proxy.app.acp.acpclient.listener.RpcCallbackRetry;
 import com.mola.cmd.proxy.client.provider.CmdReceiver;
 import com.mola.cmd.proxy.client.resp.CmdResponseContent;
 
@@ -19,8 +20,10 @@ public final class RpcTeamEventSink implements TeamEventSink {
 
     @Override
     public void publish(TeamEventEnvelope event) {
-        sender.send(TeamTransportProtocol.EVENT_COMMAND, event.getTransportGroup(),
-                new CmdResponseContent(event.getEventId(),
-                        TeamEventCodec.toResultMap(event)));
+        CmdResponseContent response = new CmdResponseContent(event.getEventId(),
+                TeamEventCodec.toResultMap(event));
+        RpcCallbackRetry.run("Fast Team event " + event.getEventId(), () ->
+                sender.send(TeamTransportProtocol.EVENT_COMMAND,
+                        event.getTransportGroup(), response));
     }
 }

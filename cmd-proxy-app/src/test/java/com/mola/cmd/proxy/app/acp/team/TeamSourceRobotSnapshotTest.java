@@ -97,7 +97,7 @@ public class TeamSourceRobotSnapshotTest {
     }
 
     @Test
-    public void restoreRejectsConfigurationDrift() throws Exception {
+    public void restoreUsesCurrentConfigurationAfterServiceRefresh() throws Exception {
         Map<String, AcpRobotParam> robots = new HashMap<>();
         AcpRobotParam source = robot();
         robots.put("group-1", source);
@@ -105,12 +105,10 @@ public class TeamSourceRobotSnapshotTest {
         String fingerprint = resolver.snapshot(spec()).getConfigFingerprint();
         source.setModel("changed");
 
-        try {
-            resolver.restore(member(fingerprint));
-            fail("expected fingerprint drift");
-        } catch (TeamSourceResolutionException e) {
-            assertEquals(TeamErrorCode.VERSION_CONFLICT, e.getCode());
-        }
+        TeamSourceRobotSnapshot restored = resolver.restore(member(fingerprint));
+
+        assertEquals("changed", restored.copyRobotParam().getModel());
+        assertNotEquals(fingerprint, restored.getConfigFingerprint());
     }
 
     @Test
