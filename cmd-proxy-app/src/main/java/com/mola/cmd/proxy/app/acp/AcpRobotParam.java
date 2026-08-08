@@ -19,6 +19,7 @@ public class AcpRobotParam {
     private boolean onlySubAgent;
     private boolean onlyTeamMember;
     private boolean scheduleEnabled = false;
+    private AutoNewSessionConfig autoNewSession;
     private List<ContactRef> contacts;
     private String model;
     private String apiKey;
@@ -159,6 +160,18 @@ public class AcpRobotParam {
 
     public void setScheduleEnabled(boolean scheduleEnabled) {
         this.scheduleEnabled = scheduleEnabled;
+    }
+
+    public AutoNewSessionConfig getAutoNewSession() {
+        return autoNewSession;
+    }
+
+    public void setAutoNewSession(AutoNewSessionConfig autoNewSession) {
+        this.autoNewSession = autoNewSession;
+    }
+
+    public boolean isAutoNewSessionEnabled() {
+        return autoNewSession != null && autoNewSession.isEnabled();
     }
 
     public List<ContactRef> getContacts() {

@@ -149,6 +149,24 @@ public class ConversationHistoryManager {
         return turnCounter.get();
     }
 
+    /** Returns the last persisted message time for a session, or {@code 0}. */
+    public long getLastMessageAt(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) return 0L;
+        Path sessionDir = sessionBaseDir.resolve(sessionId);
+        if (!Files.isDirectory(sessionDir)) return 0L;
+        try (Stream<Path> files = Files.list(sessionDir)) {
+            return files.filter(path -> path.getFileName().toString().matches("turn_\\d{4}\\.json"))
+                    .mapToLong(path -> {
+                        try { return Files.getLastModifiedTime(path).toMillis(); }
+                        catch (IOException ignored) { return 0L; }
+                    })
+                    .max().orElse(0L);
+        } catch (IOException e) {
+            logger.warn("读取会话最后消息时间失败, sessionId={}", sessionId, e);
+            return 0L;
+        }
+    }
+
     // ==================== 消息收集 ====================
 
     /** 记录一条用户消息 */

@@ -20,8 +20,11 @@ public class ChannelInboundSwitchTest {
     @Test
     public void inboundDefaultsToEnabled() {
         assertTrue(new ChannelConfig().isInboundEnabled());
+        assertTrue(new ChannelConfig().isPrivateChatEnabled());
         assertTrue(JSON.parseObject("{\"id\":\"legacy-channel\"}", ChannelConfig.class)
                 .isInboundEnabled());
+        assertTrue(JSON.parseObject("{\"id\":\"legacy-channel\"}", ChannelConfig.class)
+                .isPrivateChatEnabled());
     }
 
     @Test
@@ -55,6 +58,41 @@ public class ChannelInboundSwitchTest {
         assertTrue(config.isInboundEnabled());
     }
 
+    @Test
+    public void disabledPrivateChatRejectsSingleButAllowsGroupPastPolicyGate() {
+        ChannelConfig config = config();
+        Map<String, ChannelConfig> configs = new HashMap<>();
+        configs.put(config.getId(), config);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.emptyMap(), configs);
+        AtomicInteger resolutions = new AtomicInteger();
+        ChannelTalkToBridge bridge = new ChannelTalkToBridge(
+                configs,
+                groupId -> {
+                    resolutions.incrementAndGet();
+                    return null;
+                },
+                new TalkToDispatcher(Collections.emptyMap(),
+                        com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry.getInstance(),
+                        Collections.emptyMap()),
+                gateway);
+
+        assertTrue(bridge.setPrivateChatEnabled("wecom-main", false));
+        assertFalse(bridge.isInboundAllowed("wecom-main", "single"));
+        assertTrue(bridge.isInboundAllowed("wecom-main", "group"));
+        TalkToDispatcher.InboundDeliveryResult single = bridge.onEvent(event("single"));
+        assertEquals("channel private chat disabled", single.getReason());
+        assertEquals(0, resolutions.get());
+        assertEquals(0, gateway.routeCount());
+
+        TalkToDispatcher.InboundDeliveryResult group = bridge.onEvent(event("group"));
+        assertEquals("ACP binding not found", group.getReason());
+        assertEquals(1, resolutions.get());
+        assertEquals(1, gateway.routeCount());
+        assertFalse(bridge.setPrivateChatEnabled("wecom-main", true));
+        assertTrue(config.isPrivateChatEnabled());
+    }
+
     private static ChannelConfig config() {
         ChannelBinding binding = new ChannelBinding();
         binding.setType(ChannelBinding.TYPE_MAIN);
@@ -69,8 +107,12 @@ public class ChannelInboundSwitchTest {
     }
 
     private static ChannelEvent event() {
+        return event("group");
+    }
+
+    private static ChannelEvent event(String chatType) {
         return new ChannelEvent("wecom-main", "message-1", "user-1", "sender", "hello",
                 new ChannelReplyRoute("request-1", "message-1", "user-1", "chat-1",
-                        "group", System.currentTimeMillis() + 60_000));
+                        chatType, System.currentTimeMillis() + 60_000));
     }
 }

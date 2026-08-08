@@ -232,6 +232,10 @@ public final class ChannelManager implements AutoCloseable {
         return bridge.setInboundEnabled(channelId, enabled);
     }
 
+    public boolean setPrivateChatEnabled(String channelId, boolean enabled) {
+        return bridge.setPrivateChatEnabled(channelId, enabled);
+    }
+
     public Map<String, ChannelStatus> getStatuses() {
         Map<String, ChannelStatus> snapshot = new LinkedHashMap<>();
         for (Map.Entry<String, ChannelStatus> entry : statuses.entrySet()) {

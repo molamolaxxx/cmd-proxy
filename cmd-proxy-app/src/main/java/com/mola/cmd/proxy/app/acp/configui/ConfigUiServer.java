@@ -53,6 +53,7 @@ public class ConfigUiServer {
     private final Supplier<java.util.Map<String, String>> channelStatusSupplier;
     private final Supplier<java.util.Map<String, String>> channelErrorSupplier;
     private final BiFunction<String, Boolean, Boolean> channelInboundUpdater;
+    private final BiFunction<String, Boolean, Boolean> channelPrivateChatUpdater;
     private final Supplier<List<Map<String, Object>>> channelBindingTargetSupplier;
     private final BiConsumer<String, String> refreshChannelCallback;
     private HttpServer server;
@@ -74,6 +75,8 @@ public class ConfigUiServer {
                 java.util.Collections::emptyMap, java.util.Collections::emptyMap,
                 (channelId, enabled) -> {
                     throw new IllegalStateException("channel service is not running");
+                }, (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
                 }, java.util.Collections::emptyList,
                 (previousId, channelId) -> {
                     throw new IllegalStateException("channel service is not running");
@@ -86,6 +89,8 @@ public class ConfigUiServer {
                           Supplier<java.util.Map<String, String>> channelErrorSupplier) {
         this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
                 channelErrorSupplier, (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                }, (channelId, enabled) -> {
                     throw new IllegalStateException("channel service is not running");
                 }, java.util.Collections::emptyList,
                 (previousId, channelId) -> {
@@ -100,6 +105,9 @@ public class ConfigUiServer {
                           BiFunction<String, Boolean, Boolean> channelInboundUpdater) {
         this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
                 channelErrorSupplier, channelInboundUpdater,
+                (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                },
                 java.util.Collections::emptyList,
                 (previousId, channelId) -> {
                     throw new IllegalStateException("channel service is not running");
@@ -113,7 +121,11 @@ public class ConfigUiServer {
                           BiFunction<String, Boolean, Boolean> channelInboundUpdater,
                           Supplier<List<Map<String, Object>>> channelBindingTargetSupplier) {
         this(port, refreshCallback, refreshRobotCallback, channelStatusSupplier,
-                channelErrorSupplier, channelInboundUpdater, channelBindingTargetSupplier,
+                channelErrorSupplier, channelInboundUpdater,
+                (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                },
+                channelBindingTargetSupplier,
                 (previousId, channelId) -> {
                     throw new IllegalStateException("channel service is not running");
                 });
@@ -124,6 +136,7 @@ public class ConfigUiServer {
                           Supplier<java.util.Map<String, String>> channelStatusSupplier,
                           Supplier<java.util.Map<String, String>> channelErrorSupplier,
                           BiFunction<String, Boolean, Boolean> channelInboundUpdater,
+                          BiFunction<String, Boolean, Boolean> channelPrivateChatUpdater,
                           Supplier<List<Map<String, Object>>> channelBindingTargetSupplier,
                           BiConsumer<String, String> refreshChannelCallback) {
         this.port = port;
@@ -132,6 +145,7 @@ public class ConfigUiServer {
         this.channelStatusSupplier = channelStatusSupplier;
         this.channelErrorSupplier = channelErrorSupplier;
         this.channelInboundUpdater = channelInboundUpdater;
+        this.channelPrivateChatUpdater = channelPrivateChatUpdater;
         this.channelBindingTargetSupplier = channelBindingTargetSupplier;
         this.refreshChannelCallback = refreshChannelCallback;
     }
@@ -149,6 +163,8 @@ public class ConfigUiServer {
         server.createContext("/api/config", proxied(this::handleConfig));
         server.createContext("/api/channels/status", proxied(this::handleChannelStatus));
         server.createContext("/api/channels/inbound", proxied(this::handleChannelInbound));
+        server.createContext("/api/channels/private-chat",
+                proxied(this::handleChannelPrivateChat));
         server.createContext("/api/channels/binding-targets",
                 proxied(this::handleChannelBindingTargets));
         server.createContext("/api/refresh", proxied(this::handleRefresh));
@@ -415,6 +431,40 @@ public class ConfigUiServer {
             sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
         } catch (Exception e) {
             logger.error("切换信道入站状态失败", e);
+            JSONObject error = new JSONObject();
+            error.put("error", e.getMessage() == null ? "unknown error" : e.getMessage());
+            sendResponse(exchange, 500, "application/json", JSON.toJSONString(error));
+        }
+    }
+
+    private void handleChannelPrivateChat(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject request = JSON.parseObject(readBody(exchange));
+            String channelId = request == null ? null : request.getString("channelId");
+            if (isBlank(channelId) || !request.containsKey("privateChatEnabled")) {
+                sendResponse(exchange, 400, "application/json",
+                        "{\"error\":\"channelId and privateChatEnabled are required\"}");
+                return;
+            }
+            boolean enabled = request.getBooleanValue("privateChatEnabled");
+            boolean previous = channelPrivateChatUpdater.apply(channelId.trim(), enabled);
+            try {
+                ChannelConfigFileStore.setPrivateChatEnabled(channelId.trim(), enabled);
+            } catch (Exception persistFailure) {
+                try {
+                    channelPrivateChatUpdater.apply(channelId.trim(), previous);
+                } catch (Exception rollbackFailure) {
+                    persistFailure.addSuppressed(rollbackFailure);
+                }
+                throw persistFailure;
+            }
+            sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+        } catch (Exception e) {
+            logger.error("切换信道单聊状态失败", e);
             JSONObject error = new JSONObject();
             error.put("error", e.getMessage() == null ? "unknown error" : e.getMessage());
             sendResponse(exchange, 500, "application/json", JSON.toJSONString(error));

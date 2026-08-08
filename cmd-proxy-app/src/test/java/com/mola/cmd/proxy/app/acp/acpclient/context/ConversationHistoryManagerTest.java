@@ -80,6 +80,21 @@ public class ConversationHistoryManagerTest {
         assertTrue(manager.listPendingMemoryExtractions().isEmpty());
     }
 
+    @Test
+    public void lastMessageTimeExistsOnlyAfterATurnIsPersisted() throws Exception {
+        ConversationHistoryManager manager = new ConversationHistoryManager(
+                AcpClientIdentity.main("group-2", "Robot Two", "Robot Two"),
+                temporaryFolder.newFolder("activity-sessions").toPath());
+
+        assertEquals(0L, manager.getLastMessageAt("session-2"));
+        manager.addUserMessage("hello");
+        manager.addAssistantMessage("world");
+        manager.flushTurn("session-2");
+
+        assertTrue(manager.getLastMessageAt("session-2") > 0L);
+        assertEquals(0L, manager.getLastMessageAt("missing-session"));
+    }
+
     private static AcpClientIdentity teamIdentity(String namespace) {
         return AcpClientIdentity.team(
                 "team-acp-member-1",

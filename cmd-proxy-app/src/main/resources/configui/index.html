@@ -280,7 +280,7 @@ var cardStyle=disabled?' style="opacity:0.6"':'';
 var badge=disabled?'<span style="margin-left:8px;font-size:12px;color:#9e9e9e;font-weight:400">已禁用</span>':'';
 			var toggleId='tglRobot_'+i;
 			var toggle='<label class="switch" style="margin-left:8px" title="'+(disabled?'点击启用':'点击禁用')+'"><input type="checkbox" id="'+toggleId+'"'+(disabled?'':' checked')+' onchange="toggleRobot('+i+')"><span class="slider"></span></label>';
-return '<div class="card"'+cardStyle+'><div class="card-header"><div style="display:flex;align-items:center;gap:8px">'+toggle+'<h2>'+esc(r.name||'未命名')+badge+'</h2></div><div class="robot-actions">'+'<button class="btn btn-secondary btn-sm" onclick="refreshRobot(\''+esc(r.name)+'\')" title="刷新此Robot"><span class="material-icons">refresh</span></button><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>仅 Team Member:</b> '+(r.onlyTeamMember?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div><div><b>HTTP代理:</b> '+(r.proxyEnabled?(hasProxyAddress(r)?esc(r.httpProxy):'<span style="color:#ff9800">未配置地址</span>'):'关闭')+'</div></div></div></div>'
+return '<div class="card"'+cardStyle+'><div class="card-header"><div style="display:flex;align-items:center;gap:8px">'+toggle+'<h2>'+esc(r.name||'未命名')+badge+'</h2></div><div class="robot-actions">'+'<button class="btn btn-secondary btn-sm" onclick="refreshRobot(\''+esc(r.name)+'\')" title="刷新此Robot"><span class="material-icons">refresh</span></button><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>仅 Team Member:</b> '+(r.onlyTeamMember?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>自动新会话:</b> '+(r.autoNewSession&&r.autoNewSession.enabled?('开启（'+(r.autoNewSession.checkIntervalMinutes||360)+' / '+(r.autoNewSession.idleMinutes||180)+' 分钟）'):'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div><div><b>HTTP代理:</b> '+(r.proxyEnabled?(hasProxyAddress(r)?esc(r.httpProxy):'<span style="color:#ff9800">未配置地址</span>'):'关闭')+'</div></div></div></div>'
 }).join('');
 }
 
@@ -335,12 +335,13 @@ return '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:14px;marg
 +'<div class="field-group"><label>默认用户 ID / 群 chatId</label><input value="'+esc(ch.defaultChatId||'')+'" oninput="config.channels['+i+'].defaultChatId=this.value.trim();markDirty()" placeholder="用于主动 talkTo"></div>'
 +'<div class="field-group"><label>WebSocket URL</label><input value="'+esc(ch.wsUrl||'wss://openws.work.weixin.qq.com')+'" oninput="config.channels['+i+'].wsUrl=this.value.trim();markDirty()"></div>'
 +'</div><div class="toggle-row"><div><div class="toggle-label">接收外来消息</div><div style="color:#757575;font-size:12px">关闭后消息不会进入绑定的 ACP，主动发送不受影响</div></div><label class="switch"><input type="checkbox" '+(ch.inboundEnabled!==false?'checked':'')+' onchange="toggleChannelInbound('+i+',this,event)"><span class="slider"></span></label></div>'
++'<div class="toggle-row"><div><div class="toggle-label">接收单聊消息</div><div style="color:#757575;font-size:12px">关闭后忽略用户单聊消息，群聊仍可正常使用</div></div><label class="switch"><input type="checkbox" '+(ch.privateChatEnabled!==false?'checked':'')+' onchange="toggleChannelPrivateChat('+i+',this,event)"><span class="slider"></span></label></div>'
 +'<div class="toggle-row"><div><div class="toggle-label">启用信道</div></div><label class="switch"><input type="checkbox" '+(ch.enabled!==false?'checked':'')+' onchange="config.channels['+i+'].enabled=this.checked;markDirty()"><span class="slider"></span></label></div></div>';
 }).join('');
 }
 
 function addChannel(){
-var ch={id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',binding:{type:'MAIN',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''}};
+var ch={id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,privateChatEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',binding:{type:'MAIN',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''}};
 Object.defineProperty(ch,'_runtimeId',{value:'',writable:true,enumerable:false});config.channels.push(ch);
 markDirty();renderChannels();
 }
@@ -386,6 +387,18 @@ showSnackbar(enabled?'已允许外来消息进入 ACP':'已关闭外来消息输
 }catch(err){ch.inboundEnabled=previous;input.checked=previous;showSnackbar('切换失败:'+err.message)}
 }
 
+async function toggleChannelPrivateChat(i,input,e){
+if(e)e.stopPropagation();
+var ch=config.channels[i],previous=ch.privateChatEnabled!==false,enabled=input.checked;
+ch.privateChatEnabled=enabled;
+var runtimeId=ch._runtimeId||'';
+if(!runtimeId){markDirty();showSnackbar('单聊设置已修改，保存并刷新信道后生效');return}
+try{var r=await api('/api/channels/private-chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channelId:runtimeId,privateChatEnabled:enabled})});var d=await r.json();
+if(!r.ok||!d.ok)throw new Error(d.error||'切换失败');
+showSnackbar(enabled?'已允许单聊消息进入 ACP':'已关闭单聊消息输入，群聊不受影响');
+}catch(err){ch.privateChatEnabled=previous;input.checked=previous;showSnackbar('切换失败:'+err.message)}
+}
+
 async function refreshChannelStatuses(){
 await loadChannelStatus();
 (config.channels||[]).forEach(function(ch,i){
@@ -399,8 +412,9 @@ function toggleRobot(i){config.robots[i].enabled=!config.robots[i].enabled;markD
 
 function openRobotDialog(idx){
 editIdx=idx;
-var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,onlyTeamMember:false,scheduleEnabled:false,memory:{readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
+var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,onlyTeamMember:false,scheduleEnabled:false,autoNewSession:{enabled:false,checkIntervalMinutes:360,idleMinutes:180},memory:{readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
 if(!r.memory)r.memory={readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};if(r.memory.enabled!==undefined&&r.memory.readEnabled===undefined){r.memory.readEnabled=r.memory.enabled;r.memory.writeEnabled=r.memory.enabled;delete r.memory.enabled;}
+if(!r.autoNewSession)r.autoNewSession={enabled:false,checkIntervalMinutes:360,idleMinutes:180};
 dlgSubAgents=r.subAgents?r.subAgents.slice():[];
 dlgContacts=r.contacts?r.contacts.slice():[];
 document.getElementById('dlgTitle').textContent=idx>=0?'编辑 Robot':'添加 Robot';
@@ -422,6 +436,8 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="toggle-row"><div><div class="toggle-label">仅作为子 Agent</div></div><label class="switch"><input type="checkbox" id="dOnlySub"'+(r.onlySubAgent?' checked':'')+' onchange="toggleExclusiveRobotRole(\'sub\')"><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">仅作为 Team Member 使用</div><div style="color:#757575;font-size:12px">不启动主 ACP 实例，但可在 Fast Team 中选择</div></div><label class="switch"><input type="checkbox" id="dOnlyTeam"'+(r.onlyTeamMember?' checked':'')+' onchange="toggleExclusiveRobotRole(\'team\')"><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">定时任务</div></div><label class="switch"><input type="checkbox" id="dSchedule"'+(r.scheduleEnabled?' checked':'')+'><span class="slider"></span></label></div>'+
+'<div class="toggle-row"><div><div class="toggle-label">自动开启新会话</div><div style="color:#757575;font-size:12px">同时应用于该 Robot 的普通 ACP 和 Fast Team 成员实例</div></div><label class="switch"><input type="checkbox" id="dAutoNewSession"'+(r.autoNewSession.enabled?' checked':'')+' onchange="toggleAutoNewSessionPanel()"><span class="slider"></span></label></div>'+
+'<div class="grid-2" id="dAutoNewSessionPanel" style="'+(r.autoNewSession.enabled?'':'display:none')+'"><div class="field-group"><label>检查间隔（分钟）</label><input type="number" id="dAutoNewSessionCheck" min="1" value="'+(r.autoNewSession.checkIntervalMinutes||360)+'"></div><div class="field-group"><label>空闲阈值（分钟）</label><input type="number" id="dAutoNewSessionIdle" min="1" value="'+(r.autoNewSession.idleMinutes||180)+'"></div></div>'+
 '<div class="section-title">记忆配置</div>'+
 '<div class="toggle-row"><div><div class="toggle-label">记忆读取</div></div><label class="switch"><input type="checkbox" id="dMemRead"'+(m.readEnabled!==false?' checked':'')+' onchange="toggleMemPanel()"><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">记忆写入</div></div><label class="switch"><input type="checkbox" id="dMemWrite"'+(m.writeEnabled!==false?' checked':'')+' onchange="toggleMemPanel()"><span class="slider"></span></label></div>'+
@@ -445,6 +461,7 @@ document.getElementById('robotDialog').classList.add('show');
 }
 
 function toggleMemPanel(){var show=document.getElementById('dMemRead').checked||document.getElementById('dMemWrite').checked;document.getElementById('memPanel').style.display=show?'':'none'}
+function toggleAutoNewSessionPanel(){document.getElementById('dAutoNewSessionPanel').style.display=document.getElementById('dAutoNewSession').checked?'':'none'}
 function toggleProxyPanel(){document.getElementById('proxyPanel').style.display=document.getElementById('dProxyEnabled').checked?'':'none'}
 function toggleExclusiveRobotRole(role){if(role==='sub'&&document.getElementById('dOnlySub').checked)document.getElementById('dOnlyTeam').checked=false;if(role==='team'&&document.getElementById('dOnlyTeam').checked)document.getElementById('dOnlySub').checked=false}
 function onProviderChange(){var p=document.getElementById('dProvider').value;if(p==='CLAUDE_AGENT_ACP'){document.getElementById('dMemRead').checked=false;document.getElementById('dMemWrite').checked=false;toggleMemPanel()}var codex=p==='CODEX_ACP';document.getElementById('apiKeyGroup').style.display=codex?'':'none';document.getElementById('codexHomeGroup').style.display=codex?'':'none'}
@@ -489,7 +506,8 @@ enabled:orig.enabled!==false,
 abilityAutoRefresh:document.getElementById('dAbility').checked,
 onlySubAgent:document.getElementById('dOnlySub').checked,
 onlyTeamMember:document.getElementById('dOnlyTeam').checked,
-scheduleEnabled:document.getElementById('dSchedule').checked
+scheduleEnabled:document.getElementById('dSchedule').checked,
+autoNewSession:{enabled:document.getElementById('dAutoNewSession').checked,checkIntervalMinutes:Math.max(1,parseInt(document.getElementById('dAutoNewSessionCheck').value)||360),idleMinutes:Math.max(1,parseInt(document.getElementById('dAutoNewSessionIdle').value)||180)}
 });
 var memReadEnabled=document.getElementById('dMemRead').checked;
 var memWriteEnabled=document.getElementById('dMemWrite').checked;
@@ -582,6 +600,7 @@ await reloadService((enabled?'已开启 ':'已关闭 ')+affected+' 个 Agent 的
 
 async function saveConfig(silent){
 config.configUi={enabled:document.getElementById('cfgEnabled').checked,port:parseInt(document.getElementById('cfgPort').value)||currentPort()};
+delete config.autoNewSession;
 delete config.globalProxyEnabled;
 try{var r=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
 var d=await r.json();if(d.ok){clearDirty();if(!silent)showSnackbar('配置已保存')}else{showSnackbar('保存失败'+(d.error?':'+d.error:''));return false}}

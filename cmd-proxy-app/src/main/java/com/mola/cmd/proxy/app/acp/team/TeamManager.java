@@ -66,6 +66,8 @@ public final class TeamManager implements AutoCloseable {
     private final ExecutorService cleanupExecutor;
     private final ConcurrentHashMap<String, Future<List<IOException>>> pendingCleanup =
             new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> autoNewSessionLastChecks =
+            new ConcurrentHashMap<>();
     private final TeamResourceReaper resourceReaper;
     private final TeamLimits limits;
     private final TeamMetrics metrics = new TeamMetrics();
@@ -906,6 +908,69 @@ public final class TeamManager implements AutoCloseable {
         return replaceSession(requestId, command, TeamMemberStartOptions.newSession());
     }
 
+    /** Rotates idle Team member sessions under the same operation lock as manual/scheduled work. */
+    public int rotateIdleSessions(long nowMillis) {
+        if (closed.get() || startupCoordinator == null) return 0;
+        int rotated = 0;
+        for (TeamDefinition snapshot : snapshotDefinitions()) {
+            TeamRuntime runtime = teams.get(snapshot.getTeamId());
+            if (runtime == null) continue;
+            runtime.getOperationLock().lock();
+            try {
+                TeamDefinition team = runtime.getDefinition();
+                if (!runtime.isAcceptingRequests() || team.getState() != TeamState.READY) continue;
+                for (TeamMemberDefinition member : team.getMembers()) {
+                    if (member.getState() != TeamMemberState.READY) continue;
+                    AcpClient old = clientRegistry.get(
+                            team.getTeamId(), member.getTeamMemberId()).orElse(null);
+                    String checkKey = team.getTeamId() + ":" + member.getTeamMemberId();
+                    com.mola.cmd.proxy.app.acp.AutoNewSessionConfig config = old == null
+                            || old.getRobotParam() == null
+                            ? null : old.getRobotParam().getAutoNewSession();
+                    if (config == null || !config.isEnabled()) {
+                        autoNewSessionLastChecks.remove(checkKey);
+                        continue;
+                    }
+                    Long lastCheck = autoNewSessionLastChecks.putIfAbsent(checkKey, nowMillis);
+                    long checkIntervalMillis = TimeUnit.MINUTES.toMillis(
+                            config.getCheckIntervalMinutes());
+                    if (lastCheck == null || nowMillis - lastCheck < checkIntervalMillis
+                            || !autoNewSessionLastChecks.replace(
+                            checkKey, lastCheck, nowMillis)) continue;
+                    long idleMillis = TimeUnit.MINUTES.toMillis(config.getIdleMinutes());
+                    if (!old.tryReserveIdleForAutoNewSession(nowMillis, idleMillis)) continue;
+
+                    publishMemberState(runtime, member.getTeamMemberId(),
+                            TeamMemberState.STARTING, null);
+                    if (!clientRegistry.remove(team.getTeamId(), member.getTeamMemberId())
+                            .filter(client -> client == old).isPresent()) {
+                        continue;
+                    }
+                    try { old.close(); } catch (IOException ignored) { }
+                    TeamMemberDefinition starting = findMember(
+                            runtime.getDefinition(), member.getTeamMemberId());
+                    AcpClient replacement = startupCoordinator.replaceMember(
+                            runtime, starting, TeamMemberStartOptions.newSession());
+                    if (!clientRegistry.register(team.getTeamId(),
+                            member.getTeamMemberId(), replacement)) {
+                        replacement.close();
+                        throw new IOException("duplicate Team automatic replacement client");
+                    }
+                    publishMemberState(runtime, member.getTeamMemberId(),
+                            TeamMemberState.READY, null);
+                    rotated++;
+                    logger.info("Team 空闲会话已自动轮转, teamId={}, memberId={}, sessionId={}",
+                            team.getTeamId(), member.getTeamMemberId(), replacement.getSessionId());
+                }
+            } catch (Exception e) {
+                logger.warn("Team 空闲会话自动轮转失败, teamId={}", snapshot.getTeamId(), e);
+            } finally {
+                runtime.getOperationLock().unlock();
+            }
+        }
+        return rotated;
+    }
+
     public TeamCommandResult restoreSession(String requestId, TeamMemberCommand command) {
         try {
             return replaceSession(requestId, command,
@@ -1097,6 +1162,7 @@ public final class TeamManager implements AutoCloseable {
             Thread.currentThread().interrupt();
         }
         pendingCleanup.clear();
+        autoNewSessionLastChecks.clear();
         teams.clear();
     }
 

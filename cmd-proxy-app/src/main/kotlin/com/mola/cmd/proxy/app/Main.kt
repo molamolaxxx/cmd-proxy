@@ -286,6 +286,9 @@ private fun startConfigUiServer(config: JSONObject) {
             { channelId, inboundAllowed ->
                 AcpProxy.setChannelInboundEnabled(channelId, inboundAllowed)
             },
+            { channelId, privateChatAllowed ->
+                AcpProxy.setChannelPrivateChatEnabled(channelId, privateChatAllowed)
+            },
             { AcpProxy.channelTeamBindingTargets() },
             { previousChannelId, channelId ->
                 reloadChannel(previousChannelId, channelId)

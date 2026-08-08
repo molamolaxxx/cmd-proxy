@@ -37,12 +37,27 @@ public final class ChannelConfigFileStore {
 
     static void setInboundEnabled(Path configPath, String channelId, boolean enabled)
             throws IOException {
+        setChannelBoolean(configPath, channelId, "inboundEnabled", enabled);
+    }
+
+    /** Persists the direct-message gate without restarting the channel connection. */
+    public static void setPrivateChatEnabled(String channelId, boolean enabled) throws IOException {
+        setPrivateChatEnabled(CmdProxyHome.resolve("acpConfig.json"), channelId, enabled);
+    }
+
+    static void setPrivateChatEnabled(Path configPath, String channelId, boolean enabled)
+            throws IOException {
+        setChannelBoolean(configPath, channelId, "privateChatEnabled", enabled);
+    }
+
+    private static void setChannelBoolean(Path configPath, String channelId,
+                                          String field, boolean enabled) throws IOException {
         String cleanChannelId = requireText(channelId, "channelId");
         synchronized (LOCK) {
             JSONObject root = JSON.parseObject(new String(
                     Files.readAllBytes(configPath), StandardCharsets.UTF_8));
             JSONObject matched = findChannel(root, cleanChannelId);
-            matched.put("inboundEnabled", enabled);
+            matched.put(field, enabled);
             writeAtomically(configPath, JSON.toJSONString(root,
                     SerializerFeature.PrettyFormat, SerializerFeature.SortField));
         }

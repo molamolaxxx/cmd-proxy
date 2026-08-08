@@ -33,6 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -103,6 +104,9 @@ public class AcpClient extends AbstractAcpClient {
 
     /** session 加载完成时的 turn 数，用于 close 时判断是否有新对话 */
     private int initialTurnCount;
+
+    /** 当前 session 最后一条用户或 assistant 消息时间；无消息时为 0。 */
+    private final AtomicLong lastMessageAt = new AtomicLong(0L);
 
     /** Codex/Claude/Kiro 压缩完成后置为 true，下一次 prompt 完整重注入 ACP harness。 */
     private final AtomicBoolean acpHarnessReinjectionPending = new AtomicBoolean(false);
@@ -315,6 +319,7 @@ public class AcpClient extends AbstractAcpClient {
                 setSessionId(targetSessionId);
                 historyManager.restoreState(targetSessionId);
                 initialTurnCount = historyManager.getTurnCount();
+                lastMessageAt.set(historyManager.getLastMessageAt(targetSessionId));
                 logger.info("session/load 成功，已恢复会话: {}, 回放消息数={}", targetSessionId, replayedMessages);
                 return;
             }
@@ -371,6 +376,7 @@ public class AcpClient extends AbstractAcpClient {
                     "当前 client 状态不允许发送消息: " + state.get()));
             return;
         }
+        lastMessageAt.set(System.currentTimeMillis());
 
         // 记录本轮新上传的图片路径（用于 inline image block）
         Set<String> previousFiles = new HashSet<>(historyManager.getFileAbsolutePaths());
@@ -687,6 +693,7 @@ public class AcpClient extends AbstractAcpClient {
 
                 historyManager.addAssistantMessage(fullResponse.toString());
                 historyManager.flushTurn(sessionId);
+                lastMessageAt.set(System.currentTimeMillis());
 
                 // flush 缓冲区（如果有未推送的非 dispatch 内容）
                 bufferFilter.flush();
@@ -723,6 +730,36 @@ public class AcpClient extends AbstractAcpClient {
                 }
             }
         }
+    }
+
+    public long getLastMessageAt() {
+        return lastMessageAt.get();
+    }
+
+    public boolean hasSessionMessages() {
+        return lastMessageAt.get() > 0L;
+    }
+
+    /** Rechecks readiness and idle age immediately before an automatic rotation. */
+    public boolean isIdleForAutoNewSession(long nowMillis, long idleMillis) {
+        long last = lastMessageAt.get();
+        return state.get() == State.READY && last > 0L
+                && nowMillis >= last && nowMillis - last >= idleMillis;
+    }
+
+    /** Atomically blocks a concurrent send before an automatic session replacement. */
+    public boolean tryReserveIdleForAutoNewSession(long nowMillis, long idleMillis) {
+        long observedLast = lastMessageAt.get();
+        if (observedLast <= 0L || nowMillis < observedLast
+                || nowMillis - observedLast < idleMillis) return false;
+        long generation = currentLifecycleGeneration();
+        if (!compareAndSetStateIfActive(generation, State.READY, State.STARTING)) return false;
+        long confirmedLast = lastMessageAt.get();
+        if (confirmedLast != observedLast) {
+            compareAndSetStateIfActive(generation, State.STARTING, State.READY);
+            return false;
+        }
+        return true;
     }
 
     /**

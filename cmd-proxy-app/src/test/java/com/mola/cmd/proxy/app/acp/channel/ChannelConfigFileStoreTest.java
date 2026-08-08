@@ -77,4 +77,25 @@ public class ChannelConfigFileStoreTest {
             Files.deleteIfExists(file);
         }
     }
+
+    @Test
+    public void privateChatSwitchIsPersistedWithoutChangingOtherChannelFields() throws Exception {
+        Path file = Files.createTempFile("channel-config", ".json");
+        try {
+            Files.write(file, ("{\"other\":\"kept\",\"channels\":[{"
+                    + "\"id\":\"wecom-1\",\"secret\":\"sensitive\"}]}"
+            ).getBytes(StandardCharsets.UTF_8));
+
+            ChannelConfigFileStore.setPrivateChatEnabled(file, "wecom-1", false);
+
+            JSONObject saved = JSON.parseObject(new String(
+                    Files.readAllBytes(file), StandardCharsets.UTF_8));
+            JSONObject channel = saved.getJSONArray("channels").getJSONObject(0);
+            assertFalse(channel.getBooleanValue("privateChatEnabled"));
+            assertEquals("sensitive", channel.getString("secret"));
+            assertEquals("kept", saved.getString("other"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
 }

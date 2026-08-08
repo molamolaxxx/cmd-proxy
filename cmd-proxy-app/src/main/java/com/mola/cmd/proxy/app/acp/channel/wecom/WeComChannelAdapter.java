@@ -202,9 +202,10 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
         JsonObject body = frame.getBody();
         String msgId = WeComProtocol.string(body, "msgid");
         String msgType = WeComProtocol.string(body, "msgtype");
-        if (!bridge.isInboundEnabled(config.getId())) {
-            logger.info("channel inbound ignored while disabled: channelId={}, msgid={}",
-                    config.getId(), msgId);
+        String chatType = WeComProtocol.string(body, "chattype");
+        if (!bridge.isInboundAllowed(config.getId(), chatType)) {
+            logger.info("channel inbound ignored by policy: channelId={}, msgid={}, chatType={}, errorCode=CHANNEL_INBOUND_DISABLED",
+                    config.getId(), msgId, chatType);
             return;
         }
         JsonObject from = object(body, "from");
@@ -213,7 +214,6 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                 WeComProtocol.string(from, "name"),
                 WeComProtocol.string(from, "alias"), userId);
         String chatId = WeComProtocol.string(body, "chatid");
-        String chatType = WeComProtocol.string(body, "chattype");
         if (blank(msgId) || blank(userId) || blank(frame.getRequestId())) {
             logger.warn("channel message missing fields: channelId={}, msgid={}, errorCode=CHANNEL_FRAME_INVALID",
                     config.getId(), msgId);

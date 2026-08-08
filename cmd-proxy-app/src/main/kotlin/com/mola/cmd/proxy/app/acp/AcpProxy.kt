@@ -48,6 +48,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -110,6 +111,9 @@ object AcpProxy {
     private val configuredRobotNames = ConcurrentHashMap.newKeySet<String>()
 
     private val shutdownHookRegistered = AtomicBoolean(false)
+
+    private var autoNewSessionExecutor: ScheduledExecutorService? = null
+    private val autoNewSessionLastChecks = ConcurrentHashMap<String, Long>()
 
     @Synchronized
     fun start(
@@ -242,6 +246,7 @@ object AcpProxy {
 
         // 启动定时任务调度器
         startScheduler(groupRobotMap)
+        startAutoNewSession()
 
         // 会话注册完成后，调用 acpSyncRobots 通知服务端同步 robot 信息
         if (!robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank()) {
@@ -593,16 +598,14 @@ object AcpProxy {
                     return@register resultMap
                 }
 
-                registry.createSession(groupId, null, null)
-
-                val newClient = registry.getClient(groupId)
-                if (newClient != null) {
-                    featureInitializer.initialize(
-                        AcpClientFeatureInitializer.Context.main(groupId),
-                        newClient, newClient.robotParam)
+                val newClient = replaceMainSession(groupId, client, null)
+                resultMap["result"] = if (newClient == null) {
+                    "会话状态已变化，未重复开启新会话"
+                } else {
+                    notifyMainSessionChanged(
+                        groupId, client.sessionId, newClient.sessionId, "MANUAL")
+                    "已开启新会话"
                 }
-
-                resultMap["result"] = "已开启新会话"
             } catch (e: Exception) {
                 log.error("acpNewSession 失败", e)
                 resultMap["result"] = "开启新会话失败: ${e.message}"
@@ -1270,33 +1273,42 @@ object AcpProxy {
                     val boundSessionId = scheduleTaskManager
                         .findGroupSession(owner, groupName)
                     if (boundSessionId == null) {
-                        registry.createSession(targetGroupId, null, null)
-                        val newClient = registry.getClient(targetGroupId)
-                        if (newClient != null) {
+                        val replacement = registry.replaceSessionIfCurrent(
+                            targetGroupId, client, null
+                        ) { replacement ->
                             featureInitializer.initialize(
                                 AcpClientFeatureInitializer.Context.main(targetGroupId),
-                                newClient, newClient.robotParam)
+                                replacement, replacement.robotParam)
                             if (!groupName.isNullOrBlank()) {
                                 scheduleTaskManager.bindGroupSession(
-                                    owner, groupName, newClient.sessionId)
+                                    owner, groupName, replacement.sessionId)
                             }
-                            newClient.send(
+                            replacement.send(
                                 prompt, null, PromptOptions.forScheduleExecution())
                         }
+                            ?: return@setScopedExecutionCallback false
+                        notifyMainSessionChanged(
+                            targetGroupId, client.sessionId,
+                            replacement.sessionId, "SCHEDULE")
                     } else if (boundSessionId == client.sessionId) {
-                        client.send(
+                        registry.sendMessage(targetGroupId,
                             prompt, null, PromptOptions.forScheduleExecution())
                     } else {
                         try {
-                            registry.restoreSession(targetGroupId, boundSessionId)
-                            val restored = registry.getClient(targetGroupId)
+                            val replacement = registry.replaceSessionIfCurrent(
+                                targetGroupId, client, boundSessionId
+                            ) { replacement ->
+                                featureInitializer.initialize(
+                                    AcpClientFeatureInitializer.Context.main(targetGroupId),
+                                    replacement, replacement.robotParam)
+                                replacement.send(
+                                    prompt, null, PromptOptions.forScheduleExecution())
+                            }
                                 ?: throw IllegalStateException(
                                     "恢复分组会话后 client 不存在")
-                            featureInitializer.initialize(
-                                AcpClientFeatureInitializer.Context.main(targetGroupId),
-                                restored, restored.robotParam)
-                            restored.send(
-                                prompt, null, PromptOptions.forScheduleExecution())
+                            notifyMainSessionChanged(
+                                targetGroupId, client.sessionId,
+                                replacement.sessionId, "SCHEDULE_RESTORE")
                         } catch (e: Exception) {
                             log.error(
                                 "定时会话分组恢复失败，等待下一轮重试, owner={}, groupName={}, sessionId={}",
@@ -1313,12 +1325,111 @@ object AcpProxy {
         log.info("定时任务调度器已启动")
     }
 
+    private fun replaceMainSession(
+        groupId: String,
+        expected: AcpClient,
+        targetRestoreSessionId: String?
+    ): AcpClient? = registry.replaceSessionIfCurrent(
+        groupId, expected, targetRestoreSessionId
+    ) { replacement ->
+        featureInitializer.initialize(
+            AcpClientFeatureInitializer.Context.main(groupId),
+            replacement, replacement.robotParam)
+    }
+
+    private fun startAutoNewSession() {
+        autoNewSessionExecutor?.shutdownNow()
+        autoNewSessionExecutor = null
+        autoNewSessionLastChecks.clear()
+        autoNewSessionExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "acp-auto-new-session").apply { isDaemon = true }
+        }.also { executor ->
+            executor.scheduleWithFixedDelay({
+                val now = System.currentTimeMillis()
+                var mainRotated = 0
+                registry.snapshotClients().forEach { (groupId, observed) ->
+                    try {
+                        val config = observed.robotParam?.autoNewSession
+                        if (config == null || !config.isEnabled) {
+                            autoNewSessionLastChecks.remove(groupId)
+                            return@forEach
+                        }
+                        val lastCheck = autoNewSessionLastChecks.putIfAbsent(groupId, now)
+                        if (lastCheck == null || now - lastCheck < TimeUnit.MINUTES.toMillis(
+                                config.checkIntervalMinutes.toLong())) {
+                            return@forEach
+                        }
+                        if (!autoNewSessionLastChecks.replace(groupId, lastCheck, now)) {
+                            return@forEach
+                        }
+                        val idleMillis = TimeUnit.MINUTES.toMillis(config.idleMinutes.toLong())
+                        val replacement = registry.replaceIdleSessionIfCurrent(
+                            groupId, observed, now, idleMillis
+                        ) { newClient ->
+                            featureInitializer.initialize(
+                                AcpClientFeatureInitializer.Context.main(groupId),
+                                newClient, newClient.robotParam)
+                        }
+                        if (replacement != null) {
+                            mainRotated++
+                            notifyMainSessionChanged(
+                                groupId, observed.sessionId,
+                                replacement.sessionId, "AUTO_IDLE")
+                        }
+                    } catch (e: Exception) {
+                        log.warn("MAIN 空闲会话自动轮转失败, groupId={}", groupId, e)
+                    }
+                }
+                val teamRotated = teamManager?.rotateIdleSessions(now) ?: 0
+                log.info("自动新建 session 检查完成, mainRotated={}, teamRotated={}",
+                    mainRotated, teamRotated)
+            }, 1L, 1L, TimeUnit.MINUTES)
+        }
+        log.info("实例级自动新建 session 检查器已启动")
+    }
+
+    private fun notifyMainSessionChanged(
+        groupId: String,
+        oldSessionId: String?,
+        newSessionId: String?,
+        reason: String
+    ) {
+        if (newSessionId.isNullOrBlank()) return
+        val result = linkedMapOf<String, String?>(
+            "schemaVersion" to "1",
+            "instanceId" to CmdProxyHome.instanceId(),
+            "groupId" to groupId,
+            "oldSessionId" to oldSessionId,
+            "newSessionId" to newSessionId,
+            "reason" to reason,
+            "timestamp" to System.currentTimeMillis().toString()
+        )
+        try {
+            CmdReceiver.callback(
+                "acpSessionChanged", "acp",
+                CmdResponseContent(UUID.randomUUID().toString(), result)
+            )
+            log.info(
+                "已通知 MolaChat 会话切换, groupId={}, oldSessionId={}, newSessionId={}, reason={}",
+                groupId, oldSessionId, newSessionId, reason)
+        } catch (e: Exception) {
+            // 通知属于状态投影，不回滚已经成功完成的 session 切换。
+            log.warn(
+                "通知 MolaChat 会话切换失败, groupId={}, newSessionId={}, reason={}",
+                groupId, newSessionId, reason, e)
+        }
+    }
+
     /**
      * 停止所有 ACP 服务，用于热重载前清理。
      */
     @Synchronized
     fun stop() {
         log.info("正在停止 ACP 服务...")
+
+        autoNewSessionExecutor?.shutdownNow()
+        autoNewSessionExecutor = null
+        autoNewSessionLastChecks.clear()
 
         // 先关闭外部入口、心跳和重连，避免 ACP client 关闭后仍收到新事件。
         try {
@@ -1421,6 +1532,11 @@ object AcpProxy {
     @JvmStatic
     fun setChannelInboundEnabled(channelId: String, enabled: Boolean): Boolean =
         channelManager?.setInboundEnabled(channelId, enabled)
+            ?: throw IllegalStateException("channel service is not running")
+
+    @JvmStatic
+    fun setChannelPrivateChatEnabled(channelId: String, enabled: Boolean): Boolean =
+        channelManager?.setPrivateChatEnabled(channelId, enabled)
             ?: throw IllegalStateException("channel service is not running")
 
     @JvmStatic

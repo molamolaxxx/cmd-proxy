@@ -65,6 +65,15 @@ public final class ChannelTalkToBridge {
             if (!config.isInboundEnabled()) {
                 return TalkToDispatcher.InboundDeliveryResult.rejected("channel inbound disabled");
             }
+            String chatType = event.getReplyRoute().getChatType();
+            if (!isKnownChatType(chatType)) {
+                return TalkToDispatcher.InboundDeliveryResult.rejected(
+                        "unsupported channel chat type");
+            }
+            if (isPrivateChat(chatType) && !config.isPrivateChatEnabled()) {
+                return TalkToDispatcher.InboundDeliveryResult.rejected(
+                        "channel private chat disabled");
+            }
             ChannelBoundTarget target = bindingResolver.resolve(config.getBinding());
             AcpClient client = target == null ? null : target.getClient();
             if (!isMainClient(client)) {
@@ -141,6 +150,34 @@ public final class ChannelTalkToBridge {
         }
     }
 
+    public boolean setPrivateChatEnabled(String channelId, boolean enabled) {
+        inboundGate.writeLock().lock();
+        try {
+            ChannelConfig config = configs.get(channelId);
+            if (config == null) {
+                throw new IllegalArgumentException("channel not found: " + channelId);
+            }
+            boolean previous = config.isPrivateChatEnabled();
+            config.setPrivateChatEnabled(enabled);
+            return previous;
+        } finally {
+            inboundGate.writeLock().unlock();
+        }
+    }
+
+    /** Adapter-side preflight; {@link #onEvent(ChannelEvent)} remains authoritative. */
+    public boolean isInboundAllowed(String channelId, String chatType) {
+        inboundGate.readLock().lock();
+        try {
+            ChannelConfig config = configs.get(channelId);
+            return config != null && config.getBinding() != null
+                    && config.isInboundEnabled() && isKnownChatType(chatType)
+                    && (!isPrivateChat(chatType) || config.isPrivateChatEnabled());
+        } finally {
+            inboundGate.readLock().unlock();
+        }
+    }
+
     private void replyFailureAsync(String replyTarget, String content) {
         java.util.concurrent.CompletableFuture.runAsync(() -> gateway.deliverSystem(
                 new TalkToRequest(replyTarget, content, 0)));
@@ -151,6 +188,14 @@ public final class ChannelTalkToBridge {
                 && (client.getClientIdentity().getScope() == AcpClientIdentity.Scope.MAIN
                     || client.getClientIdentity().getScope() == AcpClientIdentity.Scope.TEAM)
                 && (client.getRobotParam() == null || !client.getRobotParam().isOnlySubAgent());
+    }
+
+    private static boolean isKnownChatType(String chatType) {
+        return "single".equals(chatType) || "group".equals(chatType);
+    }
+
+    private static boolean isPrivateChat(String chatType) {
+        return "single".equals(chatType);
     }
 
     private static String ownerKey(com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding binding) {
