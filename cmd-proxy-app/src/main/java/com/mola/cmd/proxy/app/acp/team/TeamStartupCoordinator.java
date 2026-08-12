@@ -197,7 +197,9 @@ public final class TeamStartupCoordinator implements AutoCloseable {
                                            TeamMemberStartOptions options,
                                            AtomicReference<AcpClient> created) {
         try {
-            TeamSourceRobotSnapshot snapshot = sourceResolver.restore(member);
+            TeamSourceRobotSnapshot snapshot = sourceResolver.restore(member,
+                    runtime.getDefinition().getOwnerChatterId(),
+                    runtime.getDefinition().isMixedPlacement());
             AcpClient client = starter.start(
                     runtime, member, snapshot, options, created::set);
             if (client == null) {
@@ -223,7 +225,9 @@ public final class TeamStartupCoordinator implements AutoCloseable {
         @Override
         public StartedMember call() {
             try {
-                TeamSourceRobotSnapshot snapshot = sourceResolver.restore(member);
+                TeamSourceRobotSnapshot snapshot = sourceResolver.restore(member,
+                        runtime.getDefinition().getOwnerChatterId(),
+                        runtime.getDefinition().isMixedPlacement());
                 AcpClient client = starter.start(runtime, member, snapshot,
                         TeamMemberStartOptions.initial(), created::set);
                 if (client == null) {

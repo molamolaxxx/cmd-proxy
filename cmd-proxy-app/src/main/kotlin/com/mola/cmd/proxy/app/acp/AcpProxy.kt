@@ -32,9 +32,13 @@ import com.mola.cmd.proxy.app.acp.team.TeamManager
 import com.mola.cmd.proxy.app.acp.team.TeamStore
 import com.mola.cmd.proxy.app.acp.team.MapTeamSourceRobotResolver
 import com.mola.cmd.proxy.app.acp.team.TeamStartupCoordinator
+import com.mola.cmd.proxy.app.acp.team.TeamSharedSourceIds
+import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry
 import com.mola.cmd.proxy.app.acp.team.event.RpcTeamEventSink
 import com.mola.cmd.proxy.app.acp.team.listener.TeamAcpResponseListener
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor
+import com.mola.cmd.proxy.app.acp.team.protocol.RemoteTeamMemberSourceDescriptor
+import com.mola.cmd.proxy.app.acp.talkto.ContactRemarkResolver
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportDescriptor
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportProtocol
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToContextInjector
@@ -149,6 +153,7 @@ object AcpProxy {
             }
         }
         globalGroupRobotRegistry.putAll(teamSourceGroupRobotMap)
+        registerSharedTeamSources(teamSourceGroupRobotMap.values)
 
         // 构建 robotName → groupId 反向索引（取第一个）
         for ((groupId, robot) in groupRobotMap) {
@@ -286,7 +291,8 @@ object AcpProxy {
     /** 注册实例级稳定 transport，并仅在权威状态恢复成功后开放业务命令。 */
     private fun initializeTeamTransport() {
         teamTransportDescriptor = TeamTransportDescriptor.forInstance(
-            CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
+            CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+            remoteTeamMemberSourceDescriptors())
         val sourceResolver = MapTeamSourceRobotResolver(globalGroupRobotRegistry)
         val eventSink = RpcTeamEventSink()
         val teamRegistry = TeamClientRegistry()
@@ -335,7 +341,7 @@ object AcpProxy {
             },
             teamRegistry,
             minOf(4, maxOf(1, Runtime.getRuntime().availableProcessors())),
-            120_000L
+            360_000L
         )
         val manager = TeamManager(
             TeamStore(),
@@ -361,12 +367,14 @@ object AcpProxy {
             true
         }
         managerHolder.set(manager)
+        TeamSharingStatusRegistry.setSupplier { teamSharingStatuses() }
         // 恢复流程会异步启动成员，initializer 必须在恢复前就能解析到权威 manager。
         teamManager = manager
         var recovered = false
         try {
             val recoveredCount = manager.recoverPersistedDefinitions(
                 teamTransportDescriptor.transportGroup)
+            manager.reconcileRevokedGrants()
             manager.startResourceReaper()
             recovered = true
             log.info("Team 持久定义恢复完成, count={}", recoveredCount)
@@ -377,7 +385,8 @@ object AcpProxy {
         if (recovered) {
             teamTransportDescriptor =
                 TeamTransportDescriptor.readyForBusiness(
-                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
+                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+                    remoteTeamMemberSourceDescriptors())
             teamCommandHandler =
                 TeamCommandHandler(manager, teamTransportDescriptor.transportGroup)
         }
@@ -486,6 +495,14 @@ object AcpProxy {
                 "Trigger memory dream for one Team member using its source robot memory owner"
             ) { param ->
                 teamCommandHandler?.handleMemoryDream(param.cmdId, param.cmdArgs)
+                    ?: teamUnavailableResult(param.cmdId)
+            }
+            CmdReceiver.register(
+                TeamTransportProtocol.TALK_TO_DELIVER_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Deliver one routed mixed-Team talkTo message to a local member"
+            ) { param ->
+                teamCommandHandler?.handleTalkToDeliver(param.cmdId, param.cmdArgs)
                     ?: teamUnavailableResult(param.cmdId)
             }
         }
@@ -1448,7 +1465,8 @@ object AcpProxy {
         if (::teamTransportDescriptor.isInitialized) {
             teamTransportDescriptor =
                 TeamTransportDescriptor.forInstance(
-                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
+                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+                    remoteTeamMemberSourceDescriptors())
             if (::acpSyncRobotsSnapshot.isInitialized) {
                 acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
             }
@@ -1475,6 +1493,7 @@ object AcpProxy {
         teamManager?.closeForShutdown()
         teamManager = null
         teamCommandHandler = null
+        TeamSharingStatusRegistry.clear()
 
         // 清理内部状态
         memoryManagers.shutdownAllNow()
@@ -1526,6 +1545,47 @@ object AcpProxy {
                             )
                         }
                 )
+            }
+    }
+
+    @JvmStatic
+    fun teamSharingStatuses(): List<Map<String, Any>> {
+        val definitions = teamManager?.snapshotDefinitions() ?: emptyList()
+        return globalGroupRobotRegistry.values
+            .filter { it.isEnabled && !it.isOnlySubAgent }
+            .distinctBy { it.name }.sortedBy { it.name }
+            .flatMap { robot ->
+                val sourceRobotId = "acp-" + robot.name.replace(" ", "_")
+                    .replace("\u3000", "_")
+                val sharedGroup = TeamSharedSourceIds.groupId(
+                    CmdProxyHome.instanceId(), sourceRobotId)
+                val grantedOwners = robot.teamSharedWithChatterIds.map { it.trim() }
+                    .filter { it.isNotEmpty() }.toSet()
+                val fragmentOwners = definitions.filter { team ->
+                    team.isMixedPlacement
+                            && team.members.any { it.sourceGroupId == sharedGroup }
+                }.map { it.ownerChatterId }.toSet()
+                (grantedOwners + fragmentOwners).sorted().map { owner ->
+                        val teams = definitions.filter { team ->
+                            team.isMixedPlacement && team.ownerChatterId == owner
+                                    && team.members.any { it.sourceGroupId == sharedGroup }
+                        }
+                        linkedMapOf<String, Any>(
+                            "granteeOwnerChatterId" to owner,
+                            "robotName" to robot.name,
+                            "teamCount" to teams.size,
+                            "memberCount" to teams.sumOf { team ->
+                                team.members.count { it.sourceGroupId == sharedGroup }
+                            },
+                            "state" to if (!grantedOwners.contains(owner)) "REVOKED_CLEANUP"
+                                else if (teams.isEmpty()) "GRANTED" else "RUNNING",
+                            "cleanupPending" to (teams.any {
+                                it.state == com.mola.cmd.proxy.app.acp.team.model.TeamState.DELETING
+                            } || teams.any {
+                                teamManager?.isRevokedGrantCleanupPending(it.teamId) == true
+                            })
+                        )
+                    }
             }
     }
 
@@ -1610,9 +1670,11 @@ object AcpProxy {
         }
         if (robot.isEnabled && !robot.isOnlySubAgent) {
             sourceGroupIds.forEach { groupId -> globalGroupRobotRegistry[groupId] = robot }
+            registerSharedTeamSources(listOf(robot))
         } else {
             teamManager?.disableSourceRobot(acpId)
         }
+        teamManager?.reconcileRevokedGrants()
 
         // 3. 只有普通 MAIN robot 才重建 client；Team-only 仅保留来源配置。
         if (robot.isEnabled && !robot.isOnlySubAgent && !robot.isOnlyTeamMember) {
@@ -1658,7 +1720,8 @@ object AcpProxy {
             val chatterIdsJson = JSON.toJSONString(chatterIds)
             acpSyncRobotsSnapshot.updateOrdinary(robotsJson, chatterIdsJson)
             teamTransportDescriptor = TeamTransportDescriptor.readyForBusiness(
-                CmdProxyHome.instanceId(), teamMemberSourceDescriptors())
+                CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+                remoteTeamMemberSourceDescriptors())
             acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
             publishAcpSyncRobots()
             log.info("acpSyncRobots 回调已发送 (robot级重载后)")
@@ -1686,10 +1749,48 @@ object AcpProxy {
                 }
                 result.add(TeamMemberSourceDescriptor(
                     chatterId, sourceGroupId, sourceRobotId, robot.name,
-                    robot.name, robot.avatar, robot.signature, robot.isOnlyTeamMember
+                    robot.name, robot.avatar,
+                    ContactRemarkResolver.resolve(null, robot), robot.isOnlyTeamMember
                 ))
             }
         }
+        return result
+    }
+
+    private fun registerSharedTeamSources(robots: Collection<AcpRobotParam>) {
+        val instanceId = CmdProxyHome.instanceId()
+        robots.filter { it.isEnabled && !it.isOnlySubAgent }
+            .distinctBy { it.name }
+            .forEach { robot ->
+                val sourceRobotId = "acp-" + robot.name.replace(" ", "_")
+                    .replace("\u3000", "_")
+                if (robot.teamSharedWithChatterIds.isNotEmpty()) {
+                    globalGroupRobotRegistry[
+                        TeamSharedSourceIds.groupId(instanceId, sourceRobotId)
+                    ] = robot
+                }
+            }
+    }
+
+    private fun remoteTeamMemberSourceDescriptors(): List<RemoteTeamMemberSourceDescriptor> {
+        val instanceId = CmdProxyHome.instanceId()
+        val result = mutableListOf<RemoteTeamMemberSourceDescriptor>()
+        globalGroupRobotRegistry.values
+            .filter { it.isEnabled && !it.isOnlySubAgent }
+            .distinctBy { it.name }
+            .sortedBy { it.name }
+            .forEach { robot ->
+                val sourceRobotId = "acp-" + robot.name.replace(" ", "_")
+                    .replace("\u3000", "_")
+                val sourceGroupId = TeamSharedSourceIds.groupId(instanceId, sourceRobotId)
+                robot.teamSharedWithChatterIds.map { it.trim() }
+                    .filter { it.isNotEmpty() }.distinct().sorted()
+                    .forEach { owner -> result.add(RemoteTeamMemberSourceDescriptor(
+                        owner, instanceId, sourceGroupId, sourceRobotId,
+                        robot.name, robot.name, robot.avatar,
+                        ContactRemarkResolver.resolve(null, robot)
+                    )) }
+            }
         return result
     }
 

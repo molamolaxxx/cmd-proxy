@@ -45,7 +45,7 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
         this.externalContactProvider = externalContactProvider;
         this.externalOwnerKey = externalContactProvider == null
                 ? null : requireText(externalOwnerKey, "externalOwnerKey");
-        if (findMember(runtime.getDefinition(), selfTeamMemberId) == null) {
+        if (findContact(runtime.getDefinition(), selfTeamMemberId) == null) {
             throw new IllegalArgumentException("selfTeamMemberId does not belong to Team");
         }
     }
@@ -110,13 +110,13 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
     }
 
     public List<TeamContactRef> contacts() {
-        List<TeamMemberDefinition> members =
-                new ArrayList<>(runtime.getDefinition().getMembers());
-        members.sort(Comparator.comparingInt(TeamMemberDefinition::getOrder));
+        List<TeamContactRef> members =
+                new ArrayList<>(runtime.getDefinition().getRoster());
+        members.sort(Comparator.comparingInt(TeamContactRef::getOrder));
         List<TeamContactRef> result = new ArrayList<>();
-        for (TeamMemberDefinition member : members) {
-            if (!selfTeamMemberId.equals(member.getTeamMemberId())) {
-                result.add(TeamContactRef.from(member));
+        for (TeamContactRef member : members) {
+            if (!selfTeamMemberId.equals(member.getTargetTeamMemberId())) {
+                result.add(member);
             }
         }
         return Collections.unmodifiableList(result);
@@ -143,6 +143,13 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
             if (member.getTeamMemberId().equals(memberId)) {
                 return member;
             }
+        }
+        return null;
+    }
+
+    private static TeamContactRef findContact(TeamDefinition definition, String memberId) {
+        for (TeamContactRef contact : definition.getRoster()) {
+            if (contact.getTargetTeamMemberId().equals(memberId)) return contact;
         }
         return null;
     }

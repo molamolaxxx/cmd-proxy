@@ -4,6 +4,7 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
+import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelAttachment;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
@@ -126,6 +127,13 @@ public class ChannelAttachmentInboundTest {
         }
 
         @Override public void sendLocalFiles(String input, List<String> files) {
+            this.prompt = input;
+            this.localFiles = files;
+            state.set(State.BUSY);
+        }
+
+        @Override public void sendLocalFiles(String input, List<String> files,
+                                             PromptOptions options) {
             this.prompt = input;
             this.localFiles = files;
             state.set(State.BUSY);

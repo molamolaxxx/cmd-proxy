@@ -1,5 +1,8 @@
 package com.mola.cmd.proxy.app.acp.channel.model;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class ChannelConfig {
     public static final String TYPE_WECOM_WS = "WECOM_WS";
 
@@ -13,8 +16,10 @@ public class ChannelConfig {
     private String botId;
     private String secret;
     private String wsUrl = "wss://openws.work.weixin.qq.com";
-    /** 主动 talkTo 时固定接收者，可填写企业微信 userid 或群 chatid。 */
+    /** Explicit proactive target for schedules and other non-channel-originated turns. */
     private String defaultChatId;
+    /** System-owned options discovered from inbound conversations. */
+    private List<ChannelChatTarget> knownChatTargets = new ArrayList<>();
     private ChannelBinding binding;
 
     public String getId() { return id; }
@@ -37,6 +42,10 @@ public class ChannelConfig {
     public void setWsUrl(String wsUrl) { this.wsUrl = wsUrl; }
     public String getDefaultChatId() { return defaultChatId; }
     public void setDefaultChatId(String defaultChatId) { this.defaultChatId = defaultChatId; }
+    public List<ChannelChatTarget> getKnownChatTargets() { return knownChatTargets; }
+    public void setKnownChatTargets(List<ChannelChatTarget> knownChatTargets) {
+        this.knownChatTargets = knownChatTargets == null ? new ArrayList<>() : knownChatTargets;
+    }
     public ChannelBinding getBinding() { return binding; }
     public void setBinding(ChannelBinding binding) { this.binding = binding; }
 }

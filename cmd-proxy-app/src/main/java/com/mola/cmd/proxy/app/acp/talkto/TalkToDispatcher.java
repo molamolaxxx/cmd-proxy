@@ -7,6 +7,8 @@ import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
+import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
+import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
@@ -259,6 +261,13 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         externalGateways.remove(gateway);
     }
 
+    public void releaseExternalTarget(String target) {
+        if (target == null) return;
+        for (ExternalTalkToGateway gateway : externalGateways) {
+            if (gateway.supports(target)) gateway.release(target);
+        }
+    }
+
     @Override
     public List<ExternalTalkToContact> contactsForGroup(String groupId) {
         List<ExternalTalkToContact> contacts = new java.util.ArrayList<>();
@@ -482,11 +491,29 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         return message != null ? message : pollInbox(routingName);
     }
 
-    protected static void sendInboundMessage(AcpClient targetClient, TalkToMessage message) {
+    public static void sendInboundMessage(AcpClient targetClient, TalkToMessage message) {
+        PromptOptions options = targetClient.promptOptionsForInboundTalkTo(message);
+        String prompt = message.buildPrompt();
+        if (options.isRestoredChannelContinuation()) {
+            prompt += "\n[信道续接]\n"
+                    + "这条内部回信关联到你此前收到的原始外部信道消息。"
+                    + "请结合回信内容完成原任务；需要向原始信道发送结果时，"
+                    + "使用 talk_to 并将 target 指定为“回复”。"
+                    + "不要选择或猜测稳定信道 target。\n";
+        }
+        if (options.hasChannelTurnContext()) {
+            if (message.getLocalAttachments().isEmpty()) {
+                targetClient.send(prompt, null, options);
+            } else {
+                targetClient.sendLocalFiles(
+                        prompt, message.getLocalAttachments(), options);
+            }
+            return;
+        }
         if (message.getLocalAttachments().isEmpty()) {
-            targetClient.send(message.buildPrompt(), null);
+            targetClient.send(prompt, null);
         } else {
-            targetClient.sendLocalFiles(message.buildPrompt(), message.getLocalAttachments());
+            targetClient.sendLocalFiles(prompt, message.getLocalAttachments());
         }
     }
 

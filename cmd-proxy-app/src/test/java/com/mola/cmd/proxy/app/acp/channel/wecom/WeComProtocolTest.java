@@ -9,11 +9,30 @@ import static org.junit.Assert.*;
 public class WeComProtocolTest {
 
     @Test
-    public void inboundConversationSelectsGroupChatIdOrDirectUserId() {
-        assertEquals("group-chat-1", WeComChannelAdapter.defaultChatTarget(
-                "group", "group-chat-1", "user-1"));
-        assertEquals("user-1", WeComChannelAdapter.defaultChatTarget(
-                "single", "", "user-1"));
+    public void discoveredTargetUsesPersonalNameAndOptionalGroupName() {
+        JsonObject body = JsonParser.parseString(
+                "{\"chatname\":\"研发群\"}").getAsJsonObject();
+
+        assertEquals("张三", WeComChannelAdapter.discoveredDisplayName(
+                body, "single", "张三", "user-1", "你好"));
+        assertEquals("研发群", WeComChannelAdapter.discoveredDisplayName(
+                body, "group", "张三", "user-1", "你好"));
+        assertEquals("消息：帮我看一下发布状态", WeComChannelAdapter.discoveredDisplayName(
+                new JsonObject(), "group", "张三", "user-1", "帮我看一下发布状态"));
+        assertEquals("消息：你好", WeComChannelAdapter.discoveredDisplayName(
+                new JsonObject(), "single", "", "user-1", "你好"));
+        assertEquals("未提供群名", WeComChannelAdapter.discoveredDisplayName(
+                new JsonObject(), "group", "张三", "user-1", ""));
+    }
+
+    @Test
+    public void messagePreviewIsNormalizedAndShortened() {
+        JsonObject body = JsonParser.parseString("{\"msgtype\":\"text\","
+                + "\"text\":{\"content\":\"  第一行\\n第二行  12345678901234567890  \"}}")
+                .getAsJsonObject();
+
+        assertEquals("第一行 第二行 1234567890123456…",
+                WeComChannelAdapter.shortMessagePreview(body));
     }
 
     @Test

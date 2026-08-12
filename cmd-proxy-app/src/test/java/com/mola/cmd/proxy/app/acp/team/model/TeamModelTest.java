@@ -62,6 +62,21 @@ public class TeamModelTest {
         assertEquals("member-1", definition.getMembers().get(0).getTeamMemberId());
     }
 
+    @Test
+    public void mixedDefinitionPersistsGlobalRosterBeyondLocalFragment() {
+        TeamMemberDefinition local = member("member-local", "Local");
+        TeamDefinition definition = TeamDefinition.creating(
+                "team-1", "owner-1", "Mixed", "team-acp-instance", "request-1",
+                Collections.singletonList(local), true,
+                Arrays.asList(TeamContactRef.from(local),
+                        new TeamContactRef("member-remote", "team-acp-member-remote",
+                                "Remote", "remote", 1)), 100L);
+
+        assertTrue(definition.isMixedPlacement());
+        assertEquals(1, definition.getMembers().size());
+        assertEquals(2, definition.getRoster().size());
+    }
+
     @Test(expected = IllegalStateException.class)
     public void terminalDefinitionCannotTransition() {
         definition()

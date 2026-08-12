@@ -10,6 +10,7 @@ import org.junit.rules.TemporaryFolder;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Collections;
 
 import static org.junit.Assert.*;
 
@@ -44,6 +45,21 @@ public class TeamCommandHandlerTest {
         assertEquals("true", result.get("accepted"));
         assertEquals("ACCEPTED", result.get("code"));
         assertEquals(1, fixture.store.loadTeam("team-1").get().getMembers().size());
+    }
+
+    @Test
+    public void createUsesMemberRemarkProvidedByMolaChat() throws Exception {
+        Fixture fixture = fixture();
+        String payload = createSingleMemberJson("request-1", "Solo Team")
+                .replace("\"order\":0", "\"order\":0,\"remark\":\"  Team researcher  \"");
+
+        Map<String, String> result = fixture.handler.handleCreate("rpc-1", one(payload));
+
+        assertEquals("true", result.get("accepted"));
+        assertEquals("Team researcher", fixture.store.loadTeam("team-1").get()
+                .getMembers().get(0).getRemark());
+        assertEquals("Team researcher", fixture.store.loadTeam("team-1").get()
+                .getRoster().get(0).getRemark());
     }
 
     @Test
@@ -118,6 +134,55 @@ public class TeamCommandHandlerTest {
 
         assertEquals("false", result.get("accepted"));
         assertEquals("SOURCE_ROBOT_MISMATCH", result.get("code"));
+    }
+
+    @Test
+    public void mixedFragmentPersistsLocalMembersAndGlobalRoster() throws Exception {
+        Fixture fixture = fixture();
+        AcpRobotParam shared = robot("Remote Robot");
+        shared.setTeamSharedWithChatterIds(Collections.singletonList("owner-1"));
+        String group = TeamSharedSourceIds.groupId("instance-b", "acp-Remote_Robot");
+        fixture.sources.put(group, shared);
+        String payload = "{\"schemaVersion\":\"1\",\"requestId\":\"mixed-1\","
+                + "\"teamId\":\"mixed-team\",\"ownerChatterId\":\"owner-1\","
+                + "\"name\":\"Mixed\",\"mixedPlacement\":true,"
+                + "\"members\":[{\"teamMemberId\":\"remote-1\","
+                + "\"sourceRobotId\":\"acp-Remote_Robot\",\"sourceGroupId\":\""
+                + group + "\",\"order\":1}],"
+                + "\"roster\":[{\"teamMemberId\":\"home-1\","
+                + "\"acpClientId\":\"team-acp-home-1\",\"displayName\":\"Home\","
+                + "\"remark\":\"home\",\"order\":0},{\"teamMemberId\":\"remote-1\","
+                + "\"acpClientId\":\"team-acp-remote-1\",\"displayName\":\"Remote\","
+                + "\"remark\":\"remote\",\"order\":1}]}";
+
+        Map<String, String> result = fixture.handler.handleCreate("rpc", one(payload));
+
+        assertEquals("true", result.get("accepted"));
+        assertTrue(fixture.store.loadTeam("mixed-team").get().isMixedPlacement());
+        assertEquals(2, fixture.store.loadTeam("mixed-team").get().getRoster().size());
+    }
+
+    @Test
+    public void mixedFragmentRejectsOwnerWithoutGrant() throws Exception {
+        Fixture fixture = fixture();
+        AcpRobotParam shared = robot("Remote Robot");
+        String group = TeamSharedSourceIds.groupId("instance-b", "acp-Remote_Robot");
+        fixture.sources.put(group, shared);
+        String payload = "{\"schemaVersion\":\"1\",\"requestId\":\"mixed-1\","
+                + "\"teamId\":\"mixed-team\",\"ownerChatterId\":\"owner-1\","
+                + "\"name\":\"Mixed\",\"mixedPlacement\":true,"
+                + "\"members\":[{\"teamMemberId\":\"remote-1\","
+                + "\"sourceRobotId\":\"acp-Remote_Robot\",\"sourceGroupId\":\""
+                + group + "\",\"order\":1}],"
+                + "\"roster\":[{\"teamMemberId\":\"home-1\","
+                + "\"acpClientId\":\"team-acp-home-1\",\"displayName\":\"Home\","
+                + "\"order\":0},{\"teamMemberId\":\"remote-1\","
+                + "\"acpClientId\":\"team-acp-remote-1\",\"displayName\":\"Remote\","
+                + "\"order\":1}]}";
+
+        Map<String, String> result = fixture.handler.handleCreate("rpc", one(payload));
+        assertEquals("false", result.get("accepted"));
+        assertEquals("TEAM_GRANT_REVOKED", result.get("code"));
     }
 
     @Test

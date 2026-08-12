@@ -12,6 +12,8 @@ public final class TeamCreateCommand {
     private String ownerChatterId;
     private String name;
     private List<TeamMemberCreateSpec> members;
+    private boolean mixedPlacement;
+    private List<TeamRosterMemberSpec> roster;
 
     @SuppressWarnings("unused")
     private TeamCreateCommand() {
@@ -26,6 +28,16 @@ public final class TeamCreateCommand {
         this.ownerChatterId = ownerChatterId;
         this.name = name;
         this.members = members == null ? null : new ArrayList<>(members);
+    }
+
+    public TeamCreateCommand(String schemaVersion, String requestId, String teamId,
+                             String ownerChatterId, String name,
+                             List<TeamMemberCreateSpec> members,
+                             boolean mixedPlacement,
+                             List<TeamRosterMemberSpec> roster) {
+        this(schemaVersion, requestId, teamId, ownerChatterId, name, members);
+        this.mixedPlacement = mixedPlacement;
+        this.roster = roster == null ? null : new ArrayList<>(roster);
     }
 
     public String getSchemaVersion() {
@@ -50,5 +62,11 @@ public final class TeamCreateCommand {
 
     public List<TeamMemberCreateSpec> getMembers() {
         return members == null ? null : Collections.unmodifiableList(members);
+    }
+
+    public boolean isMixedPlacement() { return mixedPlacement; }
+
+    public List<TeamRosterMemberSpec> getRoster() {
+        return roster == null ? null : Collections.unmodifiableList(roster);
     }
 }

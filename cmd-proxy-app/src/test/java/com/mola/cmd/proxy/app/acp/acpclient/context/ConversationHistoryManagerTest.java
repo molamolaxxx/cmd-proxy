@@ -35,6 +35,16 @@ public class ConversationHistoryManagerTest {
         assertFalse(manager.getSessionBaseDir().endsWith("Robot/One"));
     }
 
+    @Test
+    public void mainIdentitySupportsPureUnicodeRobotName() {
+        AcpClientIdentity identity =
+                AcpClientIdentity.main("group-1", "结算专家", "结算专家");
+        ConversationHistoryManager manager = new ConversationHistoryManager(identity);
+
+        assertTrue(manager.getSessionBaseDir().getFileName().toString()
+                .startsWith("unicode-"));
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void teamIdentityRejectsParentTraversal() {
         new ConversationHistoryManager(teamIdentity("team/team-1/../member-1"));

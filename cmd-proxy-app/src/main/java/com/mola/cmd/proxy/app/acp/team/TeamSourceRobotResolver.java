@@ -16,6 +16,17 @@ public interface TeamSourceRobotResolver {
                 spec.getSourceRobotId(), robot);
     }
 
+    default TeamSourceRobotSnapshot snapshot(TeamMemberCreateSpec spec,
+                                             String ownerChatterId,
+                                             boolean mixedPlacement)
+            throws TeamSourceResolutionException {
+        return snapshot(spec);
+    }
+
+    default boolean isGrantActive(String sourceGroupId, String ownerChatterId) {
+        return true;
+    }
+
     default TeamSourceRobotSnapshot restore(TeamMemberDefinition member)
             throws TeamSourceResolutionException {
         TeamMemberCreateSpec spec = new TeamMemberCreateSpec(
@@ -25,5 +36,15 @@ public interface TeamSourceRobotResolver {
         // current service generation. A full ACP service refresh/restart therefore
         // recreates Team clients with the latest source robot configuration.
         return snapshot(spec);
+    }
+
+    default TeamSourceRobotSnapshot restore(TeamMemberDefinition member,
+                                            String ownerChatterId,
+                                            boolean mixedPlacement)
+            throws TeamSourceResolutionException {
+        TeamMemberCreateSpec spec = new TeamMemberCreateSpec(
+                member.getTeamMemberId(), member.getSourceRobotId(),
+                member.getSourceGroupId(), member.getOrder());
+        return snapshot(spec, ownerChatterId, mixedPlacement);
     }
 }

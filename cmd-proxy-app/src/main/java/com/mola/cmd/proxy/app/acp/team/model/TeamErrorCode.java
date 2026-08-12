@@ -16,5 +16,6 @@ public enum TeamErrorCode {
     MEMORY_NOT_ENABLED,
     TEAM_DELETING,
     INBOX_FULL,
+    TEAM_GRANT_REVOKED,
     INTERNAL_ERROR
 }

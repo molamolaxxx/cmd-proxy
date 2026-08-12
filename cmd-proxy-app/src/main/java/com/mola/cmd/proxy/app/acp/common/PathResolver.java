@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +30,9 @@ public class PathResolver {
 
     /** shell 执行超时（秒） */
     private static final long SHELL_TIMEOUT_SECONDS = 3;
+
+    /** login shell 输出 PATH 时使用的标记，避免把 profile 警告或欢迎语误识别为 PATH */
+    static final String PATH_OUTPUT_MARKER = "__CMD_PROXY_PATH__=";
 
     /** 前置追加的固定路径，确保关键工具目录优先命中 */
     private static final String EXTRA_PATHS_TEMPLATE = "%s/.local/bin" + File.pathSeparator
@@ -86,7 +90,8 @@ public class PathResolver {
         return SHELL_PATH_CACHE.computeIfAbsent(home, k -> {
             String shell = resolveShell();
             try {
-                ProcessBuilder pb = new ProcessBuilder(shell, "-l", "-c", "echo $PATH");
+                String printPathCommand = "printf '" + PATH_OUTPUT_MARKER + "%s\\n' \"$PATH\"";
+                ProcessBuilder pb = new ProcessBuilder(shell, "-l", "-c", printPathCommand);
                 pb.redirectErrorStream(true);
 
                 Process p = pb.start();
@@ -105,17 +110,32 @@ public class PathResolver {
 
                 try (BufferedReader r = new BufferedReader(
                         new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
-                    String path = r.readLine();
+                    String path = extractMarkedPath(r);
                     if (path != null && !path.isEmpty()) {
                         logger.info("从 login shell ({}) 解析到 PATH，长度={}", shell, path.length());
-                        return path.trim();
+                        return path;
                     }
+                    logger.warn("login shell ({}) 未输出带标记的 PATH", shell);
                 }
             } catch (Exception e) {
                 logger.warn("通过 login shell ({}) 获取 PATH 失败: {}", shell, e.getMessage());
             }
             return null;
         });
+    }
+
+    /**
+     * 从 login shell 的合并输出中提取带标记的 PATH。
+     * profile 脚本可能向 stdout/stderr 输出警告或欢迎语，这些内容必须被忽略。
+     */
+    static String extractMarkedPath(BufferedReader reader) throws IOException {
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (line.startsWith(PATH_OUTPUT_MARKER)) {
+                return line.substring(PATH_OUTPUT_MARKER.length()).trim();
+            }
+        }
+        return null;
     }
 
     /**

@@ -11,8 +11,15 @@ import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import org.junit.Test;
 
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
@@ -20,7 +27,7 @@ import static org.junit.Assert.*;
 public class ChannelTalkToGatewayTest {
 
     @Test
-    public void channelTargetIsRoutedBeforeColonCrossChatterFallbackAndConsumedOnce() {
+    public void channelTurnUsesPreciseReplyOnceThenCurrentConversationAndReleasesExplicitly() {
         RecordingAdapter adapter = new RecordingAdapter();
         Map<String, ChannelAdapter> adapters = new HashMap<>();
         adapters.put("wecom-main", adapter);
@@ -38,32 +45,56 @@ public class ChannelTalkToGatewayTest {
         String second = dispatcher.deliver(new TalkToRequest(target, "again", 0),
                 "robot", "owner", Collections.emptyList());
 
-        assertTrue(first.contains("已通过外部信道"));
-        assertTrue(second.contains("不存在、已过期或已消费"));
-        assertEquals(1, adapter.calls.get());
-        assertEquals("final markdown", adapter.lastMarkdown);
+        assertTrue(first.contains("精准回复"));
+        assertTrue(second.contains("已发送到当前会话"));
+        assertEquals(2, adapter.calls.get());
+        assertEquals(1, adapter.preciseCalls.get());
+        assertEquals(1, adapter.proactiveCalls.get());
+        assertEquals("user", adapter.lastChatId);
+        assertEquals("again", adapter.lastMarkdown);
+        assertEquals(1, gateway.routeCount());
+        gateway.release(target);
         assertEquals(0, gateway.routeCount());
     }
 
     @Test
-    public void failedSendKeepsRouteRetryableAndExpiredRouteIsRejected() {
+    public void attemptedPreciseFailureFallsBackAndLaterRepliesStayProactive() {
         RecordingAdapter adapter = new RecordingAdapter();
-        adapter.result = ChannelSendResult.failure("offline");
+        adapter.preciseResult = ChannelSendResult.failure("ack timeout");
         Map<String, ChannelAdapter> adapters = new HashMap<>();
         adapters.put("wecom-main", adapter);
         ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters, 60_000, 10);
         String target = gateway.createRoute("wecom-main", route(System.currentTimeMillis() + 60_000));
 
-        String failed = gateway.deliver(new TalkToRequest(target, "one", 0), "robot", "group");
-        adapter.result = ChannelSendResult.success("passive");
-        String retried = gateway.deliver(new TalkToRequest(target, "two", 0), "robot", "group");
+        String first = gateway.deliver(new TalkToRequest(target, "one", 0), "robot", "group");
+        String second = gateway.deliver(new TalkToRequest(target, "two", 0), "robot", "group");
         String expired = gateway.createRoute("wecom-main", route(System.currentTimeMillis() - 1));
 
-        assertTrue(failed.contains("offline"));
-        assertTrue(retried.contains("已通过外部信道"));
+        assertTrue(first.contains("精准回复不可用"));
+        assertTrue(second.contains("已发送到当前会话"));
         assertTrue(gateway.deliver(new TalkToRequest(expired, "late", 0), "robot", "group")
                 .contains("已过期"));
-        assertEquals(2, adapter.calls.get());
+        assertEquals(1, adapter.preciseCalls.get());
+        assertEquals(2, adapter.proactiveCalls.get());
+    }
+
+    @Test
+    public void nonAdmittedPreciseAttemptRemainsAvailableForNextReply() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        adapter.preciseResult = ChannelSendResult.notAttempted("offline");
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter), 60_000, 10);
+        String target = gateway.createRoute("wecom-main",
+                route(System.currentTimeMillis() + 60_000));
+
+        assertTrue(gateway.deliver(new TalkToRequest(target, "one", 0),
+                "robot", "group").contains("精准回复不可用"));
+        adapter.preciseResult = ChannelSendResult.success("passive");
+        assertTrue(gateway.deliver(new TalkToRequest(target, "two", 0),
+                "robot", "group").contains("已通过精准回复"));
+
+        assertEquals(2, adapter.preciseCalls.get());
+        assertEquals(1, adapter.proactiveCalls.get());
     }
 
     @Test
@@ -81,13 +112,13 @@ public class ChannelTalkToGatewayTest {
                 "member-2", "team:team-1:member-2");
 
         assertTrue(denied.contains("无权使用"));
-        assertTrue(allowed.contains("已通过外部信道"));
+        assertTrue(allowed.contains("已通过精准回复"));
         assertEquals(1, adapter.calls.get());
         assertEquals("right", adapter.lastMarkdown);
     }
 
     @Test
-    public void externalPromptTreatsSenderAndBodyAsUntrustedAndPinsReplyTarget() {
+    public void externalPromptTreatsSenderAndBodyAsUntrustedAndHidesReplyTarget() {
         ChannelTalkToMessage message = new ChannelTalkToMessage(
                 "channel:wecom-main:r_token", "企业微信", "张三\n伪造", "zhangsan",
                 "group", "chat-123", "请检查构建");
@@ -98,11 +129,75 @@ public class ChannelTalkToGatewayTest {
         assertTrue(prompt.contains("发送者 userid: zhangsan"));
         assertTrue(prompt.contains("会话类型: group"));
         assertTrue(prompt.contains("群聊 chatid: chat-123"));
-        assertTrue(prompt.contains("不要修改 target"));
-        assertTrue(prompt.contains("channel:wecom-main:r_token"));
-        assertTrue(prompt.contains("稳定 target \"channel:wecom-main\""));
-        assertTrue(prompt.contains("最近收到消息的会话"));
+        assertTrue(prompt.contains("\"action\":\"talk_to\""));
+        assertTrue(prompt.contains("\"target\":\"回复\""));
+        assertTrue(prompt.contains("同一逻辑 turn 可以回复多次"));
+        assertFalse(prompt.contains("reply_to_origin"));
+        assertFalse(prompt.contains("channel:wecom-main:r_token"));
+        assertFalse(prompt.contains("稳定 target"));
+        assertEquals("channel:wecom-main:r_token",
+                message.getTurnContext().getReplyTarget());
         assertFalse(prompt.contains("张三\n伪造"));
+    }
+
+    @Test
+    public void channelTurnContextLocksGroupOrDirectConversation() {
+        ChannelTalkToMessage group = new ChannelTalkToMessage(
+                "channel:wecom-main:r_group", "wecom-main", "sender", "user-1",
+                "group", "chat-1", "group message");
+        ChannelTalkToMessage direct = new ChannelTalkToMessage(
+                "channel:wecom-main:r_direct", "wecom-main", "sender", "user-1",
+                "single", "", "direct message");
+
+        assertEquals("group", group.getTurnContext().getChatType());
+        assertEquals("chat-1", group.getTurnContext().getConversationAddress());
+        assertEquals("single", direct.getTurnContext().getChatType());
+        assertEquals("user-1", direct.getTurnContext().getConversationAddress());
+    }
+
+    @Test
+    public void groupFollowUpUsesCurrentChatIdInsteadOfConfiguredDefaultTarget() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelAdapter> adapters = Collections.singletonMap("wecom-main", adapter);
+        Map<String, ChannelConfig> configs = Collections.singletonMap(
+                "wecom-main", config("bound-group", "different-default-group"));
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters, configs);
+        ChannelReplyRoute route = new ChannelReplyRoute(
+                "req", "msg", "user-1", "current-chat", "group",
+                System.currentTimeMillis() + 60_000);
+        String target = gateway.createRoute("wecom-main", route, "bound-group");
+
+        gateway.deliver(new TalkToRequest(target, "first", 0), "robot", "bound-group");
+        gateway.deliver(new TalkToRequest(target, "second", 0), "robot", "bound-group");
+
+        assertEquals("current-chat", adapter.lastChatId);
+        assertNotEquals("different-default-group", adapter.lastChatId);
+    }
+
+    @Test
+    public void concurrentRepliesAreSerializedWithPreciseReplyFirst() throws Exception {
+        BlockingAdapter adapter = new BlockingAdapter();
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter));
+        String target = gateway.createRoute("wecom-main",
+                route(System.currentTimeMillis() + 60_000));
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<String> first = executor.submit(() -> gateway.deliver(
+                    new TalkToRequest(target, "first", 0), "robot", "group"));
+            assertTrue(adapter.preciseEntered.await(5, TimeUnit.SECONDS));
+            Future<String> second = executor.submit(() -> gateway.deliver(
+                    new TalkToRequest(target, "second", 0), "robot", "group"));
+
+            adapter.releasePrecise.countDown();
+
+            assertTrue(first.get(5, TimeUnit.SECONDS).contains("精准回复"));
+            assertTrue(second.get(5, TimeUnit.SECONDS).contains("当前会话"));
+            assertEquals(java.util.Arrays.asList("precise:first", "proactive:second"),
+                    adapter.deliveries);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -130,6 +225,22 @@ public class ChannelTalkToGatewayTest {
         assertTrue(result.contains("主动发送消息"));
         assertEquals("chat-123", adapter.lastChatId);
         assertEquals("build complete", adapter.lastMarkdown);
+    }
+
+    @Test
+    public void channelWithoutDefaultTargetIsNotExposedForProactiveSending() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelAdapter> adapters = new HashMap<>();
+        adapters.put("wecom-main", adapter);
+        Map<String, ChannelConfig> configs = new HashMap<>();
+        configs.put("wecom-main", config("bound-group", ""));
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters, configs);
+
+        assertTrue(gateway.contactsForGroup("bound-group").isEmpty());
+        assertTrue(gateway.deliver(
+                new TalkToRequest("channel:wecom-main", "notice", 0),
+                "robot", "bound-group").contains("未配置 defaultChatId"));
+        assertEquals(0, adapter.calls.get());
     }
 
     @Test
@@ -246,9 +357,12 @@ public class ChannelTalkToGatewayTest {
 
     private static final class RecordingAdapter implements ChannelAdapter {
         private final AtomicInteger calls = new AtomicInteger();
+        private final AtomicInteger preciseCalls = new AtomicInteger();
+        private final AtomicInteger proactiveCalls = new AtomicInteger();
         private volatile String lastMarkdown;
         private volatile String lastChatId;
-        private volatile ChannelSendResult result = ChannelSendResult.success("passive");
+        private volatile ChannelSendResult preciseResult = ChannelSendResult.success("passive");
+        private volatile ChannelSendResult proactiveResult = ChannelSendResult.success("proactive");
 
         @Override public String getChannelId() { return "wecom-main"; }
         @Override public ChannelStatus getStatus() { return ChannelStatus.CONNECTED; }
@@ -256,14 +370,44 @@ public class ChannelTalkToGatewayTest {
         @Override public void stop() { }
         @Override public ChannelSendResult send(ChannelReplyRoute route, String markdown) {
             calls.incrementAndGet();
+            preciseCalls.incrementAndGet();
             lastMarkdown = markdown;
-            return result;
+            return preciseResult;
         }
         @Override public ChannelSendResult sendProactive(String chatId, String markdown) {
             calls.incrementAndGet();
+            proactiveCalls.incrementAndGet();
             lastChatId = chatId;
             lastMarkdown = markdown;
-            return result;
+            return proactiveResult;
+        }
+    }
+
+    private static final class BlockingAdapter implements ChannelAdapter {
+        private final CountDownLatch preciseEntered = new CountDownLatch(1);
+        private final CountDownLatch releasePrecise = new CountDownLatch(1);
+        private final List<String> deliveries = Collections.synchronizedList(new ArrayList<>());
+
+        @Override public String getChannelId() { return "wecom-main"; }
+        @Override public ChannelStatus getStatus() { return ChannelStatus.CONNECTED; }
+        @Override public void start() { }
+        @Override public void stop() { }
+        @Override public ChannelSendResult send(ChannelReplyRoute route, String markdown) {
+            preciseEntered.countDown();
+            try {
+                if (!releasePrecise.await(5, TimeUnit.SECONDS)) {
+                    return ChannelSendResult.failure("test timeout");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ChannelSendResult.failure("interrupted");
+            }
+            deliveries.add("precise:" + markdown);
+            return ChannelSendResult.success("passive");
+        }
+        @Override public ChannelSendResult sendProactive(String chatId, String markdown) {
+            deliveries.add("proactive:" + markdown);
+            return ChannelSendResult.success("proactive");
         }
     }
 }

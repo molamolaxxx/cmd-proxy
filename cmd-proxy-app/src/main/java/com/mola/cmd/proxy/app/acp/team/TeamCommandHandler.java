@@ -9,6 +9,7 @@ import com.mola.cmd.proxy.app.acp.team.protocol.TeamCreateCommand;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamDeleteCommand;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamQuery;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCommand;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamTalkToDeliverCommand;
 
 import java.util.Map;
 
@@ -99,6 +100,20 @@ public final class TeamCommandHandler {
 
     public Map<String, String> handleMemoryDream(String rpcRequestId, String[] args) {
         return handleMember(rpcRequestId, args, manager::memoryDream);
+    }
+
+    public Map<String, String> handleTalkToDeliver(String rpcRequestId, String[] args) {
+        try {
+            TeamTalkToDeliverCommand command = parseSingleArg(
+                    args, TeamTalkToDeliverCommand.class);
+            return manager.deliverTalkTo(command).withRequestId(rpcRequestId).toResultMap();
+        } catch (IllegalArgumentException e) {
+            return validationError(rpcRequestId, e).toResultMap();
+        } catch (RuntimeException e) {
+            return TeamCommandResult.error(rpcRequestId, TeamErrorCode.INTERNAL_ERROR,
+                    e.getMessage() == null ? e.getClass().getSimpleName()
+                            : e.getMessage()).toResultMap();
+        }
     }
 
     private Map<String, String> handleMember(String requestId, String[] args,

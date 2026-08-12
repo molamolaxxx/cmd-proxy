@@ -37,12 +37,16 @@ private val reloading = AtomicBoolean(false)
 private var activeConfigUiPort = 0
 
 fun main(args: Array<String>) {
-    val mode = args.getOrNull(0)?.lowercase() ?: "mcp"
+    val mode = args.firstOrNull {
+        it.equals("acp", ignoreCase = true) || it.equals("mcp", ignoreCase = true)
+    }?.lowercase() ?: "mcp"
     log.info("启动模式: {}", mode)
 
     LogUtil.debugReject()
     CmdProxyHome.logSummary()
+    CmdProxyConf.configureRemoteHost(args)
     CmdProxyConf.Receiver.listenedSenderAddress = CmdProxyConf.REMOTE_ADDRESS
+    log.info("远端服务地址: {}", CmdProxyConf.REMOTE_ADDRESS)
 
     when (mode) {
         "acp" -> startAcp()

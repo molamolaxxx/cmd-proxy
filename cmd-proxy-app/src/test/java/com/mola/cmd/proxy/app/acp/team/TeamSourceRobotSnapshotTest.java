@@ -8,6 +8,7 @@ import org.junit.Test;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Collections;
 
 import static org.junit.Assert.*;
 
@@ -122,6 +123,27 @@ public class TeamSourceRobotSnapshotTest {
         source.setOnlyTeamMember(true);
 
         assertEquals(before, resolver.snapshot(spec()).getConfigFingerprint());
+    }
+
+    @Test
+    public void sharedSourceRequiresExplicitOwnerGrant() throws Exception {
+        AcpRobotParam shared = robot();
+        shared.setTeamSharedWithChatterIds(Collections.singletonList("owner-a"));
+        String group = TeamSharedSourceIds.groupId("instance-b", "acp-Robot_One");
+        Map<String, AcpRobotParam> robots = new HashMap<>();
+        robots.put(group, shared);
+        MapTeamSourceRobotResolver resolver = new MapTeamSourceRobotResolver(robots);
+        TeamMemberCreateSpec spec = new TeamMemberCreateSpec(
+                "member-1", "acp-Robot_One", group, 0);
+
+        assertNotNull(resolver.snapshot(spec, "owner-a", true));
+        assertFalse(resolver.isGrantActive(group, "owner-b"));
+        try {
+            resolver.snapshot(spec, "owner-b", true);
+            fail("expected grant rejection");
+        } catch (TeamSourceResolutionException e) {
+            assertEquals(TeamErrorCode.TEAM_GRANT_REVOKED, e.getCode());
+        }
     }
 
     private static AcpRobotParam robot() {

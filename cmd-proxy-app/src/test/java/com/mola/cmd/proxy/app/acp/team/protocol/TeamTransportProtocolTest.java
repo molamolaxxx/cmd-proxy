@@ -123,7 +123,7 @@ public class TeamTransportProtocolTest {
                 TeamTransportDescriptor.readyForBusiness("instance-a");
 
         assertTrue(descriptor.isBusinessCommandsReady());
-        assertEquals(13, descriptor.getCommands().size());
+        assertEquals(14, descriptor.getCommands().size());
         assertTrue(descriptor.getCommands().contains("acpTeamCreate"));
         assertTrue(descriptor.getCommands().contains("acpTeamList"));
         assertTrue(descriptor.getCommands().contains("acpTeamGet"));
@@ -132,6 +132,27 @@ public class TeamTransportProtocolTest {
         assertTrue(descriptor.getCommands().contains("acpTeamRestoreSession"));
         assertTrue(descriptor.getCommands().contains("acpTeamGetContextUsage"));
         assertTrue(descriptor.getCommands().contains("acpTeamMemoryDream"));
+        assertTrue(descriptor.getCommands().contains("acpTeamTalkToDeliver"));
+    }
+
+    @Test
+    public void discoverySeparatesRemoteGrantsAndAdvertisesMixedCapabilities() {
+        RemoteTeamMemberSourceDescriptor remote = new RemoteTeamMemberSourceDescriptor(
+                "owner-a", "instance-b", "team-shared-instance-b-acp-Codex",
+                "acp-Codex", "Codex", "Codex", "", "coding");
+        TeamTransportDescriptor descriptor = TeamTransportDescriptor.readyForBusiness(
+                "instance-b", Collections.emptyList(), Collections.singletonList(remote));
+        JsonObject discovery = JsonParser.parseString(
+                TeamTransportProtocol.discoveryFields(descriptor).get("teamDiscovery"))
+                .getAsJsonObject();
+
+        assertTrue(discovery.getAsJsonObject("capabilities")
+                .get("mixedTeamFragment").getAsBoolean());
+        assertTrue(discovery.getAsJsonObject("capabilities")
+                .get("mixedTeamTalkToDeliver").getAsBoolean());
+        assertEquals("owner-a", discovery.getAsJsonArray("remoteTeamMemberSources")
+                .get(0).getAsJsonObject().get("granteeOwnerChatterId").getAsString());
+        assertEquals(0, discovery.getAsJsonArray("teamMemberSources").size());
     }
 
     @Test(expected = IllegalArgumentException.class)

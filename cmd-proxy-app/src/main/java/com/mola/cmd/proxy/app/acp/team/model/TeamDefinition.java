@@ -25,6 +25,8 @@ public final class TeamDefinition {
     private long updatedAt;
     private Long deletedAt;
     private TeamError lastError;
+    private boolean mixedPlacement;
+    private List<TeamContactRef> roster;
 
     @SuppressWarnings("unused")
     private TeamDefinition() {
@@ -37,7 +39,19 @@ public final class TeamDefinition {
                                           long timestamp) {
         return new TeamDefinition(SCHEMA_VERSION, teamId, ownerChatterId, name,
                 TeamState.CREATING, 1L, transportGroup, createRequestId, members,
-                timestamp, timestamp, null, null, null);
+                timestamp, timestamp, null, null, null, false, null);
+    }
+
+    public static TeamDefinition creating(String teamId, String ownerChatterId,
+                                          String name, String transportGroup,
+                                          String createRequestId,
+                                          List<TeamMemberDefinition> members,
+                                          boolean mixedPlacement,
+                                          List<TeamContactRef> roster,
+                                          long timestamp) {
+        return new TeamDefinition(SCHEMA_VERSION, teamId, ownerChatterId, name,
+                TeamState.CREATING, 1L, transportGroup, createRequestId, members,
+                timestamp, timestamp, null, null, null, mixedPlacement, roster);
     }
 
     private TeamDefinition(String schemaVersion, String teamId, String ownerChatterId,
@@ -45,7 +59,8 @@ public final class TeamDefinition {
                            String transportGroup, String createRequestId,
                            List<TeamMemberDefinition> members, long createdAt,
                            long updatedAt, Long deletedAt, TeamError lastError,
-                           String deleteRequestId) {
+                           String deleteRequestId, boolean mixedPlacement,
+                           List<TeamContactRef> roster) {
         this.schemaVersion = TeamError.requireText(schemaVersion, "schemaVersion");
         this.teamId = TeamError.requireText(teamId, "teamId");
         this.ownerChatterId = TeamError.requireText(ownerChatterId, "ownerChatterId");
@@ -63,6 +78,8 @@ public final class TeamDefinition {
         this.deletedAt = deletedAt;
         this.lastError = lastError;
         this.deleteRequestId = deleteRequestId;
+        this.mixedPlacement = mixedPlacement;
+        this.roster = copyRoster(roster, this.members);
     }
 
     public TeamDefinition transitionTo(TeamState newState, TeamError error, long timestamp) {
@@ -76,7 +93,8 @@ public final class TeamDefinition {
         }
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 newState, version + 1L, transportGroup, createRequestId, members,
-                createdAt, timestamp, newDeletedAt, error, deleteRequestId);
+                createdAt, timestamp, newDeletedAt, error, deleteRequestId,
+                mixedPlacement, roster);
     }
 
     public TeamDefinition withMembers(List<TeamMemberDefinition> newMembers, long timestamp) {
@@ -85,7 +103,8 @@ public final class TeamDefinition {
         }
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 state, version + 1L, transportGroup, createRequestId, newMembers,
-                createdAt, timestamp, deletedAt, lastError, deleteRequestId);
+                createdAt, timestamp, deletedAt, lastError, deleteRequestId,
+                mixedPlacement, roster);
     }
 
     public TeamDefinition withTransportGroup(String newTransportGroup, long timestamp) {
@@ -94,7 +113,8 @@ public final class TeamDefinition {
         }
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 state, version + 1L, newTransportGroup, createRequestId, members,
-                createdAt, timestamp, deletedAt, lastError, deleteRequestId);
+                createdAt, timestamp, deletedAt, lastError, deleteRequestId,
+                mixedPlacement, roster);
     }
 
     public TeamDefinition transitionWithMembers(TeamState newState,
@@ -107,7 +127,8 @@ public final class TeamDefinition {
         Long newDeletedAt = newState.isTerminal() ? Long.valueOf(timestamp) : deletedAt;
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 newState, version + 1L, transportGroup, createRequestId, newMembers,
-                createdAt, timestamp, newDeletedAt, error, deleteRequestId);
+                createdAt, timestamp, newDeletedAt, error, deleteRequestId,
+                mixedPlacement, roster);
     }
 
     public TeamDefinition beginDeleting(String requestId, long timestamp) {
@@ -117,7 +138,8 @@ public final class TeamDefinition {
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 TeamState.DELETING, version + 1L, transportGroup, createRequestId,
                 members, createdAt, timestamp, deletedAt, null,
-                TeamError.requireText(requestId, "deleteRequestId"));
+                TeamError.requireText(requestId, "deleteRequestId"),
+                mixedPlacement, roster);
     }
 
     private static List<TeamMemberDefinition> copyAndValidateMembers(
@@ -133,6 +155,39 @@ public final class TeamDefinition {
             }
         }
         return copy;
+    }
+
+    private static List<TeamContactRef> copyRoster(List<TeamContactRef> roster,
+                                                    List<TeamMemberDefinition> members) {
+        List<TeamContactRef> result = new ArrayList<>();
+        if (roster == null || roster.isEmpty()) {
+            Set<Integer> sourceOrders = new HashSet<>();
+            boolean uniqueSourceOrders = true;
+            for (TeamMemberDefinition member : members) {
+                if (!sourceOrders.add(member.getOrder())) uniqueSourceOrders = false;
+            }
+            int fallbackOrder = 0;
+            for (TeamMemberDefinition member : members) {
+                result.add(new TeamContactRef(member.getTeamMemberId(),
+                        member.getAcpClientId(), member.getDisplayName(),
+                        member.getRemark(), uniqueSourceOrders
+                                ? member.getOrder() : fallbackOrder++));
+            }
+        } else {
+            result.addAll(roster);
+        }
+        if (result.isEmpty() || result.size() > 6) {
+            throw new IllegalArgumentException("roster size must be between 1 and 6");
+        }
+        Set<String> ids = new HashSet<>();
+        Set<Integer> orders = new HashSet<>();
+        for (TeamContactRef contact : result) {
+            if (contact == null || !ids.add(contact.getTargetTeamMemberId())
+                    || !orders.add(contact.getOrder())) {
+                throw new IllegalArgumentException("roster ids and orders must be unique");
+            }
+        }
+        return result;
     }
 
     public String getSchemaVersion() {
@@ -189,5 +244,14 @@ public final class TeamDefinition {
 
     public TeamError getLastError() {
         return lastError;
+    }
+
+    public boolean isMixedPlacement() { return mixedPlacement; }
+
+    public List<TeamContactRef> getRoster() {
+        if (roster == null || roster.isEmpty()) {
+            return Collections.unmodifiableList(copyRoster(null, members));
+        }
+        return Collections.unmodifiableList(roster);
     }
 }

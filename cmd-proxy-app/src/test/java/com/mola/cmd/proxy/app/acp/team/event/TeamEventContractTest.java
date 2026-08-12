@@ -10,7 +10,11 @@ import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -52,14 +56,19 @@ public class TeamEventContractTest {
     }
 
     @Test
-    public void rpcSinkUsesEventIdAsCallbackIdAndInstanceTransportGroup() {
+    public void rpcSinkUsesEventIdAsCallbackIdAndInstanceTransportGroup()
+            throws Exception {
         AtomicReference<String> command = new AtomicReference<>();
         AtomicReference<String> group = new AtomicReference<>();
         AtomicReference<CmdResponseContent> response = new AtomicReference<>();
+        AtomicReference<Thread> deliveryThread = new AtomicReference<>();
+        CountDownLatch delivered = new CountDownLatch(1);
         RpcTeamEventSink sink = new RpcTeamEventSink((cmd, targetGroup, content) -> {
             command.set(cmd);
             group.set(targetGroup);
             response.set(content);
+            deliveryThread.set(Thread.currentThread());
+            delivered.countDown();
         });
         TeamEventEnvelope event = TeamEventEnvelope.next(
                 new TeamRuntime(definition()), null, null,
@@ -67,39 +76,124 @@ public class TeamEventContractTest {
 
         sink.publish(event);
 
+        assertTrue(delivered.await(2, TimeUnit.SECONDS));
         assertEquals("acpTeamEvent", command.get());
         assertEquals("team-acp-instance", group.get());
         assertEquals(event.getEventId(), response.get().getCmdId());
         assertEquals(event.getEventId(), response.get().getResultMap().get("eventId"));
+        assertTrue(deliveryThread.get().isDaemon());
+        assertEquals("team-event-callback-delivery",
+                deliveryThread.get().getName());
+        sink.close();
     }
 
     @Test
-    public void rpcSinkRetriesAndDoesNotPropagateTransportFailure() {
+    public void rpcSinkRetriesInDeliveryThreadAndDoesNotPropagateTransportFailure()
+            throws Exception {
         AtomicInteger attempts = new AtomicInteger();
+        CountDownLatch delivered = new CountDownLatch(1);
         RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> {
-            if (attempts.incrementAndGet() < 3) {
+            int attempt = attempts.incrementAndGet();
+            if (attempt < 3) {
                 throw new RuntimeException("closed channel");
             }
+            delivered.countDown();
         });
 
         sink.publish(TeamEventEnvelope.next(new TeamRuntime(definition()), null, null,
                 TeamEventType.TEAM_SNAPSHOT_READY, Collections.emptyMap()));
 
+        assertTrue(delivered.await(2, TimeUnit.SECONDS));
         assertEquals(3, attempts.get());
+        sink.close();
     }
 
     @Test
-    public void rpcSinkDropsEventWithoutPropagatingAfterRetryExhaustion() {
+    public void rpcSinkDropsEventWithoutPropagatingAfterRetryExhaustion()
+            throws Exception {
         AtomicInteger attempts = new AtomicInteger();
+        CountDownLatch exhausted = new CountDownLatch(3);
         RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> {
             attempts.incrementAndGet();
+            exhausted.countDown();
             throw new RuntimeException("closed channel");
         });
 
         sink.publish(TeamEventEnvelope.next(new TeamRuntime(definition()), null, null,
                 TeamEventType.TEAM_SNAPSHOT_READY, Collections.emptyMap()));
 
+        assertTrue(exhausted.await(2, TimeUnit.SECONDS));
         assertEquals(3, attempts.get());
+        sink.close();
+    }
+
+    @Test
+    public void rpcSinkDeliversEventsInSubmissionOrder() throws Exception {
+        List<String> delivered = new CopyOnWriteArrayList<>();
+        CountDownLatch completed = new CountDownLatch(3);
+        RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> {
+            delivered.add(response.getResultMap().get("type"));
+            completed.countDown();
+        }, 3);
+        TeamRuntime runtime = new TeamRuntime(definition());
+
+        sink.publish(TeamEventEnvelope.next(runtime, null, null,
+                TeamEventType.TEAM_CREATE_ACCEPTED, Collections.emptyMap()));
+        sink.publish(TeamEventEnvelope.next(runtime, null, null,
+                TeamEventType.TEAM_READY, Collections.emptyMap()));
+        assertTrue(sink.tryPublish(TeamEventEnvelope.next(runtime, null, null,
+                TeamEventType.TEAM_DELETE_ACCEPTED, Collections.emptyMap())));
+
+        assertTrue(completed.await(2, TimeUnit.SECONDS));
+        assertEquals(Arrays.asList("TEAM_CREATE_ACCEPTED", "TEAM_READY",
+                "TEAM_DELETE_ACCEPTED"), delivered);
+        sink.close();
+    }
+
+    @Test
+    public void rpcSinkRejectsWithoutBlockingWhenQueueIsFull() throws Exception {
+        CountDownLatch callbackStarted = new CountDownLatch(1);
+        CountDownLatch releaseCallback = new CountDownLatch(1);
+        CountDownLatch delivered = new CountDownLatch(2);
+        RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> {
+            callbackStarted.countDown();
+            try {
+                releaseCallback.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally {
+                delivered.countDown();
+            }
+        }, 1);
+        TeamRuntime runtime = new TeamRuntime(definition());
+
+        sink.publish(TeamEventEnvelope.next(runtime, null, null,
+                TeamEventType.TEAM_CREATE_ACCEPTED, Collections.emptyMap()));
+        assertTrue(callbackStarted.await(2, TimeUnit.SECONDS));
+        sink.publish(TeamEventEnvelope.next(runtime, null, null,
+                TeamEventType.TEAM_READY, Collections.emptyMap()));
+        assertFalse(sink.tryPublish(TeamEventEnvelope.next(runtime, null, null,
+                TeamEventType.TEAM_DELETE_ACCEPTED, Collections.emptyMap())));
+
+        assertEquals(1, sink.getQueueCapacity());
+        assertEquals(1, sink.getQueuedEventCount());
+        assertEquals(1L, sink.getRejectedEventCount());
+        releaseCallback.countDown();
+        assertTrue(delivered.await(2, TimeUnit.SECONDS));
+        sink.close();
+    }
+
+    @Test
+    public void rpcSinkRejectsSubmissionsAfterClose() {
+        RpcTeamEventSink sink = new RpcTeamEventSink((cmd, group, response) -> { }, 1);
+        sink.close();
+
+        assertFalse(sink.tryPublish(TeamEventEnvelope.next(
+                new TeamRuntime(definition()), null, null,
+                TeamEventType.TEAM_SNAPSHOT_READY, Collections.emptyMap())));
+
+        assertTrue(sink.isClosed());
+        assertEquals(1L, sink.getRejectedEventCount());
     }
 
     private static TeamDefinition definition() {

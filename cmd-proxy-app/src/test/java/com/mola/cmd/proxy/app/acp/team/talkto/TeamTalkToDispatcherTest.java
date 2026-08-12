@@ -10,8 +10,10 @@ import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
+import com.mola.cmd.proxy.app.acp.team.event.TeamEventSink;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventType;
 import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamContactRef;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberState;
 import com.mola.cmd.proxy.app.acp.team.model.TeamState;
@@ -34,6 +36,142 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.Assert.*;
 
 public class TeamTalkToDispatcherTest {
+
+    @Test
+    public void mixedRosterTargetEmitsRouteRequestInsteadOfUsingLocalRegistry() {
+        TeamMemberDefinition local = member("member-1", 0)
+                .withState(TeamMemberState.READY, "session-1", null);
+        TeamDefinition creating = TeamDefinition.creating(
+                "team-1", "owner-1", "Mixed", "team-acp-instance", "request-1",
+                Collections.singletonList(local), true,
+                Arrays.asList(TeamContactRef.from(local),
+                        new TeamContactRef("member-remote", "team-acp-member-remote",
+                                "Remote", "remote", 1)), 100L);
+        TeamRuntime runtime = new TeamRuntime(creating.transitionWithMembers(
+                TeamState.READY, Collections.singletonList(local), null, 101L));
+        TeamClientRegistry registry = new TeamClientRegistry();
+        registry.register("team-1", "member-1", client("member-1"));
+        List<TeamEventEnvelope> events = new ArrayList<>();
+        TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
+                runtime, registry, events::add);
+
+        String result = dispatcher.deliver(new TalkToRequest(
+                "member-remote", "remote hello", 0), "member-1", "", null);
+
+        assertTrue(result.contains("跨实例消息已提交路由"));
+        assertEquals(Arrays.asList(
+                        TeamEventType.TALK_TO_ROUTE_REQUEST,
+                        TeamEventType.TALK_TO_SEND,
+                        TeamEventType.MESSAGE_CHUNK),
+                types(events));
+        TeamEventEnvelope route = lastEvent(events, TeamEventType.TALK_TO_ROUTE_REQUEST);
+        assertNotNull(route);
+        assertEquals("member-remote", data(route).get("targetTeamMemberId"));
+        assertEquals("ROUTE_REQUESTED", data(route).get("delivery"));
+        Map<String, Object> card = data(events.get(2));
+        assertEquals("TEAM_TALK_TO", card.get("cardType"));
+        assertEquals("SEND", card.get("direction"));
+        assertEquals("member-remote", card.get("cardTargetTeamMemberId"));
+        assertEquals("ROUTE_REQUESTED", card.get("delivery"));
+        assertTrue(card.get("content").toString().contains("remote hello"));
+        assertTrue(card.get("content").toString().contains("Remote"));
+    }
+
+    @Test
+    public void mixedRemoteDirectDeliveryPublishesReceiveCard() {
+        Fixture fixture = mixedInboundFixture(false);
+
+        TalkToDispatcher.InboundDeliveryResult result =
+                fixture.dispatcher.deliverRemoteInbound(
+                        "message-1", "member-remote", "member-2",
+                        "remote hello", 1);
+
+        assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.DIRECT,
+                result.getStatus());
+        assertNotNull(fixture.target.lastPrompt);
+        assertTrue(fixture.target.lastPrompt.contains("remote hello"));
+        assertEquals(Arrays.asList(
+                        TeamEventType.TALK_TO_RECEIVE,
+                        TeamEventType.MESSAGE_CHUNK),
+                types(fixture.events));
+        Map<String, Object> card = data(fixture.events.get(1));
+        assertEquals("TEAM_TALK_TO", card.get("cardType"));
+        assertEquals("RECEIVE", card.get("direction"));
+        assertEquals("member-remote", card.get("cardTargetTeamMemberId"));
+        assertEquals("DIRECT", card.get("delivery"));
+        assertTrue(card.get("content").toString().contains("Remote"));
+    }
+
+    @Test
+    public void mixedRemoteQueuedDeliveryPublishesReceiveCardWhenDrained() {
+        Fixture fixture = mixedInboundFixture(true);
+
+        TalkToDispatcher.InboundDeliveryResult result =
+                fixture.dispatcher.deliverRemoteInbound(
+                        "message-queued", "member-remote", "member-2",
+                        "queued remote hello", 1);
+
+        assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.QUEUED,
+                result.getStatus());
+        assertEquals(Collections.singletonList(TeamEventType.TALK_TO_QUEUED),
+                types(fixture.events));
+
+        TalkToMessage drained = fixture.dispatcher.pollInbox("member-2");
+
+        assertNotNull(drained);
+        assertEquals("queued remote hello", drained.getContent());
+        assertEquals(Arrays.asList(
+                        TeamEventType.TALK_TO_QUEUED,
+                        TeamEventType.TALK_TO_RECEIVE,
+                        TeamEventType.MESSAGE_CHUNK),
+                types(fixture.events));
+        Map<String, Object> card = data(fixture.events.get(2));
+        assertEquals("TEAM_TALK_TO", card.get("cardType"));
+        assertEquals("RECEIVE", card.get("direction"));
+        assertEquals("member-remote", card.get("cardTargetTeamMemberId"));
+        assertEquals("DELIVERED_FROM_INBOX", card.get("delivery"));
+    }
+
+    @Test
+    public void mixedRouteAdmissionFailureIsExplicitAndRetryable() {
+        TeamMemberDefinition local = member("member-1", 0)
+                .withState(TeamMemberState.READY, "session-1", null);
+        TeamDefinition creating = TeamDefinition.creating(
+                "team-1", "owner-1", "Mixed", "team-acp-instance", "request-1",
+                Collections.singletonList(local), true,
+                Arrays.asList(TeamContactRef.from(local),
+                        new TeamContactRef("member-remote", "team-acp-member-remote",
+                                "Remote", "remote", 1)), 100L);
+        TeamRuntime runtime = new TeamRuntime(creating.transitionWithMembers(
+                TeamState.READY, Collections.singletonList(local), null, 101L));
+        TeamClientRegistry registry = new TeamClientRegistry();
+        registry.register("team-1", "member-1", client("member-1"));
+        AtomicInteger attempts = new AtomicInteger();
+        TeamEventSink rejectingSink = new TeamEventSink() {
+            @Override
+            public void publish(TeamEventEnvelope event) {
+            }
+
+            @Override
+            public boolean tryPublish(TeamEventEnvelope event) {
+                attempts.incrementAndGet();
+                return false;
+            }
+        };
+        TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
+                runtime, registry, rejectingSink);
+
+        String first = dispatcher.deliver(new TalkToRequest(
+                "member-remote", "remote hello", 0), "member-1", "", null);
+        String retry = dispatcher.deliver(new TalkToRequest(
+                "member-remote", "remote hello", 0), "member-1", "", null);
+
+        assertTrue(first.contains("发送失败"));
+        assertTrue(first.contains("消息未提交"));
+        assertFalse(first.contains("已提交路由"));
+        assertTrue(retry.contains("发送失败"));
+        assertEquals(2, attempts.get());
+    }
 
     @Test
     public void routesDirectlyByMemberIdAndPublishesSendReceive() {
@@ -306,6 +444,29 @@ public class TeamTalkToDispatcherTest {
         TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
                 runtime, registry, events::add, clock::get, ttl, dedup);
         return new Fixture(runtime, registry, dispatcher, target, events);
+    }
+
+    private static Fixture mixedInboundFixture(boolean busy) {
+        TeamMemberDefinition target = member("member-2", 0).withState(
+                busy ? TeamMemberState.BUSY : TeamMemberState.READY,
+                "session-2", null);
+        TeamContactRef remote = new TeamContactRef(
+                "member-remote", "team-acp-member-remote",
+                "Remote", "remote", 1);
+        TeamDefinition creating = TeamDefinition.creating(
+                "team-1", "owner-1", "Mixed", "team-acp-instance", "request-1",
+                Collections.singletonList(target), true,
+                Arrays.asList(TeamContactRef.from(target), remote), 100L);
+        TeamRuntime runtime = new TeamRuntime(creating.transitionWithMembers(
+                TeamState.READY, Collections.singletonList(target), null, 101L));
+        TeamClientRegistry registry = new TeamClientRegistry();
+        TestClient targetClient = client("member-2");
+        if (busy) targetClient.setClientState(AbstractAcpClient.State.BUSY);
+        registry.register("team-1", "member-2", targetClient);
+        List<TeamEventEnvelope> events = new ArrayList<>();
+        TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
+                runtime, registry, events::add);
+        return new Fixture(runtime, registry, dispatcher, targetClient, events);
     }
 
     private static void setMemberState(TeamRuntime runtime, String memberId,

@@ -63,6 +63,9 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 .chip{display:inline-flex;align-items:center;padding:4px 12px;background:#e3f2fd;border-radius:16px;font-size:13px;color:#1565c0}
 .chip .material-icons{font-size:16px;margin-left:4px;cursor:pointer;color:#90a4ae}
 .chip .material-icons:hover{color:#d32f2f}
+.chip-input-row{display:flex;align-items:flex-end;gap:8px;margin-bottom:10px}
+.chip-input-row input{flex:1}
+.chip-input-row .btn{flex-shrink:0}
 .section-title{font-size:14px;font-weight:500;color:#1976d2;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid #e3f2fd}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .robot-actions{display:flex;gap:4px}
@@ -150,12 +153,14 @@ body{font-family:'Roboto',sans-serif;background:#f5f5f5;color:#212121;padding-bo
 function currentPort(){return parseInt(location.port)||10528}
 var config={robots:[],chatterIds:[],channels:[],configUi:{enabled:true,port:currentPort()}};
 var channelRuntime={instanceId:'',statuses:{},errors:{}};
+var teamSharingRuntime={instanceId:'',grants:[]};
 var channelBindingTargets={instanceId:'',teams:[]};
 var editIdx=-1;
 var currentDirPath='';
 var dirTargetInputId='dWorkDir';
 var dlgSubAgents=[];
 var dlgContacts=[];
+var dlgTeamSharedOwners=[];
 // 多环境：环境列表、当前选中环境、未保存标记
 var instances=[];
 var curInstance=null;
@@ -236,6 +241,7 @@ if(!config.channels)config.channels=[];
 if(!config.configUi)config.configUi={enabled:true,port:currentPort()};
 }catch(e){showSnackbar('加载失败:'+e.message)}
 await loadChannelStatus();
+await loadTeamSharingStatus();
 await loadChannelBindingTargets();
 clearDirty();
 render();
@@ -243,6 +249,11 @@ render();
 
 async function loadChannelStatus(){
 try{var r=await api('/api/channels/status');if(r.ok)channelRuntime=await r.json()}catch(e){channelRuntime={instanceId:(curInstance&&curInstance.instanceId)||'',statuses:{},errors:{}}}
+}
+
+async function loadTeamSharingStatus(){
+try{var r=await api('/api/team/sharing-status');if(r.ok)teamSharingRuntime=await r.json()}catch(e){teamSharingRuntime={instanceId:(curInstance&&curInstance.instanceId)||'',grants:[]}}
+if(!teamSharingRuntime.grants)teamSharingRuntime.grants=[];
 }
 
 async function loadChannelBindingTargets(){
@@ -275,12 +286,17 @@ var c=document.getElementById('robotList');
 if(!config.robots.length){c.innerHTML='<div class="card"><div class="empty-state"><span class="material-icons">smart_toy</span><p>暂无 Robot，点击右下角添加</p></div></div>';return}
 c.innerHTML=config.robots.map(function(r,i){
 var mem=(r.memory&&(r.memory.readEnabled!==false||r.memory.writeEnabled!==false))?('读'+(r.memory.readEnabled!==false?'✓':'✗')+'/写'+(r.memory.writeEnabled!==false?'✓':'✗')):'关闭';
+var sharing=(teamSharingRuntime.grants||[]).filter(function(g){return g.robotName===r.name});
+var sharingTeams=sharing.reduce(function(n,g){return n+(g.teamCount||0)},0);
+var sharingMembers=sharing.reduce(function(n,g){return n+(g.memberCount||0)},0);
+var sharingCleanup=sharing.some(function(g){return g.cleanupPending});
+var sharingRevoked=sharing.some(function(g){return g.state==='REVOKED_CLEANUP'});
 var disabled=r.enabled===false;
 var cardStyle=disabled?' style="opacity:0.6"':'';
 var badge=disabled?'<span style="margin-left:8px;font-size:12px;color:#9e9e9e;font-weight:400">已禁用</span>':'';
 			var toggleId='tglRobot_'+i;
 			var toggle='<label class="switch" style="margin-left:8px" title="'+(disabled?'点击启用':'点击禁用')+'"><input type="checkbox" id="'+toggleId+'"'+(disabled?'':' checked')+' onchange="toggleRobot('+i+')"><span class="slider"></span></label>';
-return '<div class="card"'+cardStyle+'><div class="card-header"><div style="display:flex;align-items:center;gap:8px">'+toggle+'<h2>'+esc(r.name||'未命名')+badge+'</h2></div><div class="robot-actions">'+'<button class="btn btn-secondary btn-sm" onclick="refreshRobot(\''+esc(r.name)+'\')" title="刷新此Robot"><span class="material-icons">refresh</span></button><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>仅 Team Member:</b> '+(r.onlyTeamMember?'是':'否')+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>自动新会话:</b> '+(r.autoNewSession&&r.autoNewSession.enabled?('开启（'+(r.autoNewSession.checkIntervalMinutes||360)+' / '+(r.autoNewSession.idleMinutes||180)+' 分钟）'):'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div><div><b>HTTP代理:</b> '+(r.proxyEnabled?(hasProxyAddress(r)?esc(r.httpProxy):'<span style="color:#ff9800">未配置地址</span>'):'关闭')+'</div></div></div></div>'
+return '<div class="card"'+cardStyle+'><div class="card-header"><div style="display:flex;align-items:center;gap:8px">'+toggle+'<h2>'+esc(r.name||'未命名')+badge+'</h2></div><div class="robot-actions">'+'<button class="btn btn-secondary btn-sm" onclick="refreshRobot(\''+esc(r.name)+'\')" title="刷新此Robot"><span class="material-icons">refresh</span></button><button class="btn btn-secondary btn-sm" onclick="openRobotDialog('+i+')"><span class="material-icons">edit</span></button><button class="btn btn-danger btn-sm" onclick="deleteRobot('+i+')"><span class="material-icons">delete</span></button></div></div><div class="card-body"><div class="robot-info"><div><b>工作目录:</b> '+esc(r.workDir||'-')+'</div><div><b>Agent后端:</b> '+(r.agentProvider||'KIRO_CLI')+'</div><div><b>记忆:</b> '+mem+'</div><div><b>Ability刷新:</b> '+(r.abilityAutoRefresh!==false?'开启':'关闭')+'</div><div><b>仅子Agent:</b> '+(r.onlySubAgent?'是':'否')+'</div><div><b>仅 Team Member:</b> '+(r.onlyTeamMember?'是':'否')+'</div><div><b>远程 Team 授权:</b> '+((r.teamSharedWithChatterIds&&r.teamSharedWithChatterIds.length)||0)+' 个 owner</div><div><b>被借用状态:</b> '+sharingTeams+' Team / '+sharingMembers+' member'+(sharingRevoked?'（已撤销，待清理）':(sharingCleanup?'（清理中）':''))+'</div><div><b>定时任务:</b> '+(r.scheduleEnabled?'开启':'关闭')+'</div><div><b>自动新会话:</b> '+(r.autoNewSession&&r.autoNewSession.enabled?('开启（'+(r.autoNewSession.checkIntervalMinutes||360)+' / '+(r.autoNewSession.idleMinutes||180)+' 分钟）'):'关闭')+'</div><div><b>子Agent:</b> '+((r.subAgents&&r.subAgents.length)||0)+'个</div><div><b>通讯录:</b> '+((r.contacts&&r.contacts.length)||0)+'个</div><div><b>HTTP代理:</b> '+(r.proxyEnabled?(hasProxyAddress(r)?esc(r.httpProxy):'<span style="color:#ff9800">未配置地址</span>'):'关闭')+'</div></div></div></div>'
 }).join('');
 }
 
@@ -300,7 +316,7 @@ return out;
 
 function renderChannels(){
 var c=document.getElementById('channelList');
-if(!config.channels.length){c.innerHTML='<div style="color:#9e9e9e;font-size:14px">暂无信道。主动发送需配置默认用户 ID 或群聊 chatId。</div>';return}
+if(!config.channels.length){c.innerHTML='<div style="color:#9e9e9e;font-size:14px">暂无信道。信道收到消息后，会提供可选的默认主动推送目标。</div>';return}
 var groups=availableGroups();
 c.innerHTML=config.channels.map(function(ch,i){
 if(!Object.prototype.hasOwnProperty.call(ch,'_runtimeId'))Object.defineProperty(ch,'_runtimeId',{value:ch.id||'',writable:true,enumerable:false});
@@ -319,6 +335,10 @@ var members=selectedTeam&&selectedTeam.members?selectedTeam.members:[];
 var selectedMember=members.filter(function(m){return m.id===ch.binding.teamMemberId})[0];
 var memberOpts='<option value="">选择 Team Member</option>'+members.map(function(m){return '<option value="'+esc(m.id)+'"'+(m.id===ch.binding.teamMemberId?' selected':'')+'>'+esc(m.id+' · '+m.name)+' ['+esc(m.state||'UNKNOWN')+']</option>'}).join('');
 if(ch.binding.teamMemberId&&!selectedMember)memberOpts+='<option value="'+esc(ch.binding.teamMemberId)+'" selected>'+esc(ch.binding.teamMemberId+' · 当前不可用')+'</option>';
+var knownTargets=Array.isArray(ch.knownChatTargets)?ch.knownChatTargets:[];
+var defaultTargetFound=knownTargets.some(function(t){return t&&t.id===ch.defaultChatId});
+var defaultTargetOpts='<option value="">不设置默认目标</option>'+knownTargets.map(function(t){var type=t.chatType==='group'?'群聊':'个人';return '<option value="'+esc(t.id||'')+'"'+(t.id===ch.defaultChatId?' selected':'')+'>['+type+'] '+esc((t.displayName||'未命名')+' · '+(t.id||''))+'</option>'}).join('');
+if(ch.defaultChatId&&!defaultTargetFound)defaultTargetOpts+='<option value="'+esc(ch.defaultChatId)+'" selected>[历史配置] '+esc(ch.defaultChatId)+'</option>';
 var bindFields=bindType==='MAIN'
 ?'<div class="field-group"><label>绑定 MAIN ACP *</label><select onchange="config.channels['+i+'].binding.groupId=this.value;config.channels['+i+'].binding.instanceId=channelRuntime.instanceId;markDirty()">'+opts+'</select></div>'
 :bindType==='TEAM_MEMBER'
@@ -332,7 +352,7 @@ return '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:14px;marg
 +bindFields
 +'<div class="field-group"><label>Bot ID *</label><input value="'+esc(ch.botId||'')+'" oninput="config.channels['+i+'].botId=this.value.trim();markDirty()"></div>'
 +'<div class="field-group"><label>Secret *</label><input type="password" value="'+esc(ch.secret||'')+'" oninput="config.channels['+i+'].secret=this.value;markDirty()" placeholder="保存后自动掩码"></div>'
-+'<div class="field-group"><label>默认用户 ID / 群 chatId</label><input value="'+esc(ch.defaultChatId||'')+'" oninput="config.channels['+i+'].defaultChatId=this.value.trim();markDirty()" placeholder="用于主动 talkTo"></div>'
++'<div class="field-group"><label>默认主动推送目标</label><select onchange="config.channels['+i+'].defaultChatId=this.value;markDirty()">'+defaultTargetOpts+'</select><div style="color:#757575;font-size:12px;margin-top:4px">仅列出曾向当前信道发过消息的会话，最近发消息的排在前面；系统不会自动选择</div></div>'
 +'<div class="field-group"><label>WebSocket URL</label><input value="'+esc(ch.wsUrl||'wss://openws.work.weixin.qq.com')+'" oninput="config.channels['+i+'].wsUrl=this.value.trim();markDirty()"></div>'
 +'</div><div class="toggle-row"><div><div class="toggle-label">接收外来消息</div><div style="color:#757575;font-size:12px">关闭后消息不会进入绑定的 ACP，主动发送不受影响</div></div><label class="switch"><input type="checkbox" '+(ch.inboundEnabled!==false?'checked':'')+' onchange="toggleChannelInbound('+i+',this,event)"><span class="slider"></span></label></div>'
 +'<div class="toggle-row"><div><div class="toggle-label">接收单聊消息</div><div style="color:#757575;font-size:12px">关闭后忽略用户单聊消息，群聊仍可正常使用</div></div><label class="switch"><input type="checkbox" '+(ch.privateChatEnabled!==false?'checked':'')+' onchange="toggleChannelPrivateChat('+i+',this,event)"><span class="slider"></span></label></div>'
@@ -341,7 +361,7 @@ return '<div style="border:1px solid #e0e0e0;border-radius:6px;padding:14px;marg
 }
 
 function addChannel(){
-var ch={id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,privateChatEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',binding:{type:'MAIN',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''}};
+var ch={id:'wecom-'+(config.channels.length+1),type:'WECOM_WS',enabled:true,inboundEnabled:true,privateChatEnabled:true,botId:'',secret:'',wsUrl:'wss://openws.work.weixin.qq.com',defaultChatId:'',knownChatTargets:[],binding:{type:'MAIN',instanceId:channelRuntime.instanceId||((curInstance&&curInstance.instanceId)||''),groupId:'',teamId:'',teamMemberId:''}};
 Object.defineProperty(ch,'_runtimeId',{value:'',writable:true,enumerable:false});config.channels.push(ch);
 markDirty();renderChannels();
 }
@@ -412,11 +432,12 @@ function toggleRobot(i){config.robots[i].enabled=!config.robots[i].enabled;markD
 
 function openRobotDialog(idx){
 editIdx=idx;
-var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,onlyTeamMember:false,scheduleEnabled:false,autoNewSession:{enabled:false,checkIntervalMinutes:360,idleMinutes:180},memory:{readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
+var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,onlyTeamMember:false,teamSharedWithChatterIds:[],scheduleEnabled:false,autoNewSession:{enabled:false,checkIntervalMinutes:360,idleMinutes:180},memory:{readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
 if(!r.memory)r.memory={readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};if(r.memory.enabled!==undefined&&r.memory.readEnabled===undefined){r.memory.readEnabled=r.memory.enabled;r.memory.writeEnabled=r.memory.enabled;delete r.memory.enabled;}
 if(!r.autoNewSession)r.autoNewSession={enabled:false,checkIntervalMinutes:360,idleMinutes:180};
 dlgSubAgents=r.subAgents?r.subAgents.slice():[];
 dlgContacts=r.contacts?r.contacts.slice():[];
+dlgTeamSharedOwners=Array.from(new Set((r.teamSharedWithChatterIds||[]).map(function(v){return String(v).trim()}).filter(Boolean)));
 document.getElementById('dlgTitle').textContent=idx>=0?'编辑 Robot':'添加 Robot';
 var m=r.memory;
 var h='<div class="section-title">基本信息</div>'+
@@ -428,13 +449,14 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-row" id="codexHomeGroup" style="'+(r.agentProvider==='CODEX_ACP'?'':'display:none')+'"><div class="field-group"><label>Codex Home (可选)</label><input type="text" id="dCodexHome" value="'+esc(r.codexHome||'')+'" placeholder="留空使用 CODEX_HOME 或 ~/.codex"></div><button class="btn btn-secondary btn-sm" onclick="openDirPicker(\'dCodexHome\',\'选择 Codex Home\')" style="margin-bottom:16px"><span class="material-icons">folder_open</span></button></div>'+
 '<div class="section-title">代理设置 (可选)</div>'+
 '<div class="toggle-row"><div><div class="toggle-label">启用代理</div></div><label class="switch"><input type="checkbox" id="dProxyEnabled"'+(r.proxyEnabled?' checked':'')+' onchange="toggleProxyPanel()"><span class="slider"></span></label></div>'+
-'<div style="'+(r.proxyEnabled?'':'display:none')+'" id="proxyPanel"><div class="grid-2"><div class="field-group"><label>http_proxy</label><input type="text" id="dHttpProxy" value="'+esc(r.httpProxy||'')+'" placeholder="例: 106.54.193.10:22222"></div><div class="field-group"><label>no_proxy</label><input type="text" id="dNoProxy" value="'+esc(r.noProxy||'')+'" placeholder="例: localhost,127.0.0.1"></div></div></div>'+
+'<div style="'+(r.proxyEnabled?'':'display:none')+'" id="proxyPanel"><div class="grid-2"><div class="field-group"><label>http_proxy</label><input type="text" id="dHttpProxy" value="'+esc(r.httpProxy||'')+'" placeholder="例: 代理服务器IP:22222"></div><div class="field-group"><label>no_proxy</label><input type="text" id="dNoProxy" value="'+esc(r.noProxy||'')+'" placeholder="例: localhost,127.0.0.1"></div></div></div>'+
 '<div class="section-title">功能开关</div>'+
 // 「启用该 Robot」开关已移至卡片列表页，此处不再展示
 
 '<div class="toggle-row"><div><div class="toggle-label">自动刷新 Ability</div></div><label class="switch"><input type="checkbox" id="dAbility"'+(r.abilityAutoRefresh!==false?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">仅作为子 Agent</div></div><label class="switch"><input type="checkbox" id="dOnlySub"'+(r.onlySubAgent?' checked':'')+' onchange="toggleExclusiveRobotRole(\'sub\')"><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">仅作为 Team Member 使用</div><div style="color:#757575;font-size:12px">不启动主 ACP 实例，但可在 Fast Team 中选择</div></div><label class="switch"><input type="checkbox" id="dOnlyTeam"'+(r.onlyTeamMember?' checked':'')+' onchange="toggleExclusiveRobotRole(\'team\')"><span class="slider"></span></label></div>'+
+'<div class="field-group"><label>允许远程 Team owner 借用</label><div class="chip-input-row"><input type="text" id="dTeamSharedOwnerInput" placeholder="输入 Chatter ID 后按回车" onkeydown="handleTeamSharedOwnerKey(event)"><button type="button" class="btn btn-secondary btn-sm" onclick="addTeamSharedOwner()"><span class="material-icons">add</span>添加</button></div><div id="dTeamSharedOwnerList" class="chip-list"></div><div style="color:#757575;font-size:12px;margin-top:8px">仅发布为 remote Team source，不影响普通 ACP 可见范围；删除标签即撤销该 owner 的新请求。</div></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">定时任务</div></div><label class="switch"><input type="checkbox" id="dSchedule"'+(r.scheduleEnabled?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">自动开启新会话</div><div style="color:#757575;font-size:12px">同时应用于该 Robot 的普通 ACP 和 Fast Team 成员实例</div></div><label class="switch"><input type="checkbox" id="dAutoNewSession"'+(r.autoNewSession.enabled?' checked':'')+' onchange="toggleAutoNewSessionPanel()"><span class="slider"></span></label></div>'+
 '<div class="grid-2" id="dAutoNewSessionPanel" style="'+(r.autoNewSession.enabled?'':'display:none')+'"><div class="field-group"><label>检查间隔（分钟）</label><input type="number" id="dAutoNewSessionCheck" min="1" value="'+(r.autoNewSession.checkIntervalMinutes||360)+'"></div><div class="field-group"><label>空闲阈值（分钟）</label><input type="number" id="dAutoNewSessionIdle" min="1" value="'+(r.autoNewSession.idleMinutes||180)+'"></div></div>'+
@@ -456,7 +478,7 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="section-title">子 Agent</div><div id="dSubList"></div><button class="btn btn-secondary btn-sm" onclick="addSubAgent()"><span class="material-icons">add</span>添加子 Agent</button>'+
 '<div class="section-title">通讯录</div><div id="dContactList"></div><button class="btn btn-secondary btn-sm" onclick="addContact()"><span class="material-icons">add</span>添加联系人</button>';
 document.getElementById('dlgBody').innerHTML=h;
-renderSubAgents();renderContacts();
+renderTeamSharedOwners();renderSubAgents();renderContacts();
 document.getElementById('robotDialog').classList.add('show');
 }
 
@@ -486,11 +508,27 @@ return row;
 }
 function addContact(){dlgContacts.push({name:'',remark:'',isRemote:false,chatterId:''});renderContacts()}
 
+function renderTeamSharedOwners(){
+var c=document.getElementById('dTeamSharedOwnerList');
+if(!c)return;
+if(!dlgTeamSharedOwners.length){c.innerHTML='<span style="color:#9e9e9e;font-size:13px">暂未授权远程 Team owner</span>';return}
+c.innerHTML=dlgTeamSharedOwners.map(function(id,i){return '<span class="chip">'+esc(id)+'<span class="material-icons" onclick="removeTeamSharedOwner('+i+')">close</span></span>'}).join('');
+}
+function addTeamSharedOwner(){
+var input=document.getElementById('dTeamSharedOwnerInput');
+if(!input)return;
+input.value.split(/[,，\n]/).map(function(v){return v.trim()}).filter(Boolean).forEach(function(id){if(dlgTeamSharedOwners.indexOf(id)<0)dlgTeamSharedOwners.push(id)});
+input.value='';renderTeamSharedOwners();input.focus();
+}
+function removeTeamSharedOwner(i){dlgTeamSharedOwners.splice(i,1);renderTeamSharedOwners()}
+function handleTeamSharedOwnerKey(event){if(event.key==='Enter'){event.preventDefault();addTeamSharedOwner()}}
+
 function saveRobot(){
 var name=document.getElementById('dName').value.trim();
 var workDir=document.getElementById('dWorkDir').value.trim();
 if(!name){showSnackbar('名称不能为空');return}
 if(!workDir){showSnackbar('工作目录不能为空');return}
+addTeamSharedOwner();
 var orig=editIdx>=0?config.robots[editIdx]:{};
 var robot=Object.assign({},orig,{
 name:name,signature:document.getElementById('dSig').value.trim(),
@@ -506,6 +544,7 @@ enabled:orig.enabled!==false,
 abilityAutoRefresh:document.getElementById('dAbility').checked,
 onlySubAgent:document.getElementById('dOnlySub').checked,
 onlyTeamMember:document.getElementById('dOnlyTeam').checked,
+teamSharedWithChatterIds:dlgTeamSharedOwners.slice(),
 scheduleEnabled:document.getElementById('dSchedule').checked,
 autoNewSession:{enabled:document.getElementById('dAutoNewSession').checked,checkIntervalMinutes:Math.max(1,parseInt(document.getElementById('dAutoNewSessionCheck').value)||360),idleMinutes:Math.max(1,parseInt(document.getElementById('dAutoNewSessionIdle').value)||180)}
 });

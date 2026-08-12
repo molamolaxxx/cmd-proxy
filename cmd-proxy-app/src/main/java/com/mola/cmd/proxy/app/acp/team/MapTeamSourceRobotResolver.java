@@ -44,4 +44,28 @@ public final class MapTeamSourceRobotResolver implements TeamSourceRobotResolver
         }
         return robot;
     }
+
+    @Override
+    public TeamSourceRobotSnapshot snapshot(TeamMemberCreateSpec spec,
+                                            String ownerChatterId,
+                                            boolean mixedPlacement)
+            throws TeamSourceResolutionException {
+        AcpRobotParam robot = resolve(spec);
+        if (TeamSharedSourceIds.isSharedGroup(spec.getSourceGroupId())
+                && !robot.isTeamSharedWith(ownerChatterId)) {
+            throw new TeamSourceResolutionException(
+                    TeamErrorCode.TEAM_GRANT_REVOKED,
+                    "remote Team source is not shared with owner");
+        }
+        return TeamSourceRobotSnapshots.capture(spec.getSourceGroupId(),
+                spec.getSourceRobotId(), robot);
+    }
+
+    @Override
+    public boolean isGrantActive(String sourceGroupId, String ownerChatterId) {
+        if (!TeamSharedSourceIds.isSharedGroup(sourceGroupId)) return true;
+        AcpRobotParam robot = groupRobotMap.get(sourceGroupId);
+        return robot != null && robot.isEnabled() && !robot.isOnlySubAgent()
+                && robot.isTeamSharedWith(ownerChatterId);
+    }
 }

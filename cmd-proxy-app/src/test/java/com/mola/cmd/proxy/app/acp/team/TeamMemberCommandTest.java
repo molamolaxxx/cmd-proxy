@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.team;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.AutoNewSessionConfig;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
@@ -158,6 +159,32 @@ public class TeamMemberCommandTest {
         assertEquals("historic-session", JsonParser.parseString(restored.get("data"))
                 .getAsJsonObject().get("sessionId").getAsString());
         assertEquals(1, fixture.registry.size());
+        fixture.manager.close();
+    }
+
+    @Test
+    public void automaticIdleRotationPublishesMemberSessionChanged() throws Exception {
+        Fixture fixture = fixture();
+        AutoNewSessionConfig config = new AutoNewSessionConfig();
+        config.setEnabled(true);
+        config.setCheckIntervalMinutes(1);
+        config.setIdleMinutes(1);
+        fixture.current.get().getRobotParam().setAutoNewSession(config);
+        fixture.current.get().allowAutomaticRotation = true;
+
+        assertEquals(0, fixture.manager.rotateIdleSessions(1L));
+        assertEquals(1, fixture.manager.rotateIdleSessions(60_001L));
+
+        TeamEventEnvelope changed = fixture.events.stream()
+                .filter(event -> event.getType().name().equals("MEMBER_SESSION_CHANGED"))
+                .findFirst().orElse(null);
+        assertNotNull(changed);
+        assertEquals("member-1", changed.getTeamMemberId());
+        assertEquals("team-acp-member-1", changed.getAcpClientId());
+        Map data = (Map) changed.getData();
+        assertEquals("session-member-1", data.get("oldSessionId"));
+        assertEquals("new-session", data.get("newSessionId"));
+        assertEquals("AUTO_IDLE", data.get("reason"));
         fixture.manager.close();
     }
 
@@ -335,6 +362,7 @@ public class TeamMemberCommandTest {
         private List<Map<String, String>> files;
         private boolean cancelled;
         private PromptOptions promptOptions;
+        private boolean allowAutomaticRotation;
 
         private TestClient(AcpClientIdentity identity, AcpRobotParam robot,
                            String sessionId) {
@@ -361,6 +389,12 @@ public class TeamMemberCommandTest {
         @Override
         public void cancel() {
             this.cancelled = true;
+        }
+
+        @Override
+        public boolean tryReserveIdleForAutoNewSession(long nowMillis, long idleMillis) {
+            return allowAutomaticRotation
+                    && state.compareAndSet(State.READY, State.STARTING);
         }
 
         private void setClientState(AbstractAcpClient.State update) {

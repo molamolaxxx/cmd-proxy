@@ -5,6 +5,7 @@ import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 
 import java.util.List;
+import java.util.Collections;
 
 public class AcpRobotParam {
     private String name = "";
@@ -18,6 +19,8 @@ public class AcpRobotParam {
     private List<SubAgentRef> subAgents;
     private boolean onlySubAgent;
     private boolean onlyTeamMember;
+    /** Owners allowed to borrow this robot as a remote mixed-Team fragment source. */
+    private List<String> teamSharedWithChatterIds;
     private boolean scheduleEnabled = false;
     private AutoNewSessionConfig autoNewSession;
     private List<ContactRef> contacts;
@@ -152,6 +155,24 @@ public class AcpRobotParam {
 
     public void setOnlyTeamMember(boolean onlyTeamMember) {
         this.onlyTeamMember = onlyTeamMember;
+    }
+
+    public List<String> getTeamSharedWithChatterIds() {
+        return teamSharedWithChatterIds == null
+                ? Collections.emptyList() : Collections.unmodifiableList(teamSharedWithChatterIds);
+    }
+
+    public void setTeamSharedWithChatterIds(List<String> teamSharedWithChatterIds) {
+        this.teamSharedWithChatterIds = teamSharedWithChatterIds;
+    }
+
+    public boolean isTeamSharedWith(String ownerChatterId) {
+        if (ownerChatterId == null) return false;
+        String owner = ownerChatterId.trim();
+        for (String allowed : getTeamSharedWithChatterIds()) {
+            if (allowed != null && owner.equals(allowed.trim())) return true;
+        }
+        return false;
     }
 
     public boolean isScheduleEnabled() {

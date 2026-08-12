@@ -17,9 +17,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
-/** Bounded, in-memory, single-use route store and outbound channel gateway. */
+/** Bounded turn-scoped route store and outbound channel gateway. */
 public final class ChannelTalkToGateway implements ExternalTalkToGateway, ExternalTalkToContactProvider {
     private static final String PREFIX = "channel:";
     private static final long DEFAULT_TTL_MS = 24L * 60L * 60L * 1000L;
@@ -81,6 +81,11 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
     }
 
     @Override
+    public void release(String target) {
+        discard(target);
+    }
+
+    @Override
     public boolean supports(String target) {
         return target != null && target.startsWith(PREFIX);
     }
@@ -107,27 +112,68 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         if (!system && entry.ownerKey != null && !entry.ownerKey.equals(senderGroupId)) {
             return failure("当前 ACP 无权使用该回复路由。");
         }
-        if (!entry.claimed.compareAndSet(false, true)) {
-            return failure("回复路由正在发送或已消费，不能重复发送。");
-        }
-        ChannelAdapter adapter = adapters.get(entry.channelId);
-        if (adapter == null) {
-            entry.claimed.set(false);
-            return failure("信道当前不可用。");
-        }
-        ChannelSendResult result;
+        entry.sendLock.lock();
         try {
-            result = adapter.send(entry.route, request.getContent());
+            if (routes.get(target) != entry) return failure("回复上下文已结束。");
+            if (entry.expiresAt <= System.currentTimeMillis()) {
+                routes.remove(target, entry);
+                return failure("回复路由已过期。");
+            }
+            ChannelAdapter adapter = adapters.get(entry.channelId);
+            if (adapter == null) return failure("信道当前不可用。");
+            if (!entry.preciseConsumed) {
+                return deliverFirstReply(entry, adapter, request.getContent());
+            }
+            return deliverFollowUp(entry, adapter, request.getContent());
+        } finally {
+            entry.sendLock.unlock();
+        }
+    }
+
+    private String deliverFirstReply(RouteEntry entry, ChannelAdapter adapter, String content) {
+        ChannelSendResult precise;
+        try {
+            precise = adapter.send(entry.route, content);
         } catch (RuntimeException e) {
-            entry.claimed.set(false);
-            return failure("信道发送异常：" + safeError(e.getMessage()));
+            entry.preciseConsumed = true;
+            return deliverFollowUp(entry, adapter, content);
         }
+        if (precise != null && precise.wasAttempted()) entry.preciseConsumed = true;
+        if (precise != null && precise.isSuccess()) {
+            return "[talkTo 结果]\n已通过精准回复发送到当前会话。";
+        }
+        ChannelSendResult fallback = sendProactive(adapter, conversationAddress(entry.route), content);
+        if (fallback != null && fallback.isSuccess()) {
+            return "[talkTo 结果]\n精准回复不可用，已发送到当前会话。";
+        }
+        String error = fallback == null ? null : fallback.getError();
+        if (error == null && precise != null) error = precise.getError();
+        return failure("信道发送失败：" + safeError(error));
+    }
+
+    private String deliverFollowUp(RouteEntry entry, ChannelAdapter adapter, String content) {
+        ChannelSendResult result = sendProactive(
+                adapter, conversationAddress(entry.route), content);
         if (result != null && result.isSuccess()) {
-            routes.remove(target, entry);
-            return "[talkTo 结果]\n已通过外部信道发送最终回复。";
+            return "[talkTo 结果]\n已发送到当前会话。";
         }
-        entry.claimed.set(false);
-        return failure("信道发送失败：" + safeError(result == null ? null : result.getError()));
+        return failure("信道发送失败："
+                + safeError(result == null ? null : result.getError()));
+    }
+
+    private ChannelSendResult sendProactive(ChannelAdapter adapter, String address,
+                                             String content) {
+        if (trim(address).isEmpty()) return ChannelSendResult.notAttempted("reply address missing");
+        try {
+            return adapter.sendProactive(address, content);
+        } catch (RuntimeException e) {
+            return ChannelSendResult.failure(safeError(e.getMessage()));
+        }
+    }
+
+    private static String conversationAddress(ChannelReplyRoute route) {
+        return "group".equals(route.getChatType())
+                ? trim(route.getChatId()) : trim(route.getUserId());
     }
 
     private String deliverProactive(TalkToRequest request, String senderGroupId) {
@@ -164,7 +210,7 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
                     || !groupId.equals(bindingOwnerKey(config.getBinding()))
                     || trim(config.getDefaultChatId()).isEmpty()) continue;
             result.add(new ExternalTalkToContact(
-                    PREFIX + config.getId(), config.getId(), "外部信道"));
+                    PREFIX + config.getId(), config.getId(), "企业微信默认主动推送目标"));
         }
         result.sort(Comparator.comparing(ExternalTalkToContact::getTarget));
         return Collections.unmodifiableList(result);
@@ -213,7 +259,8 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         private final long createdAt;
         private final long expiresAt;
         private final String ownerKey;
-        private final AtomicBoolean claimed = new AtomicBoolean(false);
+        private final ReentrantLock sendLock = new ReentrantLock(true);
+        private boolean preciseConsumed;
 
         private RouteEntry(String channelId, ChannelReplyRoute route,
                            long createdAt, long expiresAt, String ownerKey) {

@@ -20,10 +20,13 @@ public final class TeamTransportDescriptor {
     private final List<String> commands;
     private final TeamLimits limits;
     private final List<TeamMemberSourceDescriptor> teamMemberSources;
+    private final List<RemoteTeamMemberSourceDescriptor> remoteTeamMemberSources;
+    private final TeamTransportCapabilities capabilities;
 
     private TeamTransportDescriptor(String cmdProxyInstanceId, String transportGroup,
                                     boolean businessCommandsReady,
-                                    List<TeamMemberSourceDescriptor> teamMemberSources) {
+                                    List<TeamMemberSourceDescriptor> teamMemberSources,
+                                    List<RemoteTeamMemberSourceDescriptor> remoteTeamMemberSources) {
         this.schemaVersion = TeamDefinition.SCHEMA_VERSION;
         this.cmdProxyInstanceId = cmdProxyInstanceId;
         this.transportGroup = transportGroup;
@@ -36,6 +39,10 @@ public final class TeamTransportDescriptor {
                 teamMemberSources == null
                         ? Collections.emptyList()
                         : new java.util.ArrayList<>(teamMemberSources));
+        this.remoteTeamMemberSources = Collections.unmodifiableList(
+                remoteTeamMemberSources == null ? Collections.emptyList()
+                        : new java.util.ArrayList<>(remoteTeamMemberSources));
+        this.capabilities = new TeamTransportCapabilities(true, true);
         this.commands = businessCommandsReady
                 ? Collections.unmodifiableList(Arrays.asList(
                         TeamTransportProtocol.DESCRIBE_COMMAND,
@@ -50,7 +57,8 @@ public final class TeamTransportDescriptor {
                         TeamTransportProtocol.RESTORE_SESSION_COMMAND,
                         TeamTransportProtocol.GET_STATUS_COMMAND,
                         TeamTransportProtocol.GET_CONTEXT_USAGE_COMMAND,
-                        TeamTransportProtocol.MEMORY_DREAM_COMMAND))
+                        TeamTransportProtocol.MEMORY_DREAM_COMMAND,
+                        TeamTransportProtocol.TALK_TO_DELIVER_COMMAND))
                 : Collections.singletonList(TeamTransportProtocol.DESCRIBE_COMMAND);
     }
 
@@ -63,7 +71,7 @@ public final class TeamTransportDescriptor {
         String normalized = requireSafeInstanceId(instanceId);
         return new TeamTransportDescriptor(
                 normalized, TeamTransportProtocol.TRANSPORT_PREFIX + normalized,
-                false, teamMemberSources);
+                false, teamMemberSources, Collections.emptyList());
     }
 
     public static TeamTransportDescriptor readyForBusiness(String instanceId) {
@@ -72,10 +80,25 @@ public final class TeamTransportDescriptor {
 
     public static TeamTransportDescriptor readyForBusiness(
             String instanceId, List<TeamMemberSourceDescriptor> teamMemberSources) {
+        return readyForBusiness(instanceId, teamMemberSources, Collections.emptyList());
+    }
+
+    public static TeamTransportDescriptor forInstance(String instanceId,
+            List<TeamMemberSourceDescriptor> teamMemberSources,
+            List<RemoteTeamMemberSourceDescriptor> remoteTeamMemberSources) {
+        String normalized = requireSafeInstanceId(instanceId);
+        return new TeamTransportDescriptor(normalized,
+                TeamTransportProtocol.TRANSPORT_PREFIX + normalized, false,
+                teamMemberSources, remoteTeamMemberSources);
+    }
+
+    public static TeamTransportDescriptor readyForBusiness(
+            String instanceId, List<TeamMemberSourceDescriptor> teamMemberSources,
+            List<RemoteTeamMemberSourceDescriptor> remoteTeamMemberSources) {
         String normalized = requireSafeInstanceId(instanceId);
         return new TeamTransportDescriptor(
                 normalized, TeamTransportProtocol.TRANSPORT_PREFIX + normalized,
-                true, teamMemberSources);
+                true, teamMemberSources, remoteTeamMemberSources);
     }
 
     public String getSchemaVersion() {
@@ -117,6 +140,12 @@ public final class TeamTransportDescriptor {
     public List<TeamMemberSourceDescriptor> getTeamMemberSources() {
         return teamMemberSources;
     }
+
+    public List<RemoteTeamMemberSourceDescriptor> getRemoteTeamMemberSources() {
+        return remoteTeamMemberSources;
+    }
+
+    public TeamTransportCapabilities getCapabilities() { return capabilities; }
 
     private static String requireSafeInstanceId(String instanceId) {
         if (instanceId == null || !instanceId.matches("[a-zA-Z0-9._-]+")

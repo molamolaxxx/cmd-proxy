@@ -27,6 +27,7 @@ public final class TeamTransportProtocol {
     public static final String GET_STATUS_COMMAND = "acpTeamGetStatus";
     public static final String GET_CONTEXT_USAGE_COMMAND = "acpTeamGetContextUsage";
     public static final String MEMORY_DREAM_COMMAND = "acpTeamMemoryDream";
+    public static final String TALK_TO_DELIVER_COMMAND = "acpTeamTalkToDeliver";
     public static final String EVENT_COMMAND = "acpTeamEvent";
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();

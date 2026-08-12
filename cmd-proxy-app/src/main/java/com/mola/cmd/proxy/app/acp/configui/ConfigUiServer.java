@@ -4,8 +4,10 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
+import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
 import com.mola.cmd.proxy.app.utils.CmdProxyHome;
+import com.mola.cmd.proxy.client.conf.CmdProxyConf;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
@@ -44,7 +46,6 @@ public class ConfigUiServer {
     private static final String CONFIG_PATH =
             com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("acpConfig.json");
 
-    private static final String UPDATE_JAR_URL = "https://106.54.193.10/download/cmd-proxy.jar";
     private static final String SECRET_MASK = "********";
 
     private final int port;
@@ -167,6 +168,8 @@ public class ConfigUiServer {
                 proxied(this::handleChannelPrivateChat));
         server.createContext("/api/channels/binding-targets",
                 proxied(this::handleChannelBindingTargets));
+        server.createContext("/api/team/sharing-status",
+                proxied(this::handleTeamSharingStatus));
         server.createContext("/api/refresh", proxied(this::handleRefresh));
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
         server.createContext("/api/refresh-channel", proxied(this::handleRefreshChannel));
@@ -382,12 +385,9 @@ public class ConfigUiServer {
                 }
             }
         }
-        preserveChannelSecrets(json);
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。
         json.remove("globalProxyEnabled");
-        String formatted = JSON.toJSONString(json, SerializerFeature.PrettyFormat, SerializerFeature.SortField);
-        Path path = Paths.get(CONFIG_PATH);
-        Files.write(path, formatted.getBytes(StandardCharsets.UTF_8));
+        ChannelConfigFileStore.saveUiConfig(json, SECRET_MASK);
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
     }
 
@@ -400,6 +400,17 @@ public class ConfigUiServer {
         result.put("instanceId", CmdProxyHome.instanceId());
         result.put("statuses", channelStatusSupplier.get());
         result.put("errors", channelErrorSupplier.get());
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleTeamSharingStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        JSONObject result = new JSONObject();
+        result.put("instanceId", CmdProxyHome.instanceId());
+        result.put("grants", TeamSharingStatusRegistry.snapshot());
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
@@ -500,39 +511,6 @@ public class ConfigUiServer {
     }
 
     /** Mask or blank means keep the prior secret for the same channel id. */
-    private void preserveChannelSecrets(JSONObject submitted) throws IOException {
-        com.alibaba.fastjson.JSONArray channels = submitted.getJSONArray("channels");
-        if (channels == null) return;
-        JSONObject previous = readConfigObject();
-        java.util.Map<String, String> previousSecrets = new java.util.HashMap<>();
-        com.alibaba.fastjson.JSONArray oldChannels = previous.getJSONArray("channels");
-        if (oldChannels != null) {
-            for (int i = 0; i < oldChannels.size(); i++) {
-                JSONObject old = oldChannels.getJSONObject(i);
-                if (old != null && !isBlank(old.getString("id"))) {
-                    previousSecrets.put(old.getString("id"), old.getString("secret"));
-                }
-            }
-        }
-        for (int i = 0; i < channels.size(); i++) {
-            JSONObject channel = channels.getJSONObject(i);
-            if (channel == null) continue;
-            String secret = channel.getString("secret");
-            if (isBlank(secret) || SECRET_MASK.equals(secret)) {
-                String oldSecret = previousSecrets.get(channel.getString("id"));
-                if (!isBlank(oldSecret)) channel.put("secret", oldSecret);
-                else channel.remove("secret");
-            }
-        }
-    }
-
-    private JSONObject readConfigObject() throws IOException {
-        Path path = Paths.get(CONFIG_PATH);
-        if (!Files.exists(path)) return new JSONObject();
-        String raw = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
-        return isBlank(raw) ? new JSONObject() : JSON.parseObject(raw);
-    }
-
     private static boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
     }
@@ -720,7 +698,9 @@ public class ConfigUiServer {
                 return;
             }
 
-            logger.info("开始下载更新: {} -> {}", UPDATE_JAR_URL, jarPath);
+            String updateJarUrl = "https://" + CmdProxyConf.INSTANCE.getRemoteHost()
+                    + "/download/cmd-proxy.jar";
+            logger.info("开始下载更新: {} -> {}", updateJarUrl, jarPath);
 
             // 创建忽略 SSL 的连接
             SSLContext sslContext = SSLContext.getInstance("TLS");
@@ -730,7 +710,7 @@ public class ConfigUiServer {
                 public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
             }}, null);
 
-            URL url = new URL(UPDATE_JAR_URL);
+            URL url = new URL(updateJarUrl);
             HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
             conn.setSSLSocketFactory(sslContext.getSocketFactory());
             conn.setHostnameVerifier((hostname, session) -> true);

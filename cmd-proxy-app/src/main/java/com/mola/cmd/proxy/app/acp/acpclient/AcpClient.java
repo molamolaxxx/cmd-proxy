@@ -12,6 +12,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.listener.LifecycleGuardedAcpResponse
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher;
@@ -31,6 +32,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,6 +50,15 @@ import java.util.concurrent.atomic.AtomicReference;
 public class AcpClient extends AbstractAcpClient {
 
     private static final Logger logger = LoggerFactory.getLogger(AcpClient.class);
+    private static final String CHANNEL_REPLY_TARGET = "回复";
+    private static final long CHANNEL_REPLY_CONTINUATION_TTL_MS = 10L * 60L * 1000L;
+
+    /**
+     * Pending channel origins keyed by the internal contact expected to answer this client.
+     * The route stays local to the owning client and is never exposed to the contacted Agent.
+     */
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, PendingChannelReply>>
+            pendingChannelReplies = new ConcurrentHashMap<>();
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "acp-send-worker");
@@ -363,6 +374,10 @@ public class AcpClient extends AbstractAcpClient {
         sendInternal(userInput, null, localFiles, PromptOptions.defaults());
     }
 
+    public void sendLocalFiles(String userInput, List<String> localFiles, PromptOptions options) {
+        sendInternal(userInput, null, localFiles, options);
+    }
+
     private void sendInternal(String userInput, List<Map<String, String>> files,
                               Collection<String> localFiles, PromptOptions options) {
         if (userInput == null || userInput.trim().isEmpty()) {
@@ -370,8 +385,10 @@ public class AcpClient extends AbstractAcpClient {
             return;
         }
 
+        final PromptOptions effectiveOptions = options == null ? PromptOptions.defaults() : options;
         long generation = currentLifecycleGeneration();
         if (!compareAndSetStateIfActive(generation, State.READY, State.BUSY)) {
+            releaseChannelTurn(effectiveOptions);
             globalListener.onError(new IllegalStateException(
                     "当前 client 状态不允许发送消息: " + state.get()));
             return;
@@ -395,19 +412,21 @@ public class AcpClient extends AbstractAcpClient {
             executor.submit(() -> {
                 try {
                     sendPrompt(userInput, historyManager.getFileAbsolutePaths(), newImagePaths,
-                            guardedListener, options);
+                            guardedListener, effectiveOptions);
                     if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
                         // turn 结束且 generation 仍有效时才检查 inbox
                         checkAndDeliverInbox();
                     }
                 } catch (Exception e) {
                     logger.error("ACP send 失败", e);
+                    releaseChannelTurn(effectiveOptions);
                     if (setStateIfActive(generation, State.ERROR)) {
                         guardedListener.onError(e);
                     }
                 }
             });
         } catch (RejectedExecutionException e) {
+            releaseChannelTurn(effectiveOptions);
             if (setStateIfActive(generation, State.ERROR)) {
                 guardedListener.onError(e);
             }
@@ -498,6 +517,7 @@ public class AcpClient extends AbstractAcpClient {
                 subAgentDispatcher.close();
             }
 
+            releaseAllPendingChannelReplies();
             executor.shutdownNow();
         } finally {
             closeAfterBegin();
@@ -656,6 +676,7 @@ public class AcpClient extends AbstractAcpClient {
         while (true) {
             String line = reader.readLine();
             if (line == null) {
+                releaseChannelTurn(options);
                 IOException writeErr = stdinWriteError.get();
                 if (writeErr != null) {
                     listener.onError(new IOException("ACP stdin 写入失败: " + writeErr.getMessage(), writeErr));
@@ -701,8 +722,17 @@ public class AcpClient extends AbstractAcpClient {
                 // 如果 bufferFilter 已捕获指令 JSON，直接用捕获的 JSON 分发执行
                 List<String> capturedJsonList = bufferFilter.getCapturedJsonList();
                 if (!capturedJsonList.isEmpty()) {
-                    handleCapturedActions(capturedJsonList, fullResponse.toString(), listener);
+                    handleCapturedActions(capturedJsonList, fullResponse.toString(), listener,
+                            options);
                     return;
+                }
+
+                if (options.hasChannelTurnContext()) {
+                    if (!options.hasChannelReplyAttempt()
+                            && !hasPendingChannelReply(options.getChannelTurnContext())
+                            && deliverAutomaticChannelReply(
+                                    fullResponse.toString(), listener, options)) return;
+                    releaseChannelTurn(options);
                 }
 
                 listener.onComplete(fullResponse.toString());
@@ -924,7 +954,8 @@ public class AcpClient extends AbstractAcpClient {
      *
      * @return true 如果检测到并处理了派发指令
      */
-    private boolean handleSubAgentDispatch(String fullResponse, AcpResponseListener listener) {
+    private boolean handleSubAgentDispatch(String fullResponse, AcpResponseListener listener,
+                                           PromptOptions options) {
         if (subAgentDispatcher == null) return false;
 
         List<SubAgentTask> tasks = subAgentDispatcher.detectDispatch(fullResponse);
@@ -940,13 +971,14 @@ public class AcpClient extends AbstractAcpClient {
 
             listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
                     "正在汇总子 Agent 结果...");
-            sendPrompt(resultContext, null, listener);
+            sendPrompt(resultContext, null, Collections.emptySet(), listener, options);
             return true;
 
         } catch (Exception e) {
             logger.error("子 Agent 派发处理失败", e);
             listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
                     "子 Agent 派发失败: " + e.getMessage());
+            releaseChannelTurn(options);
             listener.onComplete(fullResponse);
             return true;
         }
@@ -959,7 +991,8 @@ public class AcpClient extends AbstractAcpClient {
      *
      * @return true 如果检测到并处理了定时任务指令
      */
-    private boolean handleScheduleAction(String fullResponse, AcpResponseListener listener) {
+    private boolean handleScheduleAction(String fullResponse, AcpResponseListener listener,
+                                         PromptOptions options) {
         if (scheduleTaskManager == null) return false;
 
         try {
@@ -975,15 +1008,17 @@ public class AcpClient extends AbstractAcpClient {
             listener.onScheduleEvent(eventType, resultText, isCreate);
 
             logger.info("定时任务指令处理完成");
-            sendPrompt(resultText, null, listener);
+            sendPrompt(resultText, null, Collections.emptySet(), listener, options);
             return true;
 
         } catch (Exception e) {
             logger.error("定时任务指令处理失败", e);
             try {
-                sendPrompt("[定时任务操作结果]\n操作失败: " + e.getMessage(), null, listener);
+                sendPrompt("[定时任务操作结果]\n操作失败: " + e.getMessage(), null,
+                        Collections.emptySet(), listener, options);
             } catch (IOException ioe) {
                 logger.error("发送错误结果失败", ioe);
+                releaseChannelTurn(options);
                 listener.onComplete(fullResponse);
             }
             return true;
@@ -1044,19 +1079,20 @@ public class AcpClient extends AbstractAcpClient {
      * - 多个 schedule_task/manage_schedule：逐个处理
      * - 混合类型：按类型分组，各自走各自的流程
      */
-    private void handleCapturedActions(List<String> capturedJsonList, String fullResponse, AcpResponseListener listener) {
+    private void handleCapturedActions(List<String> capturedJsonList, String fullResponse,
+                                       AcpResponseListener listener, PromptOptions options) {
         List<String> talkToJsons = new ArrayList<>();
         List<String> dispatchJsons = new ArrayList<>();
         List<String> scheduleJsons = new ArrayList<>();
         List<String> unknownJsons = new ArrayList<>();
 
         for (String json : capturedJsonList) {
-            if (json.contains("\"action\":\"talk_to\"")) {
+            String action = capturedAction(json);
+            if ("talk_to".equals(action)) {
                 talkToJsons.add(json);
-            } else if (json.contains("\"action\":\"dispatch_subagent\"")) {
+            } else if ("dispatch_subagent".equals(action)) {
                 dispatchJsons.add(json);
-            } else if (json.contains("\"action\":\"schedule_task\"")
-                    || json.contains("\"action\":\"manage_schedule\"")) {
+            } else if ("schedule_task".equals(action) || "manage_schedule".equals(action)) {
                 scheduleJsons.add(json);
             } else {
                 unknownJsons.add(json);
@@ -1067,17 +1103,17 @@ public class AcpClient extends AbstractAcpClient {
 
         // 处理 dispatch_subagent（多个合并为一次派发）
         if (!dispatchJsons.isEmpty()) {
-            anyHandled |= handleSubAgentDispatch(fullResponse, listener);
+            anyHandled |= handleSubAgentDispatch(fullResponse, listener, options);
         }
 
         // 处理 schedule_task / manage_schedule
         if (!scheduleJsons.isEmpty()) {
-            anyHandled |= handleScheduleAction(fullResponse, listener);
+            anyHandled |= handleScheduleAction(fullResponse, listener, options);
         }
 
         // 处理 talk_to（批量 deliver，合并结果）
         if (!talkToJsons.isEmpty()) {
-            anyHandled |= handleTalkToBatch(talkToJsons, fullResponse, listener);
+            anyHandled |= handleTalkToBatch(talkToJsons, fullResponse, listener, options);
         }
 
         for (String json : unknownJsons) {
@@ -1086,6 +1122,7 @@ public class AcpClient extends AbstractAcpClient {
 
         if (!anyHandled) {
             logger.warn("所有 action 处理失败，回退到正常 complete, count={}", capturedJsonList.size());
+            releaseChannelTurn(options);
             listener.onComplete(fullResponse);
         }
     }
@@ -1094,16 +1131,17 @@ public class AcpClient extends AbstractAcpClient {
      * 根据捕获的 JSON 中的 action 类型分发执行对应的业务逻辑。
      * 在 turn 结束后调用，替代原来的 if-return 重解析链。
      */
-    private void handleCapturedAction(String capturedJson, String fullResponse, AcpResponseListener listener) {
+    private void handleCapturedAction(String capturedJson, String fullResponse,
+                                      AcpResponseListener listener, PromptOptions options) {
         boolean handled = false;
+        String action = capturedAction(capturedJson);
         // 用 "action" 字段的精确值做路由，避免 content 内容中的关键词串台
-        if (capturedJson.contains("\"action\":\"dispatch_subagent\"")) {
-            handled = handleSubAgentDispatch(fullResponse, listener);
-        } else if (capturedJson.contains("\"action\":\"schedule_task\"")
-                || capturedJson.contains("\"action\":\"manage_schedule\"")) {
-            handled = handleScheduleAction(fullResponse, listener);
-        } else if (capturedJson.contains("\"action\":\"talk_to\"")) {
-            handled = handleTalkToDirect(capturedJson, fullResponse, listener);
+        if ("dispatch_subagent".equals(action)) {
+            handled = handleSubAgentDispatch(fullResponse, listener, options);
+        } else if ("schedule_task".equals(action) || "manage_schedule".equals(action)) {
+            handled = handleScheduleAction(fullResponse, listener, options);
+        } else if ("talk_to".equals(action)) {
+            handled = handleTalkToDirect(capturedJson, fullResponse, listener, options);
         } else {
             logger.warn("捕获了未知 action 的 JSON: {}", capturedJson);
         }
@@ -1111,14 +1149,26 @@ public class AcpClient extends AbstractAcpClient {
         if (!handled) {
             logger.warn("action 处理失败或未识别，回退到正常 complete, action={}",
                     capturedJson.length() > 100 ? capturedJson.substring(0, 100) : capturedJson);
+            releaseChannelTurn(options);
             listener.onComplete(fullResponse);
+        }
+    }
+
+    private static String capturedAction(String json) {
+        try {
+            JsonObject object = JsonParser.parseString(json).getAsJsonObject();
+            return object.has("action") && !object.get("action").isJsonNull()
+                    ? object.get("action").getAsString() : "";
+        } catch (RuntimeException e) {
+            return "";
         }
     }
 
     /**
      * 直接使用已捕获的 JSON 处理 talk_to，避免从 fullResponse 中重新解析。
      */
-    private boolean handleTalkToDirect(String capturedJson, String fullResponse, AcpResponseListener listener) {
+    private boolean handleTalkToDirect(String capturedJson, String fullResponse,
+                                       AcpResponseListener listener, PromptOptions options) {
         if (talkToDispatcher == null) {
             logger.warn("talkToDispatcher 为 null，无法处理 talk_to");
             return false;
@@ -1128,6 +1178,18 @@ public class AcpClient extends AbstractAcpClient {
         if (request == null) {
             logger.warn("capturedJson 解析 talk_to 失败, json={}", capturedJson);
             return false;
+        }
+        String displayTarget = request.getTarget();
+        request = resolveChannelReplyTarget(request, options);
+        if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
+            try {
+                sendPrompt(unresolvedChannelReplyResult(), null, Collections.emptySet(),
+                        listener, options);
+            } catch (IOException e) {
+                logger.error("发送缺失信道续接结果失败", e);
+                releaseChannelTurn(options);
+            }
+            return true;
         }
 
         String senderName = talkToRoutingName();
@@ -1139,17 +1201,20 @@ public class AcpClient extends AbstractAcpClient {
                     robotParam != null ? robotParam.getContacts() : null;
             String resultText = talkToDispatcher.deliver(
                     request, senderName, senderChatterId, groupId, contacts);
+            recordPendingChannelReply(request, options, resultText);
             if (!talkToDispatcher.managesTalkToEvents()) {
-                listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+                listener.onTalkToEvent("TALK_TO_SEND", displayTarget, request.getContent());
             }
-            sendPrompt(resultText, null, listener);
+            sendPrompt(resultText, null, Collections.emptySet(), listener, options);
             return true;
         } catch (Exception e) {
             logger.error("talkTo 处理失败", e);
             try {
-                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null, listener);
+                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null,
+                        Collections.emptySet(), listener, options);
             } catch (IOException ioe) {
                 logger.error("发送 talkTo 错误结果失败", ioe);
+                releaseChannelTurn(options);
             }
             return true; // 已处理（虽然失败），不 fallback
         }
@@ -1158,7 +1223,8 @@ public class AcpClient extends AbstractAcpClient {
     /**
      * 批量处理多个 talk_to 指令：逐个 deliver，合并结果后一次 sendPrompt。
      */
-    private boolean handleTalkToBatch(List<String> talkToJsons, String fullResponse, AcpResponseListener listener) {
+    private boolean handleTalkToBatch(List<String> talkToJsons, String fullResponse,
+                                      AcpResponseListener listener, PromptOptions options) {
         if (talkToDispatcher == null) {
             logger.warn("talkToDispatcher 为 null，无法处理 talk_to batch");
             return false;
@@ -1181,13 +1247,21 @@ public class AcpClient extends AbstractAcpClient {
                 failCount++;
                 continue;
             }
+            String displayTarget = request.getTarget();
+            request = resolveChannelReplyTarget(request, options);
+            if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
+                combinedResult.append(unresolvedChannelReplyResult()).append("\n");
+                failCount++;
+                continue;
+            }
 
             logger.info("批量 talkTo 指令: {} → {}", senderName, request.getTarget());
             try {
                 String resultText = talkToDispatcher.deliver(
                         request, senderName, senderChatterId, groupId, contacts);
+                recordPendingChannelReply(request, options, resultText);
                 if (!talkToDispatcher.managesTalkToEvents()) {
-                    listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+                    listener.onTalkToEvent("TALK_TO_SEND", displayTarget, request.getContent());
                 }
                 combinedResult.append(resultText).append("\n");
                 successCount++;
@@ -1202,11 +1276,71 @@ public class AcpClient extends AbstractAcpClient {
         logger.info("批量 talk_to 完成: success={}, fail={}, total={}", successCount, failCount, talkToJsons.size());
 
         try {
-            sendPrompt(combinedResult.toString().trim(), null, listener);
+            sendPrompt(combinedResult.toString().trim(), null, Collections.emptySet(), listener,
+                    options);
         } catch (IOException e) {
             logger.error("发送批量 talkTo 合并结果失败", e);
+            releaseChannelTurn(options);
         }
         return true;
+    }
+
+    TalkToRequest resolveChannelReplyTarget(TalkToRequest request,
+                                            PromptOptions options) {
+        ChannelTurnContext context = options == null ? null : options.getChannelTurnContext();
+        if (context == null || request == null || request.getTarget() == null) {
+            return request;
+        }
+        String target = request.getTarget();
+        if (!CHANNEL_REPLY_TARGET.equals(target) && !target.startsWith("channel:")) {
+            return request;
+        }
+        options.markChannelReplyAttempt();
+        return new TalkToRequest(context.getReplyTarget(), request.getContent(),
+                request.getDepth());
+    }
+
+    private static String unresolvedChannelReplyResult() {
+        return "[talkTo 结果]\n发送失败：当前 turn 没有可唯一恢复的原始信道会话，"
+                + "已拒绝按最近对象或 defaultChatId 猜测发送。";
+    }
+
+    private boolean deliverAutomaticChannelReply(String content, AcpResponseListener listener,
+                                                 PromptOptions options) {
+        ChannelTurnContext context = options == null ? null : options.getChannelTurnContext();
+        if (context == null || talkToDispatcher == null || content == null
+                || content.trim().isEmpty()) {
+            return false;
+        }
+        TalkToRequest request = new TalkToRequest(context.getReplyTarget(), content, 0);
+        String senderName = talkToRoutingName();
+        String resultText = talkToDispatcher.deliver(request, senderName, extractChatterId(),
+                groupId, robotParam != null ? robotParam.getContacts() : null);
+        if (!talkToDispatcher.managesTalkToEvents()) {
+            listener.onTalkToEvent("TALK_TO_SEND", "channel:" + context.getChannelId(), content);
+        }
+        logger.info("automatic channel origin reply completed: turnId={}, channelId={}",
+                context.getTurnId(), context.getChannelId());
+        releaseChannelTurn(options);
+        listener.onComplete(resultText);
+        return true;
+    }
+
+    void releaseChannelTurn(PromptOptions options) {
+        if (options == null || !options.hasChannelTurnContext()
+                || !options.closeChannelTurnOnce()) return;
+        ChannelTurnContext context = options.getChannelTurnContext();
+        cleanupExpiredPendingChannelReplies();
+        if (hasPendingChannelReply(context)) {
+            logger.info("channel turn suspended for pending TalkTo return: turnId={}, channelId={}",
+                    context.getTurnId(), context.getChannelId());
+            return;
+        }
+        if (talkToDispatcher != null) {
+            talkToDispatcher.releaseExternalTarget(context.getReplyTarget());
+        }
+        logger.info("channel turn released: turnId={}, channelId={}, replyAttempts={}",
+                context.getTurnId(), context.getChannelId(), options.getChannelReplyAttempts());
     }
 
     /**
@@ -1224,7 +1358,147 @@ public class AcpClient extends AbstractAcpClient {
             // 先推送来信卡片到前端
             talkToDispatcher.pushIncomingMessageCard(this, pending);
             // 再发送消息，会再次进入 BUSY 状态
-            sendLocalFiles(pending.buildPrompt(), pending.getLocalAttachments());
+            TalkToDispatcher.sendInboundMessage(this, pending);
+        }
+    }
+
+    /**
+     * Records only successfully admitted internal TalkTo deliveries originating from a channel
+     * turn. Stable/precise channel targets are outbound sends, not delegations.
+     */
+    void recordPendingChannelReply(TalkToRequest request, PromptOptions options,
+                                   String deliveryResult) {
+        ChannelTurnContext context = options == null ? null : options.getChannelTurnContext();
+        if (context == null || request == null || request.getTarget() == null
+                || request.getTarget().startsWith("channel:")
+                || deliveryResult == null || deliveryResult.contains("发送失败")) {
+            return;
+        }
+        cleanupExpiredPendingChannelReplies();
+        String responder = request.getTarget().trim();
+        if (responder.isEmpty()) return;
+        long expiresAt = System.currentTimeMillis() + CHANNEL_REPLY_CONTINUATION_TTL_MS;
+        PendingChannelReply pending = new PendingChannelReply(
+                sessionId, responder, context, expiresAt);
+        pendingChannelReplies.computeIfAbsent(responder, ignored -> new ConcurrentHashMap<>())
+                .put(context.getTurnId(), pending);
+        logger.info("channel TalkTo continuation registered: turnId={}, responder={}, expiresAt={}",
+                context.getTurnId(), responder, expiresAt);
+    }
+
+    /** Returns channel options only when the verified sender maps to one unique live origin. */
+    public PromptOptions promptOptionsForInboundTalkTo(TalkToMessage message) {
+        if (message instanceof com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage) {
+            return PromptOptions.forChannelReply(
+                    ((com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage) message)
+                            .getTurnContext());
+        }
+        cleanupExpiredPendingChannelReplies();
+        if (message == null || message.getSender() == null) return PromptOptions.defaults();
+        String responder = message.getSender().trim();
+        LinkedHashSet<String> responderKeys = new LinkedHashSet<>();
+        responderKeys.add(responder);
+        int colon = responder.indexOf(':');
+        if (colon >= 0 && colon + 1 < responder.length()) {
+            responderKeys.add(responder.substring(colon + 1).trim());
+        }
+
+        Map<String, PendingChannelReply> liveByTurn = new LinkedHashMap<>();
+        long now = System.currentTimeMillis();
+        for (String responderKey : responderKeys) {
+            ConcurrentHashMap<String, PendingChannelReply> candidates =
+                    pendingChannelReplies.get(responderKey);
+            if (candidates == null) continue;
+            for (PendingChannelReply candidate : candidates.values()) {
+                if (candidate.expiresAt > now && Objects.equals(sessionId, candidate.sessionId)) {
+                    liveByTurn.put(candidate.context.getTurnId(), candidate);
+                }
+            }
+        }
+        if (liveByTurn.isEmpty()) return PromptOptions.defaults();
+        if (liveByTurn.size() != 1) {
+            logger.warn("channel TalkTo continuation is ambiguous: responder={}, candidates={}",
+                    responder, liveByTurn.size());
+            return PromptOptions.defaults();
+        }
+
+        PendingChannelReply resolved = liveByTurn.values().iterator().next();
+        ConcurrentHashMap<String, PendingChannelReply> candidates =
+                pendingChannelReplies.get(resolved.responderKey);
+        if (candidates == null) return PromptOptions.defaults();
+        if (!candidates.remove(resolved.context.getTurnId(), resolved)) {
+            return PromptOptions.defaults();
+        }
+        if (candidates.isEmpty()) {
+            pendingChannelReplies.remove(resolved.responderKey, candidates);
+        }
+        logger.info("channel TalkTo continuation restored: turnId={}, responder={}",
+                resolved.context.getTurnId(), responder);
+        return PromptOptions.forRestoredChannelReply(resolved.context);
+    }
+
+    private boolean hasPendingChannelReply(ChannelTurnContext context) {
+        if (context == null) return false;
+        String turnId = context.getTurnId();
+        for (ConcurrentHashMap<String, PendingChannelReply> replies
+                : pendingChannelReplies.values()) {
+            if (replies.containsKey(turnId)) return true;
+        }
+        return false;
+    }
+
+    private void cleanupExpiredPendingChannelReplies() {
+        long now = System.currentTimeMillis();
+        Map<String, ChannelTurnContext> expiredContexts = new LinkedHashMap<>();
+        for (Map.Entry<String, ConcurrentHashMap<String, PendingChannelReply>> byResponder
+                : pendingChannelReplies.entrySet()) {
+            ConcurrentHashMap<String, PendingChannelReply> replies = byResponder.getValue();
+            for (PendingChannelReply pending : replies.values()) {
+                if (pending.expiresAt <= now && replies.remove(
+                        pending.context.getTurnId(), pending)) {
+                    expiredContexts.put(pending.context.getTurnId(), pending.context);
+                }
+            }
+            if (replies.isEmpty()) pendingChannelReplies.remove(byResponder.getKey(), replies);
+        }
+        releaseOrphanedChannelContexts(expiredContexts.values());
+    }
+
+    private void releaseAllPendingChannelReplies() {
+        Map<String, ChannelTurnContext> contexts = new LinkedHashMap<>();
+        for (ConcurrentHashMap<String, PendingChannelReply> replies
+                : pendingChannelReplies.values()) {
+            for (PendingChannelReply pending : replies.values()) {
+                contexts.put(pending.context.getTurnId(), pending.context);
+            }
+        }
+        pendingChannelReplies.clear();
+        releaseOrphanedChannelContexts(contexts.values());
+    }
+
+    private void releaseOrphanedChannelContexts(Collection<ChannelTurnContext> contexts) {
+        if (talkToDispatcher == null) return;
+        for (ChannelTurnContext context : contexts) {
+            if (!hasPendingChannelReply(context)) {
+                talkToDispatcher.releaseExternalTarget(context.getReplyTarget());
+                logger.info("expired channel TalkTo continuation released: turnId={}",
+                        context.getTurnId());
+            }
+        }
+    }
+
+    private static final class PendingChannelReply {
+        private final String sessionId;
+        private final String responderKey;
+        private final ChannelTurnContext context;
+        private final long expiresAt;
+
+        private PendingChannelReply(String sessionId, String responderKey,
+                                    ChannelTurnContext context, long expiresAt) {
+            this.sessionId = sessionId;
+            this.responderKey = responderKey;
+            this.context = context;
+            this.expiresAt = expiresAt;
         }
     }
 

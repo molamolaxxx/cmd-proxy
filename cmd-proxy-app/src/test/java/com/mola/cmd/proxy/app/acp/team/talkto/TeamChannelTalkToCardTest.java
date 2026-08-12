@@ -4,7 +4,13 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
+import com.mola.cmd.proxy.app.acp.channel.ChannelAdapter;
+import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToGateway;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
@@ -107,6 +113,52 @@ public class TeamChannelTalkToCardTest {
                 "排队消息");
     }
 
+    @Test
+    public void fastTeamGroupTurnKeepsRepeatedRepliesInOriginGroup() {
+        assertRepeatedRepliesStayInOriginConversation(
+                "group", "origin-group", "user-1", "origin-group");
+    }
+
+    @Test
+    public void fastTeamDirectTurnKeepsRepeatedRepliesWithOriginUser() {
+        assertRepeatedRepliesStayInOriginConversation(
+                "single", "", "origin-user", "origin-user");
+    }
+
+    private static void assertRepeatedRepliesStayInOriginConversation(
+            String chatType, String chatId, String userId, String expectedAddress) {
+        Fixture fixture = fixture();
+        RecordingChannelAdapter adapter = new RecordingChannelAdapter();
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter));
+        String target = gateway.createRoute("wecom-main", new ChannelReplyRoute(
+                "request-1", "message-1", userId, chatId, chatType,
+                System.currentTimeMillis() + 60_000), "team:team-1:member-2");
+        fixture.dispatcher.registerExternalGateway(gateway);
+
+        ChannelTalkToMessage inbound = new ChannelTalkToMessage(
+                target, "wecom-main", "sender", userId, chatType, chatId,
+                "text", "请处理", null, Collections.emptyList());
+        TalkToDispatcher.InboundDeliveryResult inboundResult = fixture.dispatcher.deliverInbound(
+                "member-2", fixture.client, inbound);
+
+        assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.DIRECT,
+                inboundResult.getStatus());
+        assertEquals(expectedAddress,
+                fixture.client.lastOptions.getChannelTurnContext().getConversationAddress());
+
+        String replyTarget = fixture.client.lastOptions
+                .getChannelTurnContext().getReplyTarget();
+        fixture.dispatcher.deliver(new TalkToRequest(replyTarget, "处理中", 0),
+                "member-2", "owner-1", "ignored", Collections.emptyList());
+        fixture.dispatcher.deliver(new TalkToRequest(replyTarget, "处理完成", 0),
+                "member-2", "owner-1", "ignored", Collections.emptyList());
+
+        assertEquals(1, adapter.preciseCalls);
+        assertEquals(Collections.singletonList(expectedAddress), adapter.proactiveAddresses);
+        assertEquals(Arrays.asList("处理中", "处理完成"), adapter.contents);
+    }
+
     private static void assertChannelCard(TeamEventEnvelope event, String direction,
                                           String target, String content) {
         Map<String, Object> data = data(event);
@@ -180,6 +232,8 @@ public class TeamChannelTalkToCardTest {
     }
 
     private static final class TestClient extends AcpClient {
+        private PromptOptions lastOptions;
+
         private TestClient(AcpClientIdentity identity, AcpRobotParam robot) {
             super(".", identity, robot);
             state.set(AbstractAcpClient.State.READY);
@@ -190,6 +244,11 @@ public class TeamChannelTalkToCardTest {
         public void send(String input, List<Map<String, String>> files) {
         }
 
+        @Override
+        public void send(String input, List<Map<String, String>> files, PromptOptions options) {
+            this.lastOptions = options;
+        }
+
         private void setClientState(AbstractAcpClient.State next) {
             state.set(next);
         }
@@ -197,6 +256,31 @@ public class TeamChannelTalkToCardTest {
         @Override
         public void close() throws IOException {
             state.set(AbstractAcpClient.State.CLOSED);
+        }
+    }
+
+    private static final class RecordingChannelAdapter implements ChannelAdapter {
+        private int preciseCalls;
+        private final List<String> proactiveAddresses = new ArrayList<>();
+        private final List<String> contents = new ArrayList<>();
+
+        @Override public String getChannelId() { return "wecom-main"; }
+        @Override public ChannelStatus getStatus() { return ChannelStatus.CONNECTED; }
+        @Override public void start() { }
+        @Override public void stop() { }
+
+        @Override
+        public ChannelSendResult send(ChannelReplyRoute route, String markdown) {
+            preciseCalls++;
+            contents.add(markdown);
+            return ChannelSendResult.success("precise");
+        }
+
+        @Override
+        public ChannelSendResult sendProactive(String address, String markdown) {
+            proactiveAddresses.add(address);
+            contents.add(markdown);
+            return ChannelSendResult.success("proactive");
         }
     }
 

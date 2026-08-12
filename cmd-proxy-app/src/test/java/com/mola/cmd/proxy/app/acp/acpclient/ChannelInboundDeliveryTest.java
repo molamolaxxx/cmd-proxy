@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import org.junit.Test;
 
 import java.nio.file.Path;
@@ -30,7 +31,14 @@ public class ChannelInboundDeliveryTest {
 
         assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.DIRECT, result.getStatus());
         assertNotNull(client.lastPrompt);
-        assertTrue(client.lastPrompt.contains("channel:wecom:r1"));
+        assertTrue(client.lastPrompt.contains("\"action\":\"talk_to\""));
+        assertTrue(client.lastPrompt.contains("\"target\":\"回复\""));
+        assertTrue(client.lastPrompt.contains("同一逻辑 turn 可以回复多次"));
+        assertFalse(client.lastPrompt.contains("reply_to_origin"));
+        assertFalse(client.lastPrompt.contains("channel:wecom:r1"));
+        assertNotNull(client.lastOptions.getChannelTurnContext());
+        assertEquals("channel:wecom:r1",
+                client.lastOptions.getChannelTurnContext().getReplyTarget());
         assertEquals(sessionBefore, client.getSessionId());
     }
 
@@ -82,6 +90,126 @@ public class ChannelInboundDeliveryTest {
                 dispatcher.pollInbox("busy-group").getLocalAttachments());
     }
 
+    @Test
+    public void everyChannelTargetIsPinnedToCurrentChannelTurn() {
+        FakeClient client = new FakeClient("bound-group");
+        PromptOptions options = PromptOptions.forChannelReply(
+                message("reply-token").getTurnContext());
+
+        TalkToRequest reply = client.resolveChannelReplyTarget(
+                new TalkToRequest("回复", "one", 0), options);
+        TalkToRequest proactive = client.resolveChannelReplyTarget(
+                new TalkToRequest("channel:another", "two", 0), options);
+        TalkToRequest teammate = client.resolveChannelReplyTarget(
+                new TalkToRequest("reviewer", "three", 0), options);
+
+        assertEquals("channel:wecom:reply-token", reply.getTarget());
+        assertEquals("channel:wecom:reply-token", proactive.getTarget());
+        assertEquals("reviewer", teammate.getTarget());
+        assertEquals(2, options.getChannelReplyAttempts());
+    }
+
+    @Test
+    public void uniqueTalkToReturnRestoresOriginalChannelReplyContext() {
+        FakeClient client = new FakeClient("bound-group");
+        PromptOptions origin = PromptOptions.forChannelReply(
+                message("reply-token").getTurnContext());
+        client.recordPendingChannelReply(
+                new TalkToRequest("reviewer", "please inspect", 0), origin,
+                "[talkTo 结果]\n已成功将消息发送给 reviewer。");
+
+        TalkToDispatcher.sendInboundMessage(client,
+                new TalkToMessage("reviewer", "inspection complete", 1));
+
+        assertNotNull(client.lastOptions);
+        assertTrue(client.lastOptions.isRestoredChannelContinuation());
+        assertEquals("channel:wecom:reply-token",
+                client.lastOptions.getChannelTurnContext().getReplyTarget());
+        assertTrue(client.lastPrompt.contains("[信道续接]"));
+        assertTrue(client.lastPrompt.contains("target 指定为“回复”"));
+        TalkToRequest resolved = client.resolveChannelReplyTarget(
+                new TalkToRequest("回复", "final", 0), client.lastOptions);
+        assertEquals("channel:wecom:reply-token", resolved.getTarget());
+    }
+
+    @Test
+    public void unrelatedOrFailedTalkToDoesNotRestoreChannelContext() {
+        FakeClient client = new FakeClient("bound-group");
+        PromptOptions origin = PromptOptions.forChannelReply(
+                message("reply-token").getTurnContext());
+        client.recordPendingChannelReply(
+                new TalkToRequest("reviewer", "please inspect", 0), origin,
+                "[talkTo 结果]\n发送失败：reviewer 不可用。");
+
+        assertFalse(client.promptOptionsForInboundTalkTo(
+                new TalkToMessage("reviewer", "unexpected", 1))
+                .hasChannelTurnContext());
+
+        client.recordPendingChannelReply(
+                new TalkToRequest("reviewer", "please inspect", 0), origin,
+                "[talkTo 结果]\n已成功将消息发送给 reviewer。");
+        assertFalse(client.promptOptionsForInboundTalkTo(
+                new TalkToMessage("other", "not the expected sender", 1))
+                .hasChannelTurnContext());
+    }
+
+    @Test
+    public void crossChatterSenderPrefixRestoresOnlyUniqueDisplayNameOrigin() {
+        FakeClient client = new FakeClient("bound-group");
+        PromptOptions origin = PromptOptions.forChannelReply(
+                message("reply-token").getTurnContext());
+        client.recordPendingChannelReply(
+                new TalkToRequest("reviewer", "please inspect", 0), origin,
+                "[talkTo 结果]\n已成功将消息发送给 reviewer（跨服务器）。");
+
+        PromptOptions restored = client.promptOptionsForInboundTalkTo(
+                new TalkToMessage("remote-chatter:reviewer", "done", 1));
+
+        assertTrue(restored.isRestoredChannelContinuation());
+        assertEquals("channel:wecom:reply-token",
+                restored.getChannelTurnContext().getReplyTarget());
+    }
+
+    @Test
+    public void multipleOriginsForSameResponderFailClosedAsAmbiguous() {
+        FakeClient client = new FakeClient("bound-group");
+        PromptOptions first = PromptOptions.forChannelReply(
+                message("first-route").getTurnContext());
+        PromptOptions second = PromptOptions.forChannelReply(
+                message("second-route").getTurnContext());
+        TalkToRequest delegation = new TalkToRequest("reviewer", "inspect", 0);
+        String accepted = "[talkTo 结果]\n已成功将消息发送给 reviewer。";
+        client.recordPendingChannelReply(delegation, first, accepted);
+        client.recordPendingChannelReply(delegation, second, accepted);
+
+        PromptOptions restored = client.promptOptionsForInboundTalkTo(
+                new TalkToMessage("reviewer", "which request?", 1));
+
+        assertFalse(restored.hasChannelTurnContext());
+    }
+
+    @Test
+    public void channelRouteIsSuspendedUntilExpectedReturnTurnCompletes() {
+        FakeClient client = new FakeClient("bound-group");
+        CountingDispatcher dispatcher = new CountingDispatcher();
+        client.setTalkToSupport(dispatcher, null, Collections.emptyMap());
+        PromptOptions origin = PromptOptions.forChannelReply(
+                message("reply-token").getTurnContext());
+        client.recordPendingChannelReply(
+                new TalkToRequest("reviewer", "inspect", 0), origin,
+                "[talkTo 结果]\n已成功将消息发送给 reviewer。");
+
+        client.releaseChannelTurn(origin);
+        assertEquals(0, dispatcher.releaseCount);
+
+        PromptOptions restored = client.promptOptionsForInboundTalkTo(
+                new TalkToMessage("reviewer", "done", 1));
+        client.releaseChannelTurn(restored);
+
+        assertEquals(1, dispatcher.releaseCount);
+        assertEquals("channel:wecom:reply-token", dispatcher.lastReleasedTarget);
+    }
+
     private static ChannelTalkToMessage message(String route) {
         return new ChannelTalkToMessage("channel:wecom:" + route,
                 "企业微信", "sender", "user-1", "group", "chat-1", "hello");
@@ -95,6 +223,7 @@ public class ChannelInboundDeliveryTest {
     private static final class FakeClient extends AcpClient {
         private String lastPrompt;
         private List<String> lastLocalFiles = Collections.emptyList();
+        private PromptOptions lastOptions;
 
         private FakeClient(String groupId) {
             super(new FakeProvider(), System.getProperty("java.io.tmpdir"), groupId, robot());
@@ -117,9 +246,26 @@ public class ChannelInboundDeliveryTest {
         }
 
         @Override
+        public void send(String userInput, List<Map<String, String>> files,
+                         PromptOptions options) {
+            this.lastPrompt = userInput;
+            this.lastOptions = options;
+            state.set(State.BUSY);
+        }
+
+        @Override
         public void sendLocalFiles(String userInput, List<String> localFiles) {
             this.lastPrompt = userInput;
             this.lastLocalFiles = localFiles;
+            state.set(State.BUSY);
+        }
+
+        @Override
+        public void sendLocalFiles(String userInput, List<String> localFiles,
+                                   PromptOptions options) {
+            this.lastPrompt = userInput;
+            this.lastLocalFiles = localFiles;
+            this.lastOptions = options;
             state.set(State.BUSY);
         }
     }
@@ -132,5 +278,21 @@ public class ChannelInboundDeliveryTest {
         }
         @Override public String getName() { return "fake"; }
         @Override public double extractContextUsage(JsonObject msg) { return -1; }
+    }
+
+    private static final class CountingDispatcher extends TalkToDispatcher {
+        private int releaseCount;
+        private String lastReleasedTarget;
+
+        private CountingDispatcher() {
+            super(Collections.emptyMap(), AcpClientRegistry.getInstance(),
+                    Collections.emptyMap());
+        }
+
+        @Override
+        public void releaseExternalTarget(String target) {
+            releaseCount++;
+            lastReleasedTarget = target;
+        }
     }
 }

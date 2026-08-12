@@ -15,6 +15,7 @@ import com.mola.cmd.proxy.app.acp.team.event.TeamEventSink;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventType;
 import com.mola.cmd.proxy.app.acp.team.listener.TeamMemberStateObserver;
 import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamContactRef;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberState;
 import com.mola.cmd.proxy.app.acp.team.model.TeamState;
@@ -31,6 +32,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.LongSupplier;
+import java.util.function.BooleanSupplier;
 
 /**
  * 单个 Team 共享的严格队内 talkTo 路由器。
@@ -53,6 +55,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
     private final LongSupplier clock;
     private final long inboxTtlMillis;
     private final long dedupWindowMillis;
+    private final BooleanSupplier grantActive;
     private final ConcurrentHashMap<String, LinkedBlockingQueue<QueuedMessage>> inboxes =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recentMessages =
@@ -70,7 +73,16 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                                 TeamEventSink eventSink,
                                 TeamMemberStateObserver stateObserver) {
         this(runtime, clientRegistry, eventSink, System::currentTimeMillis,
-                INBOX_TTL_MS, DEDUP_WINDOW_MS, stateObserver);
+                INBOX_TTL_MS, DEDUP_WINDOW_MS, stateObserver, () -> true);
+    }
+
+    public TeamTalkToDispatcher(TeamRuntime runtime,
+                                TeamClientRegistry clientRegistry,
+                                TeamEventSink eventSink,
+                                TeamMemberStateObserver stateObserver,
+                                BooleanSupplier grantActive) {
+        this(runtime, clientRegistry, eventSink, System::currentTimeMillis,
+                INBOX_TTL_MS, DEDUP_WINDOW_MS, stateObserver, grantActive);
     }
 
     TeamTalkToDispatcher(TeamRuntime runtime,
@@ -80,7 +92,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                          long inboxTtlMillis,
                          long dedupWindowMillis) {
         this(runtime, clientRegistry, eventSink, clock, inboxTtlMillis,
-                dedupWindowMillis, TeamMemberStateObserver.NOOP);
+                dedupWindowMillis, TeamMemberStateObserver.NOOP, () -> true);
     }
 
     TeamTalkToDispatcher(TeamRuntime runtime,
@@ -90,6 +102,18 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                          long inboxTtlMillis,
                          long dedupWindowMillis,
                          TeamMemberStateObserver stateObserver) {
+        this(runtime, clientRegistry, eventSink, clock, inboxTtlMillis,
+                dedupWindowMillis, stateObserver, () -> true);
+    }
+
+    TeamTalkToDispatcher(TeamRuntime runtime,
+                         TeamClientRegistry clientRegistry,
+                         TeamEventSink eventSink,
+                         LongSupplier clock,
+                         long inboxTtlMillis,
+                         long dedupWindowMillis,
+                         TeamMemberStateObserver stateObserver,
+                         BooleanSupplier grantActive) {
         super();
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.clientRegistry = Objects.requireNonNull(clientRegistry, "clientRegistry");
@@ -101,6 +125,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         }
         this.inboxTtlMillis = inboxTtlMillis;
         this.dedupWindowMillis = dedupWindowMillis;
+        this.grantActive = Objects.requireNonNull(grantActive, "grantActive");
     }
 
     @Override
@@ -120,6 +145,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         TeamDefinition team = runtime.getDefinition();
         TeamMemberDefinition sender = findMember(team, senderName);
         TeamMemberDefinition target = findMember(team, request.getTarget());
+        TeamContactRef rosterTarget = findContact(team, request.getTarget());
         if (closed || !runtime.isAcceptingRequests()) {
             return reject(sender, senderName, target, content, request.getDepth(),
                     "TEAM_CLOSED", "Team is not accepting talk_to messages");
@@ -127,6 +153,10 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         if (team.getState() != TeamState.READY) {
             return reject(sender, senderName, target, content, request.getDepth(),
                     "TEAM_NOT_READY", "Team is not READY");
+        }
+        if (!grantActive.getAsBoolean()) {
+            return reject(sender, senderName, target, content, request.getDepth(),
+                    "TEAM_GRANT_REVOKED", "remote Team sharing grant has been revoked");
         }
         if (sender == null) {
             return reject(null, senderName, target, content, request.getDepth(),
@@ -140,12 +170,12 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             return reject(sender, senderName, target, content, request.getDepth(),
                     "DEPTH_EXCEEDED", "消息传递深度超过上限（" + MAX_DEPTH + "）");
         }
-        if (target == null) {
+        if (target == null && rosterTarget == null) {
             return reject(sender, senderName, null, content, request.getDepth(),
                     "TARGET_NOT_IN_TEAM",
                     "target 必须是当前 Team 通讯录中的 teamMemberId");
         }
-        if (sender.getTeamMemberId().equals(target.getTeamMemberId())) {
+        if (sender.getTeamMemberId().equals(rosterTarget.getTargetTeamMemberId())) {
             return reject(sender, senderName, target, content, request.getDepth(),
                     "SELF_TARGET", "不能向自己发送 talk_to 消息");
         }
@@ -157,7 +187,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         long now = clock.getAsLong();
         cleanExpiredDedup(now);
         String dedupKey = team.getTeamId() + "/" + sender.getTeamMemberId()
-                + "→" + target.getTeamMemberId() + ":" + contentDigest(content);
+                + "→" + rosterTarget.getTargetTeamMemberId() + ":" + contentDigest(content);
         Long previous = recentMessages.putIfAbsent(dedupKey, now);
         if (previous != null && now - previous < dedupWindowMillis) {
             return reject(sender, senderName, target, content, request.getDepth(),
@@ -171,6 +201,35 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         int nextDepth = request.getDepth() + 1;
         TeamTalkToMessage message = new TeamTalkToMessage(
                 messageId, sender.getTeamMemberId(), content, nextDepth);
+        if (target == null) {
+            long expiresAt = now + inboxTtlMillis;
+            Map<String, Object> route = new LinkedHashMap<>();
+            route.put("messageId", messageId);
+            route.put("teamId", team.getTeamId());
+            route.put("senderTeamMemberId", sender.getTeamMemberId());
+            route.put("senderAcpClientId", sender.getAcpClientId());
+            route.put("targetTeamMemberId", rosterTarget.getTargetTeamMemberId());
+            route.put("targetAcpClientId", rosterTarget.getTargetAcpClientId());
+            route.put("content", content);
+            route.put("depth", nextDepth);
+            route.put("createdAt", now);
+            route.put("expiresAt", expiresAt);
+            route.put("delivery", "ROUTE_REQUESTED");
+            TeamEventEnvelope routeEvent = TeamEventEnvelope.next(runtime,
+                    sender.getTeamMemberId(), sender.getAcpClientId(),
+                    TeamEventType.TALK_TO_ROUTE_REQUEST, route);
+            if (!eventSink.tryPublish(routeEvent)) {
+                recentMessages.remove(dedupKey, now);
+                return "[talkTo 结果]\n发送失败：跨实例路由队列繁忙，消息未提交，"
+                        + "请稍后重试。";
+            }
+            publish(sender, TeamEventType.TALK_TO_SEND, route);
+            publishCard(sender, rosterTarget, TeamEventType.TALK_TO_SEND,
+                    messageId, content, "ROUTE_REQUESTED", null);
+            return "[talkTo 结果]\n跨实例消息已提交路由，目标成员 "
+                    + rosterTarget.getDisplayName() + "（"
+                    + rosterTarget.getTargetTeamMemberId() + "）。";
+        }
         AcpClient targetClient = clientRegistry.get(
                 team.getTeamId(), target.getTeamMemberId()).orElse(null);
         if (targetClient != null) {
@@ -206,7 +265,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             purgeExpired(inbox, now);
             long expiresAt = now + inboxTtlMillis;
             if (inbox.offer(new QueuedMessage(
-                    messageId, message, sender, target, expiresAt))) {
+                    messageId, message, sender, null, target, expiresAt))) {
                 int position = inbox.size();
                 publish(sender, TeamEventType.TALK_TO_QUEUED,
                         eventData(messageId, sender, target, content, nextDepth,
@@ -249,6 +308,13 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
     @Override
     public InboundDeliveryResult deliverInbound(String teamMemberId, AcpClient targetClient,
                                                  TalkToMessage message) {
+        return deliverInbound(teamMemberId, targetClient, message,
+                UUID.randomUUID().toString(), null);
+    }
+
+    private InboundDeliveryResult deliverInbound(
+            String teamMemberId, AcpClient targetClient, TalkToMessage message,
+            String messageId, TeamContactRef remoteSender) {
         if (teamMemberId == null || targetClient == null || message == null || closed) {
             return InboundDeliveryResult.rejected("invalid external Team delivery");
         }
@@ -274,10 +340,41 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         LinkedBlockingQueue<QueuedMessage> inbox = inboxes.computeIfAbsent(
                 teamMemberId, ignored -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
         purgeExpired(inbox, now);
-        return inbox.offer(new QueuedMessage(UUID.randomUUID().toString(), message,
-                        null, target, now + inboxTtlMillis))
+        return inbox.offer(new QueuedMessage(messageId, message,
+                        null, remoteSender, target, now + inboxTtlMillis))
                 ? InboundDeliveryResult.queued(inbox.size())
                 : InboundDeliveryResult.rejected("inbox full");
+    }
+
+    public InboundDeliveryResult deliverRemoteInbound(String messageId,
+                                                       String senderTeamMemberId,
+                                                       String teamMemberId,
+                                                       String content, int depth) {
+        AcpClient targetClient = clientRegistry.get(
+                runtime.getDefinition().getTeamId(), teamMemberId).orElse(null);
+        if (targetClient == null) return InboundDeliveryResult.rejected("target client absent");
+        TeamContactRef sender = findContact(
+                runtime.getDefinition(), senderTeamMemberId);
+        InboundDeliveryResult result = deliverInbound(
+                teamMemberId, targetClient,
+                new TeamTalkToMessage(messageId, senderTeamMemberId, content, depth),
+                messageId, sender);
+        if (result.getStatus() != InboundDeliveryResult.Status.REJECTED) {
+            TeamMemberDefinition target = findMember(runtime.getDefinition(), teamMemberId);
+            Map<String, Object> data = remoteEventData(
+                    messageId, sender, senderTeamMemberId, target, content, depth,
+                    result.getStatus().name(),
+                    result.getQueuePosition() > 0
+                            ? result.getQueuePosition() : null,
+                    null);
+            publish(target, result.getStatus() == InboundDeliveryResult.Status.QUEUED
+                    ? TeamEventType.TALK_TO_QUEUED : TeamEventType.TALK_TO_RECEIVE, data);
+            if (result.getStatus() == InboundDeliveryResult.Status.DIRECT) {
+                publishCard(target, sender, TeamEventType.TALK_TO_RECEIVE,
+                        messageId, content, "DIRECT", null);
+            }
+        }
+        return result;
     }
 
     @Override
@@ -299,6 +396,15 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             publishCard(queued.target, queued.sender, TeamEventType.TALK_TO_RECEIVE,
                     queued.messageId, queued.message.getContent(),
                     "DELIVERED_FROM_INBOX", null);
+        } else if (queued.remoteSender != null) {
+            publish(queued.target, TeamEventType.TALK_TO_RECEIVE,
+                    remoteEventData(queued.messageId, queued.remoteSender,
+                            queued.message.getSender(), queued.target,
+                            queued.message.getContent(), queued.message.getDepth(),
+                            "DELIVERED_FROM_INBOX", null, queued.expiresAt));
+            publishCard(queued.target, queued.remoteSender,
+                    TeamEventType.TALK_TO_RECEIVE, queued.messageId,
+                    queued.message.getContent(), "DELIVERED_FROM_INBOX", null);
         }
         return queued.message;
     }
@@ -434,20 +540,36 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                              TeamMemberDefinition peer,
                              TeamEventType talkToType, String messageId,
                              String content, String delivery, String reason) {
-        if (envelopeMember == null || peer == null
-                || envelopeMember.getTeamMemberId().equals(
-                peer.getTeamMemberId())) {
-            return;
-        }
+        if (peer == null) return;
+        publishCard(envelopeMember, peer.getTeamMemberId(), peer.getDisplayName(),
+                talkToType, messageId, content, delivery, reason);
+    }
+
+    private void publishCard(TeamMemberDefinition envelopeMember,
+                             TeamContactRef peer,
+                             TeamEventType talkToType, String messageId,
+                             String content, String delivery, String reason) {
+        if (peer == null) return;
+        publishCard(envelopeMember, peer.getTargetTeamMemberId(),
+                peer.getDisplayName(), talkToType, messageId, content,
+                delivery, reason);
+    }
+
+    private void publishCard(TeamMemberDefinition envelopeMember,
+                             String peerTeamMemberId, String peerDisplayName,
+                             TeamEventType talkToType, String messageId,
+                             String content, String delivery, String reason) {
+        if (envelopeMember == null || peerTeamMemberId == null
+                || envelopeMember.getTeamMemberId().equals(peerTeamMemberId)) return;
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("content", TeamTalkToCardRenderer.render(
-                talkToType.name(), peer.getTeamMemberId(),
-                peer.getDisplayName(), content, delivery, reason));
+                talkToType.name(), peerTeamMemberId,
+                peerDisplayName, content, delivery, reason));
         data.put("cardType", "TEAM_TALK_TO");
         data.put("messageId", messageId);
         data.put("direction", talkToType == TeamEventType.TALK_TO_RECEIVE
                 ? "RECEIVE" : "SEND");
-        data.put("cardTargetTeamMemberId", peer.getTeamMemberId());
+        data.put("cardTargetTeamMemberId", peerTeamMemberId);
         data.put("delivery", delivery);
         if (reason != null) data.put("reason", reason);
         publish(envelopeMember, TeamEventType.MESSAGE_CHUNK, data);
@@ -485,6 +607,32 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         return data;
     }
 
+    private Map<String, Object> remoteEventData(
+            String messageId, TeamContactRef sender, String senderTeamMemberId,
+            TeamMemberDefinition target, String content, int depth,
+            String delivery, Integer queuePosition, Long expiresAt) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("messageId", messageId);
+        data.put("teamId", runtime.getDefinition().getTeamId());
+        data.put("senderTeamMemberId", sender == null
+                ? senderTeamMemberId : sender.getTargetTeamMemberId());
+        data.put("senderAcpClientId", sender == null
+                ? null : sender.getTargetAcpClientId());
+        data.put("targetTeamMemberId",
+                target == null ? null : target.getTeamMemberId());
+        data.put("targetAcpClientId",
+                target == null ? null : target.getAcpClientId());
+        data.put("content", content);
+        data.put("depth", depth);
+        data.put("delivery", delivery);
+        if (queuePosition != null) {
+            data.put("queuePosition", queuePosition);
+            data.put("queueCapacity", INBOX_CAPACITY);
+        }
+        if (expiresAt != null) data.put("expiresAt", expiresAt);
+        return data;
+    }
+
     private static TeamMemberDefinition findMember(TeamDefinition team,
                                                    String teamMemberId) {
         if (teamMemberId == null) {
@@ -494,6 +642,14 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             if (teamMemberId.equals(member.getTeamMemberId())) {
                 return member;
             }
+        }
+        return null;
+    }
+
+    private static TeamContactRef findContact(TeamDefinition team, String teamMemberId) {
+        if (teamMemberId == null) return null;
+        for (TeamContactRef contact : team.getRoster()) {
+            if (teamMemberId.equals(contact.getTargetTeamMemberId())) return contact;
         }
         return null;
     }
@@ -516,16 +672,19 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         private final String messageId;
         private final TalkToMessage message;
         private final TeamMemberDefinition sender;
+        private final TeamContactRef remoteSender;
         private final TeamMemberDefinition target;
         private final long expiresAt;
 
         private QueuedMessage(String messageId, TalkToMessage message,
                               TeamMemberDefinition sender,
+                              TeamContactRef remoteSender,
                               TeamMemberDefinition target,
                               long expiresAt) {
             this.messageId = messageId;
             this.message = message;
             this.sender = sender;
+            this.remoteSender = remoteSender;
             this.target = target;
             this.expiresAt = expiresAt;
         }

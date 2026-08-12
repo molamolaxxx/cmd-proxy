@@ -7,4 +7,7 @@ public interface ExternalTalkToGateway {
     boolean supports(String target);
 
     String deliver(TalkToRequest request, String senderName, String senderGroupId);
+
+    /** Releases a short-lived target after its owning logical turn finishes. */
+    default void release(String target) { }
 }

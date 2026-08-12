@@ -1,5 +1,7 @@
 package com.mola.cmd.proxy.app.acp.channel.wecom;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.channel.ChannelAdapter;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
@@ -210,15 +212,17 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
         }
         JsonObject from = object(body, "from");
         String userId = WeComProtocol.string(from, "userid");
-        String displayName = firstNonBlank(
+        String senderName = firstNonBlank(
                 WeComProtocol.string(from, "name"),
-                WeComProtocol.string(from, "alias"), userId);
+                WeComProtocol.string(from, "alias"));
+        String displayName = firstNonBlank(senderName, userId);
         String chatId = WeComProtocol.string(body, "chatid");
         if (blank(msgId) || blank(userId) || blank(frame.getRequestId())) {
             logger.warn("channel message missing fields: channelId={}, msgid={}, errorCode=CHANNEL_FRAME_INVALID",
                     config.getId(), msgId);
             return;
         }
+        rememberKnownChatTarget(body, chatType, chatId, userId, senderName);
         WeComInboundMessageParser.ParsedMessage parsed;
         try {
             parsed = messageParser.parse(body, mediaDownloader);
@@ -238,7 +242,6 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                     config.getId(), msgId, msgType);
             return;
         }
-        captureDefaultChatTarget(chatType, chatId, userId);
         ChannelReplyRoute route = new ChannelReplyRoute(
                 frame.getRequestId(), msgId, userId, chatId, chatType,
                 System.currentTimeMillis() + ROUTE_TTL_MS);
@@ -259,23 +262,66 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
         }
     }
 
-    private void captureDefaultChatTarget(String chatType, String chatId, String userId) {
-        String target = defaultChatTarget(chatType, chatId, userId);
-        if (blank(target)) return;
+    private void rememberKnownChatTarget(JsonObject body, String chatType, String chatId,
+                                         String userId, String senderName) {
+        String targetId = "group".equals(chatType) ? chatId : userId;
+        if (blank(targetId)) return;
+        String displayName = discoveredDisplayName(
+                body, chatType, senderName, userId, shortMessagePreview(body));
         try {
-            String effective = ChannelConfigFileStore.setDefaultChatIdIfEmpty(
-                    config.getId(), target);
-            config.setDefaultChatId(effective);
-            logger.info("channel default chat resolved: channelId={}, chatType={}",
-                    config.getId(), chatType);
+            if (ChannelConfigFileStore.recordKnownChatTarget(
+                    config.getId(), targetId, displayName, chatType)) {
+                logger.info("channel proactive target discovered: channelId={}, chatType={}, targetId={}",
+                        config.getId(), chatType, targetId);
+            }
         } catch (Exception e) {
-            logger.error("channel default chat persist failed: channelId={}, errorCode=CHANNEL_CONFIG_WRITE_FAILED",
-                    config.getId(), e);
+            logger.warn("channel proactive target persistence failed: channelId={}, chatType={}, targetId={}",
+                    config.getId(), chatType, targetId, e);
         }
     }
 
-    static String defaultChatTarget(String chatType, String chatId, String userId) {
-        return "group".equals(chatType) ? chatId : userId;
+    static String discoveredDisplayName(JsonObject body, String chatType,
+                                        String senderName, String userId,
+                                        String messagePreview) {
+        String previewLabel = blank(messagePreview) ? "" : "消息：" + messagePreview;
+        return "group".equals(chatType)
+                ? firstNonBlank(WeComProtocol.string(body, "chatname"),
+                        WeComProtocol.string(body, "chat_name"), previewLabel, "未提供群名")
+                : firstNonBlank(senderName, previewLabel, userId);
+    }
+
+    static String shortMessagePreview(JsonObject body) {
+        String type = WeComProtocol.string(body, "msgtype");
+        String content = "";
+        if ("text".equals(type)) {
+            content = WeComProtocol.string(object(body, "text"), "content");
+        } else if ("voice".equals(type)) {
+            content = WeComProtocol.string(object(body, "voice"), "content");
+        } else if ("mixed".equals(type)) {
+            StringBuilder mixedText = new StringBuilder();
+            JsonObject mixed = object(body, "mixed");
+            JsonArray items = mixed.has("msg_item") && mixed.get("msg_item").isJsonArray()
+                    ? mixed.getAsJsonArray("msg_item") : new JsonArray();
+            for (JsonElement element : items) {
+                if (!element.isJsonObject()) continue;
+                JsonObject item = element.getAsJsonObject();
+                if (!"text".equals(WeComProtocol.string(item, "msgtype"))) continue;
+                String value = WeComProtocol.string(object(item, "text"), "content");
+                if (blank(value)) continue;
+                if (mixedText.length() > 0) mixedText.append(' ');
+                mixedText.append(value.trim());
+            }
+            content = mixedText.toString();
+        } else if ("image".equals(type)) {
+            content = "[图片]";
+        } else if ("file".equals(type)) {
+            content = "[文件]";
+        }
+        String normalized = content == null ? "" : content.trim().replaceAll("\\s+", " ");
+        int maxCodePoints = 24;
+        if (normalized.codePointCount(0, normalized.length()) <= maxCodePoints) return normalized;
+        int end = normalized.offsetByCodePoints(0, maxCodePoints);
+        return normalized.substring(0, end) + "…";
     }
 
     private void handleEvent(WeComFrame frame) {
@@ -323,18 +369,14 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
 
     @Override
     public ChannelSendResult send(ChannelReplyRoute route, String markdown) {
-        if (route == null) return ChannelSendResult.failure("reply route missing");
-        if (!blank(route.getRequestId())) {
-            String streamId = WeComProtocol.requestId("stream");
-            ChannelSendResult passive = sendAndAwait(
-                    route.getRequestId(),
-                    WeComProtocol.respondMarkdown(route.getRequestId(), streamId, markdown),
-                    "passive");
-            if (passive.isSuccess()) return passive;
+        if (route == null) return ChannelSendResult.notAttempted("reply route missing");
+        if (blank(route.getRequestId())) {
+            return ChannelSendResult.notAttempted("reply request id missing");
         }
-        String chatId = firstNonBlank(route.getChatId(), route.getUserId());
-        return blank(chatId) ? ChannelSendResult.failure("reply address missing")
-                : sendProactive(chatId, markdown);
+        String streamId = WeComProtocol.requestId("stream");
+        return sendAndAwait(route.getRequestId(),
+                WeComProtocol.respondMarkdown(route.getRequestId(), streamId, markdown),
+                "passive");
     }
 
     @Override
@@ -347,8 +389,9 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
 
     private ChannelSendResult sendAndAwait(String requestId, String payload, String mode) {
         if (status.get() != ChannelStatus.CONNECTED || socket == null) {
-            return ChannelSendResult.failure("channel is not connected");
+            return ChannelSendResult.notAttempted("channel is not connected");
         }
+        boolean attempted = false;
         for (int attempt = 0; attempt < 2; attempt++) {
             CompletableFuture<WeComFrame> future = new CompletableFuture<>();
             pending.put(requestId, future);
@@ -356,6 +399,7 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                 pending.remove(requestId, future);
                 continue;
             }
+            attempted = true;
             try {
                 WeComFrame ack = future.get(REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
                 if (ack.isSuccess()) return ChannelSendResult.success(mode);
@@ -371,7 +415,8 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                 pending.remove(requestId, future);
             }
         }
-        return ChannelSendResult.failure("ack timeout");
+        return attempted ? ChannelSendResult.failure("ack timeout")
+                : ChannelSendResult.notAttempted("websocket rejected send");
     }
 
     private void startHeartbeat() {
