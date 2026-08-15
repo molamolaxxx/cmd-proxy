@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.MemoryManagerBridge;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentResult;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentTask;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -121,6 +122,13 @@ public class SubAgentDispatcher implements Closeable {
     public List<SubAgentResult> dispatch(List<SubAgentTask> tasks,
                                          AcpResponseListener listener,
                                          String callerWorkspace) {
+        return dispatch(tasks, listener, callerWorkspace, null);
+    }
+
+    public List<SubAgentResult> dispatch(List<SubAgentTask> tasks,
+                                         AcpResponseListener listener,
+                                         String callerWorkspace,
+                                         AuthPrincipalContext authPrincipalContext) {
         // 重置取消标志
         cancelled = false;
 
@@ -146,7 +154,8 @@ public class SubAgentDispatcher implements Closeable {
         // 3. 并行执行
         List<CompletableFuture<SubAgentResult>> futures = tasks.stream()
                 .map(task -> CompletableFuture.supplyAsync(
-                        () -> executeOne(task, listener, callerWorkspace), dispatchPool))
+                        () -> executeOne(task, listener, callerWorkspace,
+                                authPrincipalContext), dispatchPool))
                 .collect(Collectors.toList());
 
         // 4. 等待所有完成（总超时 = 单个超时 × 2，至少 60s）
@@ -199,7 +208,8 @@ public class SubAgentDispatcher implements Closeable {
      */
     private SubAgentResult executeOne(SubAgentTask task,
                                       AcpResponseListener listener,
-                                      String callerWorkspace) {
+                                      String callerWorkspace,
+                                      AuthPrincipalContext authPrincipalContext) {
         long startTime = System.currentTimeMillis();
         String displayName = task.getDisplayName();
         SubAgentResult result = new SubAgentResult();
@@ -225,7 +235,7 @@ public class SubAgentDispatcher implements Closeable {
 
         try (SubAgentAcpClient client = new SubAgentAcpClient(
                 workDir, groupId, defaultTimeoutSeconds,
-                targetRobot)) {
+                targetRobot, authPrincipalContext)) {
 
             activeClients.add(client);
 

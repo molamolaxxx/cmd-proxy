@@ -14,6 +14,7 @@ import com.google.gson.reflect.TypeToken;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -162,6 +163,12 @@ public class ScheduleTaskManager {
 
     public ScheduledTask createTask(ScheduleOwnerKey owner, String title, String prompt,
                                     ScheduleConfig config, String groupName) {
+        return createTask(owner, title, prompt, config, groupName, null);
+    }
+
+    public ScheduledTask createTask(ScheduleOwnerKey owner, String title, String prompt,
+                                    ScheduleConfig config, String groupName,
+                                    AuthPrincipalContext authPrincipalContext) {
         ensureOwnerWritable(owner);
         String robotName = registerOwner(owner);
         ScheduledTask task = new ScheduledTask();
@@ -174,6 +181,7 @@ public class ScheduleTaskManager {
         task.setStatus(ScheduledTask.STATUS_WAITING);
         task.setCreatedAt(System.currentTimeMillis());
         task.setNextRunAt(calculateNextRunAt(config));
+        task.setAuthPrincipalContext(authPrincipalContext);
 
         List<ScheduledTask> tasks = tasksByRobot.computeIfAbsent(robotName, k -> new ArrayList<>());
         synchronized (tasks) {
@@ -372,7 +380,7 @@ public class ScheduleTaskManager {
                 ScheduleOwnerKey owner = ownerFor(robotName);
                 boolean triggered = scopedExecutionCallback != null
                         ? scopedExecutionCallback.execute(owner, task.getId(),
-                                task.getGroupName(), prompt)
+                                task.getGroupName(), prompt, task.getAuthPrincipalContext())
                         : executionCallback.execute(robotName, task.getId(), prompt);
                 if (!triggered) {
                     // client 忙碌，回退状态，下一轮重试
@@ -919,7 +927,8 @@ public class ScheduleTaskManager {
     @FunctionalInterface
     public interface ScopedScheduleExecutionCallback {
         boolean execute(ScheduleOwnerKey owner, String taskId,
-                        String groupName, String prompt);
+                        String groupName, String prompt,
+                        AuthPrincipalContext authPrincipalContext);
     }
 
     // ==================== JSON 指令处理（供 AcpClient 调用） ====================
@@ -939,9 +948,14 @@ public class ScheduleTaskManager {
     }
 
     public String detectAndHandle(String fullResponse, ScheduleOwnerKey owner) {
+        return detectAndHandle(fullResponse, owner, null);
+    }
+
+    public String detectAndHandle(String fullResponse, ScheduleOwnerKey owner,
+                                  AuthPrincipalContext authPrincipalContext) {
         String actionJson = extractActionJson(fullResponse);
         if (actionJson == null) return null;
-        return handleAction(actionJson, owner);
+        return handleAction(actionJson, owner, authPrincipalContext);
     }
 
     /**
@@ -959,12 +973,17 @@ public class ScheduleTaskManager {
     }
 
     public String handleAction(String actionJson, ScheduleOwnerKey owner) {
+        return handleAction(actionJson, owner, null);
+    }
+
+    public String handleAction(String actionJson, ScheduleOwnerKey owner,
+                               AuthPrincipalContext authPrincipalContext) {
         JsonObject json = JsonParser.parseString(actionJson).getAsJsonObject();
         String action = json.get("action").getAsString();
 
         switch (action) {
             case "schedule_task":
-                return handleCreate(json, owner);
+                return handleCreate(json, owner, authPrincipalContext);
             case "manage_schedule":
                 return handleManage(json, owner);
             default:
@@ -972,7 +991,8 @@ public class ScheduleTaskManager {
         }
     }
 
-    private String handleCreate(JsonObject json, ScheduleOwnerKey owner) {
+    private String handleCreate(JsonObject json, ScheduleOwnerKey owner,
+                                AuthPrincipalContext authPrincipalContext) {
         JsonArray tasks = json.getAsJsonArray("tasks");
         String groupName = json.has("groupName")
                 ? json.get("groupName").getAsString() : null;
@@ -989,7 +1009,7 @@ public class ScheduleTaskManager {
                     scheduleJson.get("expr").getAsString());
 
             ScheduledTask created = createTask(
-                    owner, title, prompt, config, groupName);
+                    owner, title, prompt, config, groupName, authPrincipalContext);
             result.append(formatOperationResult("create", created));
             if (i < tasks.size() - 1) result.append("\n");
         }

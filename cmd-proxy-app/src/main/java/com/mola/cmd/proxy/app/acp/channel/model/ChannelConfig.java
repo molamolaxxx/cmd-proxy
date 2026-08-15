@@ -5,6 +5,8 @@ import java.util.List;
 
 public class ChannelConfig {
     public static final String TYPE_WECOM_WS = "WECOM_WS";
+    public static final String USER_BEHAVIOR_QUEUE = "QUEUE";
+    public static final String USER_BEHAVIOR_INTERRUPT = "INTERRUPT";
 
     private String id;
     private String type;
@@ -13,6 +15,8 @@ public class ChannelConfig {
     private volatile boolean inboundEnabled = true;
     /** Whether direct messages may enter the bound ACP. Group messages remain available. */
     private volatile boolean privateChatEnabled = true;
+    /** How a new inbound user message behaves while the bound ACP is busy. */
+    private volatile String userBehavior = USER_BEHAVIOR_QUEUE;
     private String botId;
     private String secret;
     private String wsUrl = "wss://openws.work.weixin.qq.com";
@@ -33,6 +37,11 @@ public class ChannelConfig {
     public boolean isPrivateChatEnabled() { return privateChatEnabled; }
     public void setPrivateChatEnabled(boolean privateChatEnabled) {
         this.privateChatEnabled = privateChatEnabled;
+    }
+    public String getUserBehavior() { return userBehavior; }
+    public void setUserBehavior(String userBehavior) {
+        this.userBehavior = USER_BEHAVIOR_INTERRUPT.equals(userBehavior)
+                ? USER_BEHAVIOR_INTERRUPT : USER_BEHAVIOR_QUEUE;
     }
     public String getBotId() { return botId; }
     public void setBotId(String botId) { this.botId = botId; }

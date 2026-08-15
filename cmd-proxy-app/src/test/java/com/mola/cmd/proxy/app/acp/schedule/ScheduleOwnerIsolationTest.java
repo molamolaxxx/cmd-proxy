@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.schedule;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -20,6 +21,26 @@ public class ScheduleOwnerIsolationTest {
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    @Test
+    public void scheduledTaskPersistsChannelNeutralPrincipalForDerivedExecution()
+            throws Exception {
+        Path root = temporaryFolder.newFolder("principal").toPath();
+        ScheduleOwnerKey owner = ScheduleOwnerKey.main("Robot");
+        ScheduleTaskManager manager = new ScheduleTaskManager(root);
+        AuthPrincipalContext principal = new AuthPrincipalContext(
+                "user-a", "Alice", "WECOM", "wecom-main");
+
+        ScheduledTask task = manager.createTask(owner, "run", "prompt",
+                new ScheduleConfig("once", "+1h"), null, principal);
+
+        assertEquals("user-a", task.getAuthPrincipalContext().getPrincipalId());
+        String persisted = new String(Files.readAllBytes(
+                root.resolve("Robot").resolve("tasks.json")),
+                java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(persisted.contains("\"principalId\": \"user-a\""));
+        assertTrue(persisted.contains("\"sourceType\": \"WECOM\""));
+    }
 
     @Test
     public void mainAndTeamOwnersUseIndependentBackwardCompatiblePaths()
@@ -68,7 +89,7 @@ public class ScheduleOwnerIsolationTest {
         task.setNextRunAt(0L);
         CountDownLatch invoked = new CountDownLatch(1);
         AtomicReference<ScheduleOwnerKey> actual = new AtomicReference<>();
-        manager.setScopedExecutionCallback((owner, taskId, groupName, prompt) -> {
+        manager.setScopedExecutionCallback((owner, taskId, groupName, prompt, principal) -> {
             actual.set(owner);
             invoked.countDown();
             return false;

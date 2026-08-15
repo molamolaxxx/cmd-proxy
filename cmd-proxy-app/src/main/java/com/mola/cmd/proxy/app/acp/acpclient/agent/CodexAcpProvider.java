@@ -85,6 +85,11 @@ public class CodexAcpProvider implements AgentProvider {
     }
 
     @Override
+    public boolean isAgentMessageControlArtifact(String text) {
+        return text != null && "*Conversation interrupted*".equals(text.trim());
+    }
+
+    @Override
     public CompactionSignal detectCompactionSignal(JsonObject msg) {
         if (!isSessionUpdate(msg)) {
             return CompactionSignal.NONE;

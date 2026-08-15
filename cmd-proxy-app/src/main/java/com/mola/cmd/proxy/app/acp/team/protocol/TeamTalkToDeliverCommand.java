@@ -12,6 +12,10 @@ public final class TeamTalkToDeliverCommand {
     private int depth;
     private long createdAt;
     private long expiresAt;
+    private String authPrincipalId;
+    private String authPrincipalName;
+    private String authSourceType;
+    private String authSourceId;
 
     @SuppressWarnings("unused") private TeamTalkToDeliverCommand() { }
 
@@ -37,4 +41,8 @@ public final class TeamTalkToDeliverCommand {
     public int getDepth() { return depth; }
     public long getCreatedAt() { return createdAt; }
     public long getExpiresAt() { return expiresAt; }
+    public String getAuthPrincipalId() { return authPrincipalId; }
+    public String getAuthPrincipalName() { return authPrincipalName; }
+    public String getAuthSourceType() { return authSourceType; }
+    public String getAuthSourceId() { return authSourceId; }
 }

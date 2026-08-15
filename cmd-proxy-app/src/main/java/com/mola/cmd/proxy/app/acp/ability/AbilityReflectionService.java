@@ -267,7 +267,8 @@ public class AbilityReflectionService {
 
     private List<String> loadMcpServerNames() {
         // 与 ACP session/new 使用同一解析器，统一支持 JSON 和 Codex TOML 配置。
-        List<String> names = new ArrayList<>(McpConfigLoader.loadServerNames(mcpConfigPaths));
+        List<String> names = new ArrayList<>(McpConfigLoader.loadServerNames(
+                mcpConfigPaths, workspacePath));
         Collections.sort(names);
         return names;
     }

@@ -5,6 +5,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseContentRenderer;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
@@ -137,6 +138,11 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
     public String deliver(TalkToRequest request, String senderName,
                           String ignoredSenderChatterId,
                           List<ContactRef> ignoredContacts) {
+        return deliverTeam(request, senderName, null);
+    }
+
+    private String deliverTeam(TalkToRequest request, String senderName,
+                               AuthPrincipalContext authPrincipalContext) {
         if (request == null) {
             return reject(null, senderName, null, "", 0,
                     "INVALID_REQUEST", "talk_to request is required");
@@ -200,7 +206,8 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         String messageId = UUID.randomUUID().toString();
         int nextDepth = request.getDepth() + 1;
         TeamTalkToMessage message = new TeamTalkToMessage(
-                messageId, sender.getTeamMemberId(), content, nextDepth);
+                messageId, sender.getTeamMemberId(), content, nextDepth,
+                authPrincipalContext);
         if (target == null) {
             long expiresAt = now + inboxTtlMillis;
             Map<String, Object> route = new LinkedHashMap<>();
@@ -215,6 +222,12 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             route.put("createdAt", now);
             route.put("expiresAt", expiresAt);
             route.put("delivery", "ROUTE_REQUESTED");
+            if (authPrincipalContext != null) {
+                route.put("authPrincipalId", authPrincipalContext.getPrincipalId());
+                route.put("authPrincipalName", authPrincipalContext.getDisplayName());
+                route.put("authSourceType", authPrincipalContext.getSourceType());
+                route.put("authSourceId", authPrincipalContext.getSourceId());
+            }
             TeamEventEnvelope routeEvent = TeamEventEnvelope.next(runtime,
                     sender.getTeamMemberId(), sender.getAcpClientId(),
                     TeamEventType.TALK_TO_ROUTE_REQUEST, route);
@@ -292,17 +305,27 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
     public String deliver(TalkToRequest request, String senderName,
                           String senderChatterId, String ignoredSenderGroupId,
                           List<ContactRef> contacts) {
+        return deliver(request, senderName, senderChatterId, ignoredSenderGroupId,
+                contacts, null);
+    }
+
+    @Override
+    public String deliver(TalkToRequest request, String senderName,
+                          String senderChatterId, String ignoredSenderGroupId,
+                          List<ContactRef> contacts,
+                          AuthPrincipalContext authPrincipalContext) {
         if (request != null && request.getTarget() != null
                 && request.getTarget().startsWith("channel:")) {
             String senderKey = "team:" + runtime.getDefinition().getTeamId()
                     + ":" + senderName;
             String result = super.deliver(
-                    request, senderName, senderChatterId, senderKey, contacts);
+                    request, senderName, senderChatterId, senderKey, contacts,
+                    authPrincipalContext);
             pushExternalTalkToCard(senderName, "TALK_TO_SEND",
                     channelLabel(request.getTarget()), request.getContent());
             return result;
         }
-        return deliver(request, senderName, senderChatterId, contacts);
+        return deliverTeam(request, senderName, authPrincipalContext);
     }
 
     @Override
@@ -350,6 +373,15 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                                                        String senderTeamMemberId,
                                                        String teamMemberId,
                                                        String content, int depth) {
+        return deliverRemoteInbound(messageId, senderTeamMemberId, teamMemberId,
+                content, depth, null);
+    }
+
+    public InboundDeliveryResult deliverRemoteInbound(String messageId,
+                                                       String senderTeamMemberId,
+                                                       String teamMemberId,
+                                                       String content, int depth,
+                                                       AuthPrincipalContext authPrincipalContext) {
         AcpClient targetClient = clientRegistry.get(
                 runtime.getDefinition().getTeamId(), teamMemberId).orElse(null);
         if (targetClient == null) return InboundDeliveryResult.rejected("target client absent");
@@ -357,7 +389,8 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                 runtime.getDefinition(), senderTeamMemberId);
         InboundDeliveryResult result = deliverInbound(
                 teamMemberId, targetClient,
-                new TeamTalkToMessage(messageId, senderTeamMemberId, content, depth),
+                new TeamTalkToMessage(messageId, senderTeamMemberId, content, depth,
+                        authPrincipalContext),
                 messageId, sender);
         if (result.getStatus() != InboundDeliveryResult.Status.REJECTED) {
             TeamMemberDefinition target = findMember(runtime.getDefinition(), teamMemberId);
@@ -694,8 +727,10 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         private final String messageId;
 
         private TeamTalkToMessage(String messageId, String sender,
-                                  String content, int depth) {
-            super(sender, content, depth);
+                                  String content, int depth,
+                                  AuthPrincipalContext authPrincipalContext) {
+            super(sender, content, depth, java.util.Collections.emptyList(),
+                    authPrincipalContext);
             this.messageId = messageId;
         }
 
@@ -709,10 +744,11 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             sb.append("以下消息由当前 Fast Team 的严格队内路由投递，发送者身份已经过验证：\n\n");
             sb.append(getContent()).append("\n\n");
             sb.append("─── 回复方式 ───\n");
-            sb.append("如需回复，在正常文本末尾输出：\n");
+            sb.append("如需回复，请直接输出以下 JSON 作为本次回复的全部内容：\n");
             sb.append("{\"action\":\"talk_to\",\"target\":\"")
                     .append(getSender()).append("\",\"content\":\"你的回复内容\",\"_depth\":")
                     .append(getDepth()).append("}\n");
+            sb.append("输出 JSON 后立即结束回复；系统返回结果后再继续下一步。\n");
             return sb.toString();
         }
     }

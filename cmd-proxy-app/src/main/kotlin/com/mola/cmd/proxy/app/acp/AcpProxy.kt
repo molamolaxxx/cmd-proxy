@@ -539,6 +539,13 @@ object AcpProxy {
                 val targetRobotName = json.getString("targetRobotName") ?: ""
                 val content = json.getString("content") ?: ""
                 val depth = json.getIntValue("depth")
+                val authPrincipalId = json.getString("authPrincipalId")
+                val authContext = if (authPrincipalId.isNullOrBlank()) null else
+                    com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext(
+                        authPrincipalId,
+                        json.getString("authPrincipalName") ?: "",
+                        json.getString("authSourceType") ?: "CHANNEL",
+                        json.getString("authSourceId") ?: "")
 
                 val targetGroupId = robotToGroupIdMap[targetRobotName]
                 val targetClient = if (targetGroupId != null) registry.getClient(targetGroupId) else null
@@ -553,12 +560,13 @@ object AcpProxy {
 
                 val senderFullName = "$senderChatterId:$senderRobotName"
                 val message = com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage(
-                    senderFullName, content, depth + 1
+                    senderFullName, content, depth + 1, emptyList(), authContext
                 )
 
                 if (targetClient.state == com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient.State.READY) {
                     talkToDispatcher.pushIncomingMessageCard(targetClient, message)
-                    targetClient.send(message.buildPrompt(), null)
+                    com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher.sendInboundMessage(
+                        targetClient, message)
                     log.info("crossTalkToDeliver 直接投递: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
                     resultMap["result"] = "已直接投递"
                     resultMap["success"] = "true"
@@ -1260,14 +1268,14 @@ object AcpProxy {
      */
     fun startScheduler(groupRobotMap: Map<String, AcpRobotParam>) {
         // 设置执行回调：检查 client 状态，空闲则新建 session 并执行
-        scheduleTaskManager.setScopedExecutionCallback { owner, taskId, groupName, prompt ->
+        scheduleTaskManager.setScopedExecutionCallback { owner, taskId, groupName, prompt, authPrincipal ->
             if (owner.isTeam) {
                 val manager = teamManager
                 if (manager == null) {
                     log.error("Team 定时任务执行失败：TeamManager 不存在, owner={}", owner)
                     false
                 } else {
-                    manager.executeScheduledPrompt(owner, taskId, groupName, prompt)
+                    manager.executeScheduledPrompt(owner, taskId, groupName, prompt, authPrincipal)
                 }
             } else {
                 val robotName = owner.robotName
@@ -1296,20 +1304,20 @@ object AcpProxy {
                             featureInitializer.initialize(
                                 AcpClientFeatureInitializer.Context.main(targetGroupId),
                                 replacement, replacement.robotParam)
-                            if (!groupName.isNullOrBlank()) {
-                                scheduleTaskManager.bindGroupSession(
-                                    owner, groupName, replacement.sessionId)
-                            }
-                            replacement.send(
-                                prompt, null, PromptOptions.forScheduleExecution())
                         }
                             ?: return@setScopedExecutionCallback false
+                        if (!groupName.isNullOrBlank()) {
+                            scheduleTaskManager.bindGroupSession(
+                                owner, groupName, replacement.sessionId)
+                        }
                         notifyMainSessionChanged(
                             targetGroupId, client.sessionId,
                             replacement.sessionId, "SCHEDULE")
+                        replacement.send(prompt, null,
+                            PromptOptions.forScheduleExecution(authPrincipal))
                     } else if (boundSessionId == client.sessionId) {
                         registry.sendMessage(targetGroupId,
-                            prompt, null, PromptOptions.forScheduleExecution())
+                            prompt, null, PromptOptions.forScheduleExecution(authPrincipal))
                     } else {
                         try {
                             val replacement = registry.replaceSessionIfCurrent(
@@ -1318,14 +1326,14 @@ object AcpProxy {
                                 featureInitializer.initialize(
                                     AcpClientFeatureInitializer.Context.main(targetGroupId),
                                     replacement, replacement.robotParam)
-                                replacement.send(
-                                    prompt, null, PromptOptions.forScheduleExecution())
                             }
                                 ?: throw IllegalStateException(
                                     "恢复分组会话后 client 不存在")
                             notifyMainSessionChanged(
                                 targetGroupId, client.sessionId,
                                 replacement.sessionId, "SCHEDULE_RESTORE")
+                            replacement.send(prompt, null,
+                                PromptOptions.forScheduleExecution(authPrincipal))
                         } catch (e: Exception) {
                             log.error(
                                 "定时会话分组恢复失败，等待下一轮重试, owner={}, groupName={}, sessionId={}",

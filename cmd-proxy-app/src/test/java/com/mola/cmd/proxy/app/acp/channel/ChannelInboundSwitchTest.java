@@ -21,10 +21,15 @@ public class ChannelInboundSwitchTest {
     public void inboundDefaultsToEnabled() {
         assertTrue(new ChannelConfig().isInboundEnabled());
         assertTrue(new ChannelConfig().isPrivateChatEnabled());
+        assertEquals(ChannelConfig.USER_BEHAVIOR_QUEUE,
+                new ChannelConfig().getUserBehavior());
         assertTrue(JSON.parseObject("{\"id\":\"legacy-channel\"}", ChannelConfig.class)
                 .isInboundEnabled());
         assertTrue(JSON.parseObject("{\"id\":\"legacy-channel\"}", ChannelConfig.class)
                 .isPrivateChatEnabled());
+        assertEquals(ChannelConfig.USER_BEHAVIOR_QUEUE,
+                JSON.parseObject("{\"id\":\"legacy-channel\"}", ChannelConfig.class)
+                        .getUserBehavior());
     }
 
     @Test

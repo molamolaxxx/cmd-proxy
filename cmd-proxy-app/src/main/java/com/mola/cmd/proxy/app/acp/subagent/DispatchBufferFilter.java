@@ -1,8 +1,12 @@
 package com.mola.cmd.proxy.app.acp.subagent;
 
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.function.Consumer;
 
 /**
  * Dispatch 指令缓冲过滤器。
@@ -39,10 +43,15 @@ public class DispatchBufferFilter {
 
     private final AcpResponseListener listener;
     private final boolean enabled;
+    /** 是否启用 subAgent 派发拦截 */
+    private final boolean subAgentEnabled;
     /** 是否启用定时任务拦截 */
     private final boolean scheduleEnabled;
     /** 是否启用 talkTo 拦截 */
     private final boolean talkToEnabled;
+    /** 首个完整 action 被捕获时的通知；用于立即结束当前 ACP prompt round。 */
+    private final Consumer<String> actionCapturedListener;
+    private boolean actionCaptureNotified;
 
     private State state = State.NORMAL;
     private final StringBuilder buffer = new StringBuilder();
@@ -74,10 +83,21 @@ public class DispatchBufferFilter {
      */
     public DispatchBufferFilter(AcpResponseListener listener, boolean enabled,
                                 boolean scheduleEnabled, boolean talkToEnabled) {
+        this(listener, enabled, scheduleEnabled, talkToEnabled, null);
+    }
+
+    /**
+     * @param actionCapturedListener 首个完整且已启用的 action JSON 捕获回调，可为 null
+     */
+    public DispatchBufferFilter(AcpResponseListener listener, boolean enabled,
+                                boolean scheduleEnabled, boolean talkToEnabled,
+                                Consumer<String> actionCapturedListener) {
         this.listener = listener;
+        this.subAgentEnabled = enabled;
         this.enabled = enabled || scheduleEnabled || talkToEnabled;
         this.scheduleEnabled = scheduleEnabled;
         this.talkToEnabled = talkToEnabled;
+        this.actionCapturedListener = actionCapturedListener;
     }
 
     /**
@@ -181,6 +201,7 @@ public class DispatchBufferFilter {
                 String firstJson = content.substring(0, endIdx);
                 logger.info("缓冲区捕获 action JSON，长度={}", firstJson.length());
                 capturedJsonList.add(firstJson);
+                notifyFirstActionCaptured(firstJson);
 
                 // 处理剩余部分
                 String remaining = content.substring(endIdx).trim();
@@ -223,6 +244,34 @@ public class DispatchBufferFilter {
                 || (scheduleEnabled && text.contains(SCHEDULE_TASK_TRIGGER))
                 || (scheduleEnabled && text.contains(MANAGE_SCHEDULE_TRIGGER))
                 || (talkToEnabled && text.contains(TALK_TO_TRIGGER));
+    }
+
+    private void notifyFirstActionCaptured(String json) {
+        if (actionCaptureNotified || actionCapturedListener == null
+                || !isEnabledActionJson(json)) {
+            return;
+        }
+        actionCaptureNotified = true;
+        try {
+            actionCapturedListener.accept(json);
+        } catch (RuntimeException e) {
+            // 捕获回调只用于加速结束当前 round；失败时仍保留 turn 结束后的原处理路径。
+            logger.warn("action 捕获回调执行失败，回退到 turn 结束后处理", e);
+        }
+    }
+
+    private boolean isEnabledActionJson(String json) {
+        try {
+            JsonObject object = JsonParser.parseString(json).getAsJsonObject();
+            if (!object.has("action") || object.get("action").isJsonNull()) return false;
+            String action = object.get("action").getAsString();
+            return (subAgentEnabled && "dispatch_subagent".equals(action))
+                    || (scheduleEnabled && ("schedule_task".equals(action)
+                    || "manage_schedule".equals(action)))
+                    || (talkToEnabled && "talk_to".equals(action));
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**

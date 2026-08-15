@@ -62,7 +62,7 @@ public final class AcpResponseContentRenderer {
         }
 
         String content = "<details class=\"tool-call\">"
-                + "<summary>🛠️ ✅ " + escapeMarkdown(safeTitle) + "</summary>"
+                + "<summary>🛠️ ✅ " + escapeSummaryText(safeTitle) + "</summary>"
                 + "<div class=\"tool-call-body\">\n\n"
                 + inputBlock + outputBlock
                 + "\n\n</div></details>\n";
@@ -72,7 +72,7 @@ public final class AcpResponseContentRenderer {
     public void onSubAgentEvent(String eventType, String agentName,
                                 String detail) {
         String safeDetail = sanitizeCodeFences(detail);
-        String safeName = escapeMarkdown(agentName);
+        String safeName = escapeSummaryText(agentName);
         String content;
         switch (eventType == null ? "" : eventType) {
             case "DISPATCH_START":
@@ -115,12 +115,12 @@ public final class AcpResponseContentRenderer {
                 break;
             case "DISPATCH_COMPLETE":
                 content = "<details class=\"tool-call\">"
-                        + "<summary>📊 " + escapeMarkdown(safeDetail)
+                        + "<summary>📊 " + escapeSummaryText(safeDetail)
                         + "</summary></details>\n";
                 break;
             default:
                 content = "<details class=\"tool-call\">"
-                        + "<summary>ℹ️ " + escapeMarkdown(safeDetail)
+                        + "<summary>ℹ️ " + escapeSummaryText(safeDetail)
                         + "</summary></details>\n";
         }
         sendCardContent(content);
@@ -144,9 +144,15 @@ public final class AcpResponseContentRenderer {
                         + "<div class=\"tool-call-body\">\n\n```\n"
                         + safeDetail + "\n```\n\n</div></details>\n";
                 break;
+            case "SCHEDULE_EXECUTE":
+                content = "<details class=\"tool-call\"" + openAttr + ">"
+                        + "<summary>⏰ 定时任务执行中...</summary>"
+                        + "<div class=\"tool-call-body\">\n\n```\n"
+                        + safeDetail + "\n```\n\n</div></details>\n";
+                break;
             default:
                 content = "<details class=\"tool-call\"" + openAttr + ">"
-                        + "<summary>⏰ " + escapeMarkdown(safeDetail)
+                        + "<summary>⏰ " + escapeSummaryText(safeDetail)
                         + "</summary></details>\n";
         }
         sendCardContent(content);
@@ -159,7 +165,7 @@ public final class AcpResponseContentRenderer {
 
     public static String talkToCardContent(String eventType, String robotName,
                                            String messageContent) {
-        String safeName = escapeMarkdown(robotName);
+        String safeName = escapeSummaryText(robotName);
         String safeContent = sanitizeCodeFences(messageContent);
         String summary;
         if ("TALK_TO_SEND".equals(eventType)) {
@@ -183,7 +189,7 @@ public final class AcpResponseContentRenderer {
                 + "<summary>🗜️ ✅ 上下文压缩完成</summary>"
                 + "<div class=\"tool-call-body\">\n\n"
                 + "Agent 已完成上下文压缩，下一轮对话将重新注入完整 ACP harness。"
-                + "\n\nProvider：`" + sanitizeCodeFences(provider) + "`"
+                + "\n\nProvider：<code>" + escapeHtml(provider) + "</code>"
                 + "\n\n</div></details>\n");
     }
 
@@ -211,9 +217,20 @@ public final class AcpResponseContentRenderer {
                 .replace(">", "&gt;");
     }
 
-    private static String escapeMarkdown(String text) {
-        return text == null ? ""
-                : text.replaceAll("([#*])", "\\\\$1");
+    private static String escapeSummaryText(String text) {
+        if (text == null || text.isEmpty()) return "";
+        StringBuilder escaped = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            switch (text.charAt(i)) {
+                case '&': escaped.append("&amp;"); break;
+                case '<': escaped.append("&lt;"); break;
+                case '>': escaped.append("&gt;"); break;
+                case '#': escaped.append("&#35;"); break;
+                case '*': escaped.append("&#42;"); break;
+                default: escaped.append(text.charAt(i));
+            }
+        }
+        return escaped.toString();
     }
 
     private static String sanitizeCodeFences(String text) {

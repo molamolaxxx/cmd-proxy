@@ -1,5 +1,7 @@
 package com.mola.cmd.proxy.app.acp.schedule.model;
 
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+
 /**
  * 定时任务数据模型。
  * <p>
@@ -36,6 +38,9 @@ public class ScheduledTask {
 
     /** 下次执行时间（毫秒时间戳） */
     private long nextRunAt;
+
+    /** Optional channel-neutral creator identity inherited by scheduled executions. */
+    private AuthPrincipalContext authPrincipalContext;
 
     public ScheduledTask() {
     }
@@ -118,6 +123,11 @@ public class ScheduledTask {
 
     public void setNextRunAt(long nextRunAt) {
         this.nextRunAt = nextRunAt;
+    }
+
+    public AuthPrincipalContext getAuthPrincipalContext() { return authPrincipalContext; }
+    public void setAuthPrincipalContext(AuthPrincipalContext context) {
+        this.authPrincipalContext = context;
     }
 
     // ==================== 常量 ====================

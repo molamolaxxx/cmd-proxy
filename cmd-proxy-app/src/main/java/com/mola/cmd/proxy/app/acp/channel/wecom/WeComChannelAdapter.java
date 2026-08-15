@@ -10,6 +10,7 @@ import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelEvent;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
+import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import okhttp3.OkHttpClient;
@@ -216,6 +217,9 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                 WeComProtocol.string(from, "name"),
                 WeComProtocol.string(from, "alias"));
         String displayName = firstNonBlank(senderName, userId);
+        McpAuthManager.getInstance().recordPrincipal(
+                new com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext(
+                        userId, displayName, "WECOM", config.getId()));
         String chatId = WeComProtocol.string(body, "chatid");
         if (blank(msgId) || blank(userId) || blank(frame.getRequestId())) {
             logger.warn("channel message missing fields: channelId={}, msgid={}, errorCode=CHANNEL_FRAME_INVALID",

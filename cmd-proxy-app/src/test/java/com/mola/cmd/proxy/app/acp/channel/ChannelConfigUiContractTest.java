@@ -25,5 +25,9 @@ public class ChannelConfigUiContractTest {
         assertTrue(html.contains("最近发消息的排在前面"));
         assertTrue(html.contains("knownTargets.map"));
         assertFalse(html.contains("<input value=\"'+esc(ch.defaultChatId||'')+'\""));
+        assertTrue(html.contains("<label>用户行为</label><select onchange=\"config.channels['+i+'].userBehavior=this.value"));
+        assertTrue(html.contains("<option value=\"QUEUE\""));
+        assertTrue(html.contains("<option value=\"INTERRUPT\""));
+        assertTrue(html.contains("userBehavior:'QUEUE'"));
     }
 }

@@ -4,6 +4,8 @@ import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -15,8 +17,9 @@ import java.util.Map;
  * 通过 {@code npx @agentclientprotocol/claude-agent-acp} 启动适配器子进程，
  * 该适配器将 Claude Agent SDK 包装为标准 ACP JSON-RPC over stdio。
  * <p>
- * 凭证与 MCP 配置均通过 Claude Agent SDK 的 resolveSettings() 自动加载，
- * 无需 cmd-proxy 手动注入。
+ * 凭证仍由 Claude Agent SDK 的 settings 解析；MCP 配置则由 cmd-proxy 从
+ * Claude 的标准 local/project/user scope 读取并随 session/new 传入，以便注入
+ * 每个 Agent runtime 独立的鉴权上下文。
  */
 public class ClaudeAgentAcpProvider implements AgentProvider {
 
@@ -34,10 +37,17 @@ public class ClaudeAgentAcpProvider implements AgentProvider {
 
     @Override
     public List<Path> getMcpConfigPaths(String workspacePath) {
-        // Claude Code 通过插件市场管理 MCP server
-        // (~/.claude/plugins/marketplaces/.../<plugin>/.mcp.json)
-        // 适配器内部 resolveSettings() 自动加载，无需手动注入
-        return Collections.emptyList();
+        List<Path> paths = new ArrayList<>();
+        // Claude 的 user/local scope 都保存在 ~/.claude.json：user scope 位于
+        // 根 mcpServers，local scope 位于 projects.<cwd>.mcpServers。
+        paths.add(Paths.get(HOME, ".claude.json"));
+        // project scope 使用工作目录下的 .mcp.json。
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            paths.add(Paths.get(workspacePath, ".mcp.json"));
+        }
+        // 这些配置必须通过 ACP session/new 传入，cmd-proxy 才能为每个 runtime
+        // 注入独立的 MCP 鉴权上下文；不能只依赖 Claude SDK 自行加载。
+        return paths;
     }
 
     @Override

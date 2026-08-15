@@ -5,6 +5,8 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.McpConfigLoader;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,6 +35,9 @@ public class SubAgentAcpClient extends AbstractAcpClient {
     private final int timeoutSeconds;
     private final List<Path> mcpConfigPaths;
     private final ExecutorService executor;
+    private final AuthPrincipalContext authPrincipalContext;
+    private final String authSessionId;
+    private final String authTurnId = java.util.UUID.randomUUID().toString();
 
     /** 进度快照回调间隔（毫秒） */
     private long progressIntervalMs = 30_000;
@@ -42,9 +47,17 @@ public class SubAgentAcpClient extends AbstractAcpClient {
 
     public SubAgentAcpClient(String workspacePath, String groupId,
                              int timeoutSeconds, AcpRobotParam robotParam) {
+        this(workspacePath, groupId, timeoutSeconds, robotParam, null);
+    }
+
+    public SubAgentAcpClient(String workspacePath, String groupId,
+                             int timeoutSeconds, AcpRobotParam robotParam,
+                             AuthPrincipalContext authPrincipalContext) {
         super(AgentProviderRouter.getInstance().resolve(robotParam.getAgentProvider()),
               workspacePath, groupId, robotParam);
         this.timeoutSeconds = timeoutSeconds;
+        this.authPrincipalContext = authPrincipalContext;
+        this.authSessionId = McpAuthManager.getInstance().createSession(groupId);
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(workspacePath, robotParam);
         this.executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "subagent-worker-" + groupId);
@@ -69,7 +82,8 @@ public class SubAgentAcpClient extends AbstractAcpClient {
         JsonObject params = new JsonObject();
         params.addProperty("cwd", workspacePath);
 
-        JsonArray mcpServers = McpConfigLoader.loadFromPaths(mcpConfigPaths);
+        JsonArray mcpServers = McpConfigLoader.loadFromPaths(mcpConfigPaths, authSessionId,
+                McpAuthManager.getInstance().getBaseUrl(), workspacePath);
         params.add("mcpServers", mcpServers);
         logger.info("SubAgent session/new 携带 {} 个 MCP server, workspace={}",
                 mcpServers.size(), workspacePath);
@@ -106,6 +120,18 @@ public class SubAgentAcpClient extends AbstractAcpClient {
      * 在流式读取过程中同时收集文本和工具调用事件，定期推送快照。
      */
     private String doSendWithProgress(String promptText) throws IOException {
+        if (authPrincipalContext != null) {
+            McpAuthManager.getInstance().bind(
+                    authSessionId, authPrincipalContext, authTurnId);
+        }
+        try {
+            return doSendWithProgressBound(promptText);
+        } finally {
+            McpAuthManager.getInstance().unbind(authSessionId, authTurnId);
+        }
+    }
+
+    private String doSendWithProgressBound(String promptText) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
@@ -209,6 +235,7 @@ public class SubAgentAcpClient extends AbstractAcpClient {
     @Override
     public void close() throws IOException {
         executor.shutdownNow();
-        super.close();
+        try { super.close(); }
+        finally { McpAuthManager.getInstance().removeSession(authSessionId); }
     }
 }

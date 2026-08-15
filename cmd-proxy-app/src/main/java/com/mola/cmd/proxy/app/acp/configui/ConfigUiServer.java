@@ -6,6 +6,7 @@ import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
+import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
 import com.mola.cmd.proxy.app.utils.CmdProxyHome;
 import com.mola.cmd.proxy.client.conf.CmdProxyConf;
 import com.sun.net.httpserver.HttpExchange;
@@ -170,6 +171,11 @@ public class ConfigUiServer {
                 proxied(this::handleChannelBindingTargets));
         server.createContext("/api/team/sharing-status",
                 proxied(this::handleTeamSharingStatus));
+        server.createContext("/api/mcp-auth/v1/servers/register", this::handleMcpRegister);
+        server.createContext("/api/mcp-auth/v1/check", this::handleMcpCheck);
+        server.createContext("/api/mcp-auth/v1/servers", proxied(this::handleMcpServers));
+        server.createContext("/api/mcp-auth/v1/principals", proxied(this::handleMcpPrincipals));
+        server.createContext("/api/mcp-auth/v1/policies", proxied(this::handleMcpPolicies));
         server.createContext("/api/refresh", proxied(this::handleRefresh));
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
         server.createContext("/api/refresh-channel", proxied(this::handleRefreshChannel));
@@ -178,7 +184,68 @@ public class ConfigUiServer {
         server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
 
         server.start();
+        McpAuthManager.getInstance().setBaseUrl("http://127.0.0.1:" + port);
         logger.info("ConfigUI 已启动: http://localhost:{}", port);
+    }
+
+    private void handleMcpRegister(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "application/json", "{\"success\":false,\"code\":\"METHOD_NOT_ALLOWED\"}");
+            return;
+        }
+        JSONObject result;
+        try { result = McpAuthManager.getInstance().register(JSON.parseObject(readBody(exchange))); }
+        catch (Exception e) { result = apiError("INVALID_REQUEST", e.getMessage()); }
+        int status = "AUTH_SESSION_NOT_FOUND".equals(result.getString("code")) ? 404
+                : result.getBooleanValue("success") ? 200 : 400;
+        sendResponse(exchange, status, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleMcpCheck(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "application/json", "{\"success\":false,\"code\":\"METHOD_NOT_ALLOWED\"}");
+            return;
+        }
+        JSONObject result;
+        try { result = McpAuthManager.getInstance().check(JSON.parseObject(readBody(exchange))); }
+        catch (Exception e) { result = apiError("INVALID_REQUEST", e.getMessage()); }
+        sendResponse(exchange, result.getBooleanValue("success") ? 200 : 400,
+                "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleMcpServers(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed"); return;
+        }
+        JSONObject result = new JSONObject(true);
+        result.put("servers", McpAuthManager.getInstance().serverSnapshot());
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleMcpPrincipals(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed"); return;
+        }
+        JSONObject result = new JSONObject(true);
+        result.put("principals", McpAuthManager.getInstance().principalSnapshot());
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleMcpPolicies(HttpExchange exchange) throws IOException {
+        if (!"PUT".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed"); return;
+        }
+        JSONObject result;
+        try { result = McpAuthManager.getInstance().updatePolicy(JSON.parseObject(readBody(exchange))); }
+        catch (Exception e) { result = apiError("INVALID_REQUEST", e.getMessage()); }
+        sendResponse(exchange, result.getBooleanValue("success") ? 200 : 400,
+                "application/json", JSON.toJSONString(result));
+    }
+
+    private JSONObject apiError(String code, String message) {
+        JSONObject result = new JSONObject(true); result.put("success", false);
+        result.put("code", code); result.put("message", message == null ? "invalid request" : message);
+        return result;
     }
 
     public void stop() {

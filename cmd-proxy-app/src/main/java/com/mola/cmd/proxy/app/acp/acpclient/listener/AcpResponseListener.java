@@ -43,7 +43,7 @@ public interface AcpResponseListener {
      * 与 onMessage 分离，让客户端可以用不同的 UI 展示定时任务操作状态。
      * 默认空实现，向后兼容已有的 Listener 实现。
      *
-     * @param eventType  事件类型：SCHEDULE_CREATE / SCHEDULE_MANAGE
+     * @param eventType  事件类型：SCHEDULE_CREATE / SCHEDULE_MANAGE / SCHEDULE_EXECUTE
      * @param detail     事件详情（JSON 原文或操作摘要）
      * @param expanded   是否默认展开明细
      */

@@ -8,6 +8,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
@@ -19,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -218,6 +220,12 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
 
     public String deliver(TalkToRequest request, String senderName, String senderChatterId,
                           String senderGroupId, List<ContactRef> contacts) {
+        return deliver(request, senderName, senderChatterId, senderGroupId, contacts, null);
+    }
+
+    public String deliver(TalkToRequest request, String senderName, String senderChatterId,
+                          String senderGroupId, List<ContactRef> contacts,
+                          AuthPrincipalContext authPrincipalContext) {
         String target = request.getTarget();
 
         // 外部端点必须先于包含冒号的跨 chatter 兼容格式判断。
@@ -230,7 +238,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         // 查找通讯录中是否有该 target 的远程配置
         ContactRef remoteContact = findRemoteContact(target, contacts);
         if (remoteContact != null) {
-            return deliverCrossChatter(remoteContact, request, senderName, senderChatterId);
+            return deliverCrossChatter(remoteContact, request, senderName, senderChatterId,
+                    authPrincipalContext);
         }
 
         // 如果 target 包含冒号（"chatterId:robotName" 格式），说明是跨 chatter 回复场景
@@ -243,12 +252,13 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 ContactRef adhocRemote = new ContactRef(targetRobotName, "");
                 adhocRemote.setChatterId(targetChatterId);
                 adhocRemote.setRemote(true);
-                return deliverCrossChatter(adhocRemote, request, senderName, senderChatterId);
+                return deliverCrossChatter(adhocRemote, request, senderName, senderChatterId,
+                        authPrincipalContext);
             }
         }
 
         // 本地投递
-        return deliverLocal(request, senderName);
+        return deliverLocal(request, senderName, authPrincipalContext);
     }
 
     public void registerExternalGateway(ExternalTalkToGateway gateway) {
@@ -285,7 +295,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
     /**
      * 本地消息投递（原有逻辑）。
      */
-    private String deliverLocal(TalkToRequest request, String senderName) {
+    private String deliverLocal(TalkToRequest request, String senderName,
+                                AuthPrincipalContext authPrincipalContext) {
         String target = request.getTarget();
         String content = request.getContent();
         int depth = request.getDepth();
@@ -327,7 +338,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         cleanExpiredDedup();
 
         // 7. 构造消息
-        TalkToMessage message = new TalkToMessage(senderName, content, depth + 1);
+        TalkToMessage message = new TalkToMessage(senderName, content, depth + 1,
+                Collections.emptyList(), authPrincipalContext);
 
         // 8. 检查目标状态并投递
         if (targetClient.getState() == AbstractAcpClient.State.READY) {
@@ -362,7 +374,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      * 通过 CmdReceiver.callback 推送到 MolaChat 网关。
      */
     private String deliverCrossChatter(ContactRef remoteContact, TalkToRequest request,
-                                       String senderName, String senderChatterId) {
+                                       String senderName, String senderChatterId,
+                                       AuthPrincipalContext authPrincipalContext) {
         String target = remoteContact.getName();
         String targetChatterId = remoteContact.getChatterId();
         String content = request.getContent();
@@ -396,6 +409,12 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
             resultMap.put("senderRobotName", senderName);
             resultMap.put("content", content);
             resultMap.put("depth", String.valueOf(depth));
+            if (authPrincipalContext != null) {
+                resultMap.put("authPrincipalId", authPrincipalContext.getPrincipalId());
+                resultMap.put("authPrincipalName", authPrincipalContext.getDisplayName());
+                resultMap.put("authSourceType", authPrincipalContext.getSourceType());
+                resultMap.put("authSourceId", authPrincipalContext.getSourceId());
+            }
 
             CmdResponseContent response = new CmdResponseContent(
                     UUID.randomUUID().toString(), resultMap
@@ -493,6 +512,10 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
 
     public static void sendInboundMessage(AcpClient targetClient, TalkToMessage message) {
         PromptOptions options = targetClient.promptOptionsForInboundTalkTo(message);
+        if (options.getAuthPrincipalContext() == null
+                && message.getAuthPrincipalContext() != null) {
+            options.setAuthPrincipalContext(message.getAuthPrincipalContext());
+        }
         String prompt = message.buildPrompt();
         if (options.isRestoredChannelContinuation()) {
             prompt += "\n[信道续接]\n"

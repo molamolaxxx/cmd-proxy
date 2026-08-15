@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
 
 /**
  * MCP Server 配置加载工具类。
@@ -39,13 +40,138 @@ public final class McpConfigLoader {
      * @return ACP 协议格式的 mcpServers JsonArray
      */
     public static JsonArray loadFromPaths(List<Path> configPaths) {
+        return loadFromPaths(configPaths, null, null, null);
+    }
+
+    public static JsonArray loadFromPaths(List<Path> configPaths, String authSessionId,
+                                          String authBaseUrl) {
+        return loadFromPaths(configPaths, authSessionId, authBaseUrl, null);
+    }
+
+    public static JsonArray loadFromPaths(List<Path> configPaths, String authSessionId,
+                                          String authBaseUrl, String workspacePath) {
         Map<String, JsonObject> serverMap = new LinkedHashMap<>();
-        for (Path configPath : configPaths) {
-            loadFromSinglePath(configPath, serverMap);
+        Path claudeGlobalConfig = findClaudeGlobalConfig(configPaths);
+        if (claudeGlobalConfig != null && workspacePath != null) {
+            loadClaudeConfigurations(configPaths, claudeGlobalConfig, workspacePath, serverMap);
+        } else {
+            for (Path configPath : configPaths) {
+                loadFromSinglePath(configPath, serverMap);
+            }
         }
         JsonArray result = new JsonArray();
-        serverMap.values().forEach(result::add);
+        for (JsonObject server : serverMap.values()) {
+            appendAuthContext(server, authSessionId, authBaseUrl);
+            result.add(server);
+        }
         return result;
+    }
+
+    /**
+     * 按 Claude Code 的优先级加载 MCP：local > project > user。
+     * Claude 的 local/user scope 共用 ~/.claude.json，不能当作普通根级配置读取。
+     */
+    private static void loadClaudeConfigurations(List<Path> configPaths, Path globalConfig,
+                                                 String workspacePath,
+                                                 Map<String, JsonObject> serverMap) {
+        JsonObject root = readJsonObject(globalConfig);
+        if (root != null) {
+            JsonObject projects = root.getAsJsonObject("projects");
+            JsonObject project = findClaudeProject(projects, workspacePath);
+            loadServerObject(project != null ? project.getAsJsonObject("mcpServers") : null,
+                    globalConfig, serverMap);
+        }
+        // project scope 的优先级低于 local、高于 user。
+        for (Path configPath : configPaths) {
+            if (!samePath(configPath, globalConfig)) {
+                loadFromSinglePath(configPath, serverMap);
+            }
+        }
+        if (root != null) {
+            loadServerObject(root.getAsJsonObject("mcpServers"), globalConfig, serverMap);
+        }
+    }
+
+    private static Path findClaudeGlobalConfig(List<Path> configPaths) {
+        if (configPaths == null) return null;
+        for (Path path : configPaths) {
+            if (path != null && path.getFileName() != null
+                    && ".claude.json".equalsIgnoreCase(path.getFileName().toString())) {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    private static JsonObject findClaudeProject(JsonObject projects, String workspacePath) {
+        if (projects == null || workspacePath == null) return null;
+        String expected = normalizePath(workspacePath);
+        for (Map.Entry<String, JsonElement> entry : projects.entrySet()) {
+            if (entry.getValue().isJsonObject()
+                    && expected.equalsIgnoreCase(normalizePath(entry.getKey()))) {
+                return entry.getValue().getAsJsonObject();
+            }
+        }
+        return null;
+    }
+
+    private static String normalizePath(String value) {
+        String normalized = value == null ? "" : value.trim().replace('\\', '/');
+        while (normalized.length() > 1 && normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    private static boolean samePath(Path left, Path right) {
+        return left != null && right != null
+                && normalizePath(left.toAbsolutePath().normalize().toString())
+                .equalsIgnoreCase(normalizePath(right.toAbsolutePath().normalize().toString()));
+    }
+
+    private static JsonObject readJsonObject(Path path) {
+        if (path == null || !Files.exists(path)) return null;
+        try {
+            String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+            return JsonParser.parseString(content).getAsJsonObject();
+        } catch (Exception e) {
+            logger.error("Failed to load MCP config from {}", path, e);
+            return null;
+        }
+    }
+
+    private static void appendAuthContext(JsonObject server, String authSessionId,
+                                          String authBaseUrl) {
+        if (authSessionId == null || authSessionId.trim().isEmpty()) return;
+        if ("http".equals(server.has("type") ? server.get("type").getAsString() : "")) {
+            JsonArray headers = server.has("headers") ? server.getAsJsonArray("headers") : new JsonArray();
+            putNamedValue(headers, McpAuthManager.AUTH_SESSION_HEADER, authSessionId);
+            if (authBaseUrl != null && !authBaseUrl.trim().isEmpty()) {
+                putNamedValue(headers, McpAuthManager.AUTH_BASE_URL_HEADER, authBaseUrl.trim());
+            }
+            server.add("headers", headers);
+        } else if (server.has("command")) {
+            JsonArray env = server.has("env") ? server.getAsJsonArray("env") : new JsonArray();
+            putNamedValue(env, McpAuthManager.AUTH_SESSION_ENV, authSessionId);
+            if (authBaseUrl != null && !authBaseUrl.trim().isEmpty()) {
+                putNamedValue(env, McpAuthManager.AUTH_BASE_URL_ENV, authBaseUrl.trim());
+            }
+            server.add("env", env);
+        }
+    }
+
+    private static void putNamedValue(JsonArray values, String name, String value) {
+        for (int i = 0; i < values.size(); i++) {
+            JsonObject item = values.get(i).getAsJsonObject();
+            if (name.equalsIgnoreCase(item.get("name").getAsString())) {
+                item.addProperty("value", value);
+                return;
+            }
+        }
+        JsonObject item = new JsonObject();
+        item.addProperty("name", name);
+        item.addProperty("value", value);
+        values.add(item);
     }
 
     private static void loadFromSinglePath(Path configPath, Map<String, JsonObject> serverMap) {
@@ -68,26 +194,29 @@ public final class McpConfigLoader {
                 logger.debug("No mcpServers in config: {}", configPath);
                 return;
             }
-            int loaded = 0;
-            for (Map.Entry<String, JsonElement> entry : servers.entrySet()) {
-                String name = entry.getKey();
-                JsonObject serverObj = entry.getValue().getAsJsonObject();
-                if (serverObj.has("disabled") && serverObj.get("disabled").getAsBoolean()) {
-                    continue;
-                }
-                if (serverMap.containsKey(name)) {
-                    continue;
-                }
-                JsonObject mcpServer = convertToAcpFormat(name, serverObj);
-                if (mcpServer != null) {
-                    serverMap.put(name, mcpServer);
-                    loaded++;
-                }
-            }
-            logger.info("Loaded {} MCP server(s) from {}", loaded, configPath);
+            loadServerObject(servers, configPath, serverMap);
         } catch (Exception e) {
             logger.error("Failed to load MCP config from {}", configPath, e);
         }
+    }
+
+    private static void loadServerObject(JsonObject servers, Path configPath,
+                                         Map<String, JsonObject> serverMap) {
+        if (servers == null) return;
+        int loaded = 0;
+        for (Map.Entry<String, JsonElement> entry : servers.entrySet()) {
+            if (!entry.getValue().isJsonObject()) continue;
+            String name = entry.getKey();
+            JsonObject serverObj = entry.getValue().getAsJsonObject();
+            if (serverObj.has("disabled") && serverObj.get("disabled").getAsBoolean()) continue;
+            if (serverMap.containsKey(name)) continue;
+            JsonObject mcpServer = convertToAcpFormat(name, serverObj);
+            if (mcpServer != null) {
+                serverMap.put(name, mcpServer);
+                loaded++;
+            }
+        }
+        logger.info("Loaded {} MCP server(s) from {}", loaded, configPath);
     }
 
     /**
@@ -196,16 +325,18 @@ public final class McpConfigLoader {
                 // Codex TOML 使用 http_headers，ACP 使用 headers 数组。
                 headers = serverObj.getAsJsonObject("http_headers");
             }
+            JsonArray headerArray = new JsonArray();
             if (headers != null) {
-                JsonArray headerArray = new JsonArray();
                 for (Map.Entry<String, JsonElement> h : headers.entrySet()) {
                     JsonObject header = new JsonObject();
                     header.addProperty("name", h.getKey());
                     header.addProperty("value", h.getValue().getAsString());
                     headerArray.add(header);
                 }
-                acpServer.add("headers", headerArray);
             }
+            // Kiro ACP 2.18.0 要求 HTTP MCP 始终携带 headers；缺失时会在
+            // session/new 阶段无错误地退出。无请求头时显式传递空数组。
+            acpServer.add("headers", headerArray);
         } else if (serverObj.has("command")) {
             // command 可能是字符串（kiro 格式）或数组（opencode 格式）
             JsonElement cmdElem = serverObj.get("command");
@@ -414,9 +545,17 @@ public final class McpConfigLoader {
      * 从配置文件列表中提取 MCP server 名称列表（用于能力反思等场景）。
      */
     public static java.util.List<String> loadServerNames(List<Path> configPaths) {
+        return loadServerNames(configPaths, null);
+    }
+
+    public static java.util.List<String> loadServerNames(List<Path> configPaths,
+                                                         String workspacePath) {
         Map<String, JsonObject> serverMap = new LinkedHashMap<>();
-        for (Path configPath : configPaths) {
-            loadFromSinglePath(configPath, serverMap);
+        Path claudeGlobalConfig = findClaudeGlobalConfig(configPaths);
+        if (claudeGlobalConfig != null && workspacePath != null) {
+            loadClaudeConfigurations(configPaths, claudeGlobalConfig, workspacePath, serverMap);
+        } else {
+            for (Path configPath : configPaths) loadFromSinglePath(configPath, serverMap);
         }
         return new java.util.ArrayList<>(serverMap.keySet());
     }

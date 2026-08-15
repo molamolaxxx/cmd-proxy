@@ -161,4 +161,12 @@ public interface AgentProvider {
     default boolean needsInlineImages() {
         return false;
     }
+
+    /**
+     * 是否为 Provider 在取消/中断等控制流程中生成的展示伪消息。
+     * 这类文本不是 Assistant 的业务回答，不应写入历史或推送到对话框。
+     */
+    default boolean isAgentMessageControlArtifact(String text) {
+        return false;
+    }
 }

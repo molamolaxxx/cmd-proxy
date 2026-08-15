@@ -28,7 +28,8 @@ public final class ChannelTalkToMessage extends TalkToMessage {
         this.chatId = chatId;
         this.messageType = "text";
         this.quotedMessage = null;
-        this.turnContext = turnContext(replyTarget, channelDisplayName, chatType, chatId, senderId);
+        this.turnContext = turnContext(replyTarget, channelDisplayName, chatType, chatId,
+                senderId, senderDisplayName);
     }
 
     public ChannelTalkToMessage(String replyTarget, String channelDisplayName,
@@ -44,7 +45,8 @@ public final class ChannelTalkToMessage extends TalkToMessage {
         this.chatId = chatId;
         this.messageType = messageType;
         this.quotedMessage = quotedMessage;
-        this.turnContext = turnContext(replyTarget, channelDisplayName, chatType, chatId, senderId);
+        this.turnContext = turnContext(replyTarget, channelDisplayName, chatType, chatId,
+                senderId, senderDisplayName);
     }
 
     public String getChannelDisplayName() {
@@ -90,9 +92,10 @@ public final class ChannelTalkToMessage extends TalkToMessage {
 
     private static ChannelTurnContext turnContext(String replyTarget, String channelId,
                                                   String chatType, String chatId,
-                                                  String senderId) {
+                                                  String senderId, String senderDisplayName) {
         String address = "group".equals(chatType) ? chatId : senderId;
-        return new ChannelTurnContext(channelId, replyTarget, chatType, address);
+        return new ChannelTurnContext(channelId, replyTarget, chatType, address,
+                senderId, senderDisplayName);
     }
 
     private static String safe(String value) {

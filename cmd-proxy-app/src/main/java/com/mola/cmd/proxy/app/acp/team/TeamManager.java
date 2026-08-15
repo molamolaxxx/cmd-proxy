@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
+import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
@@ -679,6 +680,12 @@ public final class TeamManager implements AutoCloseable {
 
     public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
                                           String groupName, String prompt) {
+        return executeScheduledPrompt(owner, taskId, groupName, prompt, null);
+    }
+
+    public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
+                                          String groupName, String prompt,
+                                          AuthPrincipalContext authPrincipalContext) {
         if (owner == null || !owner.isTeam() || prompt == null
                 || prompt.trim().isEmpty() || closed.get()
                 || startupCoordinator == null) {
@@ -754,7 +761,8 @@ public final class TeamManager implements AutoCloseable {
             eventSink.publish(TeamEventEnvelope.next(runtime,
                     member.getTeamMemberId(), member.getAcpClientId(),
                     TeamEventType.SCHEDULE_EVENT, data));
-            replacement.send(prompt, null, PromptOptions.forScheduleExecution());
+            replacement.send(prompt, null,
+                    PromptOptions.forScheduleExecution(authPrincipalContext));
             return true;
         } catch (Exception error) {
             TeamError teamError = TeamError.of(
@@ -987,7 +995,13 @@ public final class TeamManager implements AutoCloseable {
                     getOrCreateTalkToDispatcher(team.getTeamId()).deliverRemoteInbound(
                             command.getMessageId(), command.getSenderTeamMemberId(),
                             command.getTargetTeamMemberId(), command.getContent(),
-                            command.getDepth());
+                            command.getDepth(), command.getAuthPrincipalId() == null
+                                    || command.getAuthPrincipalId().trim().isEmpty() ? null
+                                    : new AuthPrincipalContext(
+                                            command.getAuthPrincipalId(),
+                                            command.getAuthPrincipalName(),
+                                            command.getAuthSourceType(),
+                                            command.getAuthSourceId()));
             if (delivered.getStatus()
                     == com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher.InboundDeliveryResult.Status.REJECTED) {
                 receivedTalkToMessages.remove(dedupKey);

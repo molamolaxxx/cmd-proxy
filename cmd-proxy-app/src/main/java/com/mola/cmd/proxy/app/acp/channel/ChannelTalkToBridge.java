@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.channel;
 
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
+import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
@@ -13,9 +14,12 @@ import java.util.Collections;
 import java.util.List;
 import java.io.IOException;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Resolves the current bound MAIN client for every event and enters the shared TalkTo inbox. */
 public final class ChannelTalkToBridge {
+    private static final Logger logger = LoggerFactory.getLogger(ChannelTalkToBridge.class);
     public interface ClientResolver {
         AcpClient getClient(String groupId);
     }
@@ -107,15 +111,36 @@ public final class ChannelTalkToBridge {
                     event.getReplyRoute().getChatType(), event.getReplyRoute().getChatId(),
                     event.getMessageType(), event.getContent(), event.getQuotedMessage(),
                     localAttachments);
-            TalkToDispatcher.InboundDeliveryResult result =
-                    target.getDispatcher().deliverInbound(
-                            target.getRoutingKey(), client, message);
+            TalkToDispatcher.InboundDeliveryResult result = deliverInbound(
+                    config, target, client, message);
             if (result.getStatus() == TalkToDispatcher.InboundDeliveryResult.Status.REJECTED) {
                 replyFailureAsync(replyTarget, "当前处理队列已满，请稍后重试。");
             }
             return result;
         } finally {
             inboundGate.readLock().unlock();
+        }
+    }
+
+    private TalkToDispatcher.InboundDeliveryResult deliverInbound(
+            ChannelConfig config, ChannelBoundTarget target, AcpClient client,
+            ChannelTalkToMessage message) {
+        synchronized (client) {
+            if (ChannelConfig.USER_BEHAVIOR_INTERRUPT.equals(config.getUserBehavior())
+                    && client.getState() == AbstractAcpClient.State.BUSY) {
+                try {
+                    client.cancel();
+                    logger.info("channel inbound interrupted active ACP turn: channelId={}, route={}",
+                            config.getId(), target.getRoutingKey());
+                } catch (IOException e) {
+                    // Preserve delivery semantics: the new message can still wait in the inbox.
+                    logger.warn("channel inbound failed to cancel active ACP turn; message will still be delivered: "
+                                    + "channelId={}, route={}",
+                            config.getId(), target.getRoutingKey(), e);
+                }
+            }
+            return target.getDispatcher().deliverInbound(
+                    target.getRoutingKey(), client, message);
         }
     }
 

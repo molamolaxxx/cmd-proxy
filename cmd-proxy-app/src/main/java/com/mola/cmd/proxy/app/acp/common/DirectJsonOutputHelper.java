@@ -51,6 +51,7 @@ public final class DirectJsonOutputHelper {
         sb.append("✅ 正确做法：直接在回复中输出原始 JSON 文本\n");
         sb.append("\n");
         sb.append("输出 JSON 后必须立即结束当前回复，不要在 JSON 之后继续输出任何文字。\n");
+        sb.append("每次回复只输出一个 action JSON；如需继续操作，请等待系统返回结果后在下一次回复中再输出。\n");
         sb.append("系统会自动").append(resultDescription).append("。\n");
     }
 }
