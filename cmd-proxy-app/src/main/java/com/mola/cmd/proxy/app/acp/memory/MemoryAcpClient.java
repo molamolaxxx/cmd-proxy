@@ -21,7 +21,8 @@ import java.util.concurrent.*;
  *   <li>无图片处理、无会话历史、无 listener 回调</li>
  * </ul>
  */
-public class MemoryAcpClient extends AbstractAcpClient {
+public class MemoryAcpClient extends AbstractAcpClient
+        implements MemoryExtractor.MemoryExtractionClient {
 
     private static final Logger logger = LoggerFactory.getLogger(MemoryAcpClient.class);
 
@@ -64,7 +65,6 @@ public class MemoryAcpClient extends AbstractAcpClient {
         JsonObject params = new JsonObject();
         params.addProperty("cwd", workspacePath);
         params.add("mcpServers", new JsonArray());  // 不加载任何 MCP
-
         JsonObject response = sendRequest("session/new", params);
         JsonObject result = response.getAsJsonObject("result");
         setSessionId(result.get("sessionId").getAsString());

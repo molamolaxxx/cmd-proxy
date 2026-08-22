@@ -1,7 +1,6 @@
 package com.mola.cmd.proxy.app.acp.subagent;
 
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
-import com.mola.cmd.proxy.app.acp.common.DirectJsonOutputHelper;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentRef;
 import org.slf4j.Logger;
@@ -84,7 +83,7 @@ public class SubAgentContextInjector {
         // 组装完整上下文
         StringBuilder result = new StringBuilder();
         result.append("\n<available-sub-agents>\n");
-        result.append("你可以通过 dispatch_subagent 指令将任务委托给以下子 Agent。\n");
+        result.append("你可以通过 cmd-proxy MCP 的 dispatch_subagent 工具将任务委托给以下子 Agent。\n");
         result.append("当你判断某个子任务更适合由专业子 Agent 处理时，请使用此能力。\n");
         result.append("你可以同时派发多个子 Agent 并行执行。\n\n");
         result.append("## 可用子 Agent 列表\n\n");
@@ -103,16 +102,11 @@ public class SubAgentContextInjector {
         result.append("## 派发注意事项\n");
         result.append("每个子 Agent 只能访问其标注的「工作目录」下的文件。派发任务前请确认目标 Agent 的工作目录与任务所需的文件路径一致。self-fork 继承你当前的工作目录。\n\n");
 
-        // 调用格式 + 示例
-        result.append("## 调用格式\n");
-        result.append("当你需要调用子 Agent 时，请在回复中输出以下 JSON（独占一行，不要包裹在代码块中）：\n");
-        result.append("{\"action\":\"dispatch_subagent\",\"tasks\":[");
-        result.append("{\"agent\":\"").append(validNames.get(0)).append("\",\"title\":\"简短任务名\",\"prompt\":\"具体任务描述\"}]}\n");
+        result.append("## 工具调用\n");
+        result.append("需要委托时，直接调用 dispatch_subagent MCP 工具；不要在回复正文中模拟调用或输出 Action JSON。\n");
         result.append("其中 title 是任务的简短名称（2~6个字），用于在执行过程中区分同一 agent 的不同任务。\n");
         result.append("tasks 数组中可以包含多个任务，同一个 agent 也可以派发多个不同任务，它们会各自启动独立实例并行执行。\n\n");
-        DirectJsonOutputHelper.appendUsageWarning(result,
-                "派发子 Agent 任务",
-                "解析 tasks 并创建子 Agent 实例执行");
+        result.append("工具返回聚合结果后，再继续总结或执行下一步。\n");
 
         result.append("</available-sub-agents>\n");
         return result.toString();

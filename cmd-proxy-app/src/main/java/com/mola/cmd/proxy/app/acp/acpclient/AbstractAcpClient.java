@@ -639,7 +639,7 @@ public abstract class AbstractAcpClient implements Closeable {
 
     protected void sendJson(JsonObject json) throws IOException {
         String text = gson.toJson(json);
-        logger.debug("acp输入 {}", text);
+        logger.debug("acp输入 {}", redactSensitiveJson(json));
         synchronized (writer) {
             writer.write(text);
             writer.newLine();
@@ -662,7 +662,7 @@ public abstract class AbstractAcpClient implements Closeable {
      */
     protected void sendJsonInBackground(JsonObject json, java.util.concurrent.atomic.AtomicReference<IOException> writeError) {
         String text = gson.toJson(json);
-        logger.debug("acp输入(async) {}", text);
+        logger.debug("acp输入(async) {}", redactSensitiveJson(json));
         Thread writeThread = new Thread(() -> {
             try {
                 synchronized (writer) {
@@ -679,6 +679,49 @@ public abstract class AbstractAcpClient implements Closeable {
         }, "acp-stdin-write");
         writeThread.setDaemon(true);
         writeThread.start();
+    }
+
+    private String redactSensitiveJson(JsonObject json) {
+        JsonObject copy = json.deepCopy();
+        redactSensitiveValues(copy);
+        return gson.toJson(copy);
+    }
+
+    private void redactSensitiveValues(JsonElement element) {
+        if (element == null || element.isJsonNull()) {
+            return;
+        }
+        if (element.isJsonArray()) {
+            for (JsonElement child : element.getAsJsonArray()) {
+                redactSensitiveValues(child);
+            }
+            return;
+        }
+        if (!element.isJsonObject()) {
+            return;
+        }
+        JsonObject object = element.getAsJsonObject();
+        for (Map.Entry<String, JsonElement> entry
+                : new ArrayList<>(object.entrySet())) {
+            if (isSensitiveJsonKey(entry.getKey())) {
+                object.addProperty(entry.getKey(), "[REDACTED]");
+            } else {
+                redactSensitiveValues(entry.getValue());
+            }
+        }
+    }
+
+    private boolean isSensitiveJsonKey(String key) {
+        if (key == null) {
+            return false;
+        }
+        String normalized = key.toUpperCase(Locale.ROOT).replace('-', '_');
+        return normalized.contains("API_KEY")
+                || normalized.contains("AUTH_TOKEN")
+                || normalized.contains("OAUTH_TOKEN")
+                || normalized.contains("AUTHORIZATION")
+                || normalized.contains("SECRET")
+                || "ANTHROPIC_CUSTOM_HEADERS".equals(normalized);
     }
 
     /**

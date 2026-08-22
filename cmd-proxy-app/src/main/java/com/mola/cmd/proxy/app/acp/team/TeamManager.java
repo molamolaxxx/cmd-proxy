@@ -7,6 +7,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
@@ -675,17 +676,25 @@ public final class TeamManager implements AutoCloseable {
      */
     public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
                                           String prompt) {
-        return executeScheduledPrompt(owner, taskId, null, prompt);
+        return executeScheduledPrompt(owner, taskId, null, prompt, null, null);
     }
 
     public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
                                           String groupName, String prompt) {
-        return executeScheduledPrompt(owner, taskId, groupName, prompt, null);
+        return executeScheduledPrompt(owner, taskId, groupName, prompt, null, null);
     }
 
     public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
                                           String groupName, String prompt,
                                           AuthPrincipalContext authPrincipalContext) {
+        return executeScheduledPrompt(owner, taskId, groupName, prompt,
+                authPrincipalContext, null);
+    }
+
+    public boolean executeScheduledPrompt(ScheduleOwnerKey owner, String taskId,
+                                          String groupName, String prompt,
+                                          AuthPrincipalContext authPrincipalContext,
+                                          ChannelDeliveryContext channelDeliveryContext) {
         if (owner == null || !owner.isTeam() || prompt == null
                 || prompt.trim().isEmpty() || closed.get()
                 || startupCoordinator == null) {
@@ -762,7 +771,8 @@ public final class TeamManager implements AutoCloseable {
                     member.getTeamMemberId(), member.getAcpClientId(),
                     TeamEventType.SCHEDULE_EVENT, data));
             replacement.send(prompt, null,
-                    PromptOptions.forScheduleExecution(authPrincipalContext));
+                    replacement.promptOptionsForScheduleExecution(
+                            authPrincipalContext, channelDeliveryContext));
             return true;
         } catch (Exception error) {
             TeamError teamError = TeamError.of(

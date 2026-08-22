@@ -4,6 +4,7 @@ import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -30,9 +31,11 @@ public class ScheduleOwnerIsolationTest {
         ScheduleTaskManager manager = new ScheduleTaskManager(root);
         AuthPrincipalContext principal = new AuthPrincipalContext(
                 "user-a", "Alice", "WECOM", "wecom-main");
+        ChannelDeliveryContext delivery = new ChannelDeliveryContext(
+                "wecom-main", "single", "user-a", "user-a", "Alice");
 
         ScheduledTask task = manager.createTask(owner, "run", "prompt",
-                new ScheduleConfig("once", "+1h"), null, principal);
+                new ScheduleConfig("once", "+1h"), null, principal, delivery);
 
         assertEquals("user-a", task.getAuthPrincipalContext().getPrincipalId());
         String persisted = new String(Files.readAllBytes(
@@ -40,6 +43,19 @@ public class ScheduleOwnerIsolationTest {
                 java.nio.charset.StandardCharsets.UTF_8);
         assertTrue(persisted.contains("\"principalId\": \"user-a\""));
         assertTrue(persisted.contains("\"sourceType\": \"WECOM\""));
+        assertTrue(persisted.contains("\"conversationAddress\": \"user-a\""));
+
+        ScheduleTaskManager restored = new ScheduleTaskManager(root);
+        restored.start();
+        try {
+            ScheduledTask restoredTask = restored.listTasks(owner).get(0);
+            assertEquals("wecom-main",
+                    restoredTask.getChannelDeliveryContext().getChannelId());
+            assertEquals("user-a",
+                    restoredTask.getChannelDeliveryContext().getConversationAddress());
+        } finally {
+            restored.stop();
+        }
     }
 
     @Test
@@ -89,7 +105,7 @@ public class ScheduleOwnerIsolationTest {
         task.setNextRunAt(0L);
         CountDownLatch invoked = new CountDownLatch(1);
         AtomicReference<ScheduleOwnerKey> actual = new AtomicReference<>();
-        manager.setScopedExecutionCallback((owner, taskId, groupName, prompt, principal) -> {
+        manager.setScopedExecutionCallback((owner, taskId, groupName, prompt, principal, delivery) -> {
             actual.set(owner);
             invoked.countDown();
             return false;
@@ -102,6 +118,39 @@ public class ScheduleOwnerIsolationTest {
         assertTrue(invoked.await(2, TimeUnit.SECONDS));
         assertEquals(member, actual.get());
         assertEquals("owner-1", actual.get().getOwnerId());
+    }
+
+    @Test
+    public void scheduledChannelExecutionCarriesDeliveryContextAndAgentHint()
+            throws Exception {
+        Path root = temporaryFolder.newFolder("delivery-callback").toPath();
+        ScheduleTaskManager manager = new ScheduleTaskManager(root);
+        ScheduleOwnerKey owner = ScheduleOwnerKey.main("Robot");
+        ChannelDeliveryContext delivery = new ChannelDeliveryContext(
+                "wecom-main", "single", "user-a", "user-a", "Alice");
+        ScheduledTask task = manager.createTask(owner, "drink", "提醒喝水",
+                new ScheduleConfig("once", "+1h"), null, null, delivery);
+        task.setNextRunAt(0L);
+        CountDownLatch invoked = new CountDownLatch(1);
+        AtomicReference<String> actualPrompt = new AtomicReference<>();
+        AtomicReference<ChannelDeliveryContext> actualDelivery = new AtomicReference<>();
+        manager.setScopedExecutionCallback((callbackOwner, taskId, groupName, prompt,
+                                             principal, channelDelivery) -> {
+            actualPrompt.set(prompt);
+            actualDelivery.set(channelDelivery);
+            invoked.countDown();
+            return false;
+        });
+
+        Method scan = ScheduleTaskManager.class.getDeclaredMethod("scan");
+        scan.setAccessible(true);
+        scan.invoke(manager);
+
+        assertTrue(invoked.await(2, TimeUnit.SECONDS));
+        assertSame(delivery, actualDelivery.get());
+        assertTrue(actualPrompt.get().contains("已绑定创建时的原始外部信道会话"));
+        assertTrue(actualPrompt.get().contains("target 必须精确设置为“回复”"));
+        assertFalse(actualPrompt.get().contains("user-a"));
     }
 
     @Test

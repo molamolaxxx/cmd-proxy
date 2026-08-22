@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.schedule.model;
 
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
 
 /**
  * 定时任务数据模型。
@@ -41,6 +42,9 @@ public class ScheduledTask {
 
     /** Optional channel-neutral creator identity inherited by scheduled executions. */
     private AuthPrincipalContext authPrincipalContext;
+
+    /** Durable origin conversation used to deliver scheduled output precisely. */
+    private ChannelDeliveryContext channelDeliveryContext;
 
     public ScheduledTask() {
     }
@@ -128,6 +132,10 @@ public class ScheduledTask {
     public AuthPrincipalContext getAuthPrincipalContext() { return authPrincipalContext; }
     public void setAuthPrincipalContext(AuthPrincipalContext context) {
         this.authPrincipalContext = context;
+    }
+    public ChannelDeliveryContext getChannelDeliveryContext() { return channelDeliveryContext; }
+    public void setChannelDeliveryContext(ChannelDeliveryContext context) {
+        this.channelDeliveryContext = context;
     }
 
     // ==================== 常量 ====================

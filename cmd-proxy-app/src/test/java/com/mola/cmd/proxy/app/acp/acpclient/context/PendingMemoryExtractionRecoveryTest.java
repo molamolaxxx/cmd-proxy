@@ -74,6 +74,40 @@ public class PendingMemoryExtractionRecoveryTest {
         assertTrue(history.listPendingMemoryExtractions().isEmpty());
     }
 
+    @Test
+    public void restoredSessionWithoutPendingSeedsLoadedHistoryBaseline()
+            throws Exception {
+        ConversationHistoryManager history = new ConversationHistoryManager(
+                AcpClientIdentity.main("group-1", "Robot One", "Robot One"),
+                temporaryFolder.newFolder("resume-baseline").toPath());
+        FakeMemoryManager memory = new FakeMemoryManager(true);
+
+        int submitted = PendingMemoryExtractionRecovery.recover(
+                history, "Robot One", "/workspace", memory,
+                new ConcurrentHashMap<>(), "restored-session", 6);
+
+        assertEquals(0, submitted);
+        assertEquals("restored-session", memory.resumedSessionId);
+        assertEquals(6, memory.resumedHistorySize);
+        assertEquals(0, memory.activeRecoveries);
+    }
+
+    @Test
+    public void restoredSessionWithPendingUsesActiveRecoveryWithoutPreseeding()
+            throws Exception {
+        ConversationHistoryManager history = history("active-recovery");
+        FakeMemoryManager memory = new FakeMemoryManager(true);
+
+        int submitted = PendingMemoryExtractionRecovery.recover(
+                history, "Robot One", "/workspace", memory,
+                new ConcurrentHashMap<>(), "session-1", 2);
+
+        assertEquals(1, submitted);
+        assertEquals(1, memory.activeRecoveries);
+        assertNull(memory.resumedSessionId);
+        assertTrue(history.listPendingMemoryExtractions().isEmpty());
+    }
+
     private ConversationHistoryManager history(String directory) throws Exception {
         ConversationHistoryManager history = new ConversationHistoryManager(
                 AcpClientIdentity.main("group-1", "Robot One", "Robot One"),
@@ -89,6 +123,9 @@ public class PendingMemoryExtractionRecoveryTest {
         private final boolean succeed;
         private int messages;
         private int sessionCount;
+        private int activeRecoveries;
+        private String resumedSessionId;
+        private int resumedHistorySize;
 
         private FakeMemoryManager(boolean succeed) {
             this.succeed = succeed;
@@ -100,11 +137,29 @@ public class PendingMemoryExtractionRecoveryTest {
         }
 
         @Override
-        public void submitExtract(String workspacePath, List<ContextMessage> history) {
+        public void submitExtract(String sourceSessionId, String workspacePath,
+                                  List<ContextMessage> history) {
         }
 
         @Override
-        public void submitExtractFull(String workspacePath,
+        public void resumeSession(String sourceSessionId, int historySize) {
+            resumedSessionId = sourceSessionId;
+            resumedHistorySize = historySize;
+        }
+
+        @Override
+        public void submitRecoverActive(String sourceSessionId,
+                                        String workspacePath,
+                                        List<ContextMessage> history,
+                                        Runnable onSuccess,
+                                        Consumer<Throwable> onFailure) {
+            activeRecoveries++;
+            submitExtractFull(sourceSessionId, workspacePath, history,
+                    onSuccess, onFailure);
+        }
+
+        @Override
+        public void submitExtractFull(String sourceSessionId, String workspacePath,
                                       List<ContextMessage> history,
                                       Runnable onSuccess,
                                       Consumer<Throwable> onFailure) {
@@ -136,11 +191,12 @@ public class PendingMemoryExtractionRecoveryTest {
         }
 
         @Override
-        public void submitExtract(String workspacePath, List<ContextMessage> history) {
+        public void submitExtract(String sourceSessionId, String workspacePath,
+                                  List<ContextMessage> history) {
         }
 
         @Override
-        public void submitExtractFull(String workspacePath,
+        public void submitExtractFull(String sourceSessionId, String workspacePath,
                                       List<ContextMessage> history,
                                       Runnable onSuccess,
                                       Consumer<Throwable> onFailure) {

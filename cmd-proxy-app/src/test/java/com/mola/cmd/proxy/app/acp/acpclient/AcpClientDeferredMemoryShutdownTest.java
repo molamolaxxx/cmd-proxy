@@ -25,7 +25,7 @@ public class AcpClientDeferredMemoryShutdownTest {
             throws Exception {
         Fixture fixture = fixture("shutdown");
         fixture.client.getHistoryManager().setOnTurnFlushed(() ->
-                fixture.memory.submitExtract("/workspace",
+                fixture.memory.submitExtract("session-1", "/workspace",
                         fixture.client.getConversationHistory()));
 
         fixture.client.closeForShutdown();
@@ -102,12 +102,13 @@ public class AcpClientDeferredMemoryShutdownTest {
         }
 
         @Override
-        public void submitExtract(String workspacePath, List<ContextMessage> history) {
+        public void submitExtract(String sourceSessionId, String workspacePath,
+                                  List<ContextMessage> history) {
             incrementalSubmissions++;
         }
 
         @Override
-        public void submitExtractFull(String workspacePath,
+        public void submitExtractFull(String sourceSessionId, String workspacePath,
                                       List<ContextMessage> history,
                                       Runnable onSuccess,
                                       Consumer<Throwable> onFailure) {

@@ -39,7 +39,6 @@ public class AbilityReflectionAcpClient extends AbstractAcpClient {
         JsonObject params = new JsonObject();
         params.addProperty("cwd", workspacePath);
         params.add("mcpServers", new JsonArray());
-
         JsonObject response = sendRequest("session/new", params);
         JsonObject result = response.getAsJsonObject("result");
         setSessionId(result.get("sessionId").getAsString());

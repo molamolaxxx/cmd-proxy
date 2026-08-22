@@ -70,8 +70,10 @@ public class TeamTalkToContextInjectorTest {
 
         assertTrue(context.contains("绑定的外部信道联系人"));
         assertTrue(context.contains("wecom-main（target: channel:wecom-main）: 外部信道"));
-        assertTrue(context.contains("\"target\":\"channel:wecom-main\""));
+        assertTrue(context.contains("target: channel:wecom-main"));
         assertTrue(context.contains("\"target\":\"member-2\""));
+        assertTrue(context.contains("talk_to MCP 工具"));
+        assertFalse(context.contains("\"action\""));
     }
 
     @Test

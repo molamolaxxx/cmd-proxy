@@ -103,6 +103,14 @@ public class PromptOptions {
         return forScheduleExecution().setAuthPrincipalContext(context);
     }
 
+    public static PromptOptions forScheduleExecution(AuthPrincipalContext authContext,
+                                                     ChannelTurnContext channelContext) {
+        PromptOptions options = forScheduleExecution();
+        if (channelContext != null) options.setChannelTurnContext(channelContext);
+        if (authContext != null) options.setAuthPrincipalContext(authContext);
+        return options;
+    }
+
     public static PromptOptions forDerivedWork(AuthPrincipalContext context) {
         return new PromptOptions().setAuthPrincipalContext(context);
     }

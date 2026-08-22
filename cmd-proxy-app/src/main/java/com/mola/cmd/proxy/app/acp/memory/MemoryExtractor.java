@@ -11,6 +11,7 @@ import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.io.StringReader;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -18,8 +19,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
@@ -40,7 +41,17 @@ public class MemoryExtractor {
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
     private final AcpRobotParam robotParam;
+    private final String executionWorkDir;
     private final MemoryScopeLockRegistry locks;
+    private final MemoryClientFactory clientFactory;
+
+    /** 每个主 ACP session 对应一个可复用的专属 Memory session。 */
+    private final ConcurrentMap<String, MemoryExtractionClient> sessionClients =
+            new ConcurrentHashMap<>();
+
+    /** 已成功提取到的历史消息数量，按主 ACP session 隔离。 */
+    private final ConcurrentMap<String, Integer> extractedSizes =
+            new ConcurrentHashMap<>();
 
     /** 单线程提取队列，串行执行所有提取任务 */
     private final ExecutorService extractQueue = new ThreadPoolExecutor(
@@ -54,54 +65,133 @@ public class MemoryExtractor {
             new ThreadPoolExecutor.DiscardOldestPolicy()  // 队列满时丢弃最旧的（增量提取可丢，全量兜底）
     );
 
-    /** 上次提取时的历史消息数量，用于增量提取 */
-    private final AtomicInteger lastExtractedSize = new AtomicInteger(0);
-
     public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
-        this(config, fileStore, robotParam, new MemoryScopeLockRegistry());
+        this(config, fileStore, robotParam, null, new MemoryScopeLockRegistry());
     }
 
     public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore,
                            AcpRobotParam robotParam,
                            MemoryScopeLockRegistry locks) {
+        this(config, fileStore, robotParam, null, locks);
+    }
+
+    public MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore,
+                           AcpRobotParam robotParam, String executionWorkDir,
+                           MemoryScopeLockRegistry locks) {
+        this(config, fileStore, robotParam, executionWorkDir, locks,
+                MemoryExtractor::createClient);
+    }
+
+    MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore,
+                    AcpRobotParam robotParam, MemoryScopeLockRegistry locks,
+                    MemoryClientFactory clientFactory) {
+        this(config, fileStore, robotParam, null, locks, clientFactory);
+    }
+
+    MemoryExtractor(MemoryConfig config, MemoryFileStore fileStore,
+                    AcpRobotParam robotParam, String executionWorkDir,
+                    MemoryScopeLockRegistry locks,
+                    MemoryClientFactory clientFactory) {
         this.config = config;
         this.fileStore = fileStore;
         this.robotParam = robotParam;
+        this.executionWorkDir = executionWorkDir;
         this.locks = locks;
+        this.clientFactory = clientFactory;
     }
 
     /**
      * 异步提交增量提取任务。
      * 只分析上次提取之后的新对话，每 N 轮触发时使用。
      */
-    public void submitExtract(String workspacePath, List<ContextMessage> history) {
+    public void submitExtract(String sourceSessionId, String workspacePath,
+                              List<ContextMessage> history) {
         if (history == null || history.isEmpty()) return;
+        String sessionKey = requireSessionKey(sourceSessionId);
         // 快照 history，避免异步执行时原列表被修改
         List<ContextMessage> snapshot = new ArrayList<>(history);
         try {
-            extractQueue.submit(() -> doIncrementalExtract(workspacePath, snapshot));
+            extractQueue.submit(() -> doIncrementalExtract(
+                    sessionKey, workspacePath, snapshot));
         } catch (RejectedExecutionException e) {
             logger.warn("提取队列已满或已关闭，跳过本次增量提取");
         }
     }
 
     /**
-     * 异步提交全量提取任务。
-     * session 结束时使用，确保不遗漏。
+     * session/load 成功后登记已加载历史的基线。与提取任务使用同一 FIFO 队列，
+     * 保证随后提交的增量快照只读取恢复之后的新消息。
      */
-    public void submitExtractFull(String workspacePath, List<ContextMessage> history) {
-        submitExtractFull(workspacePath, history, null, null);
+    public void resumeSession(String sourceSessionId, int historySize) {
+        String sessionKey = requireSessionKey(sourceSessionId);
+        int baseline = Math.max(0, historySize);
+        try {
+            extractQueue.submit(() -> {
+                Integer current = extractedSizes.get(sessionKey);
+                if (current == null || current < baseline) {
+                    extractedSizes.put(sessionKey, baseline);
+                }
+                logger.info("恢复记忆提取游标, sessionId={}, historySize={}",
+                        sessionKey, baseline);
+            });
+        } catch (RejectedExecutionException e) {
+            logger.warn("提取队列已满或已关闭，无法登记恢复会话游标, sessionId={}",
+                    sessionKey);
+        }
     }
 
-    public void submitExtractFull(String workspacePath, List<ContextMessage> history,
-                                  Runnable onSuccess,
-                                  Consumer<Throwable> onFailure) {
-        if (history == null || history.isEmpty()) return;
+    /**
+     * 对仍将继续使用的主 session 执行启动补偿。与终态提取不同，成功后保留
+     * Memory client 与游标，使后续增量请求能够命中同一 Memory session。
+     */
+    public void submitRecoverActive(String sourceSessionId, String workspacePath,
+                                    List<ContextMessage> history,
+                                    Runnable onSuccess,
+                                    Consumer<Throwable> onFailure) {
+        if (history == null || history.isEmpty()) {
+            resumeSession(sourceSessionId, 0);
+            if (onSuccess != null) onSuccess.run();
+            return;
+        }
+        String sessionKey = requireSessionKey(sourceSessionId);
         List<ContextMessage> snapshot = new ArrayList<>(history);
         try {
             extractQueue.submit(() -> {
                 try {
-                    if (!doFullExtract(workspacePath, snapshot)) {
+                    if (!doActiveRecovery(sessionKey, workspacePath, snapshot)) {
+                        throw new IllegalStateException("活动会话记忆恢复失败");
+                    }
+                    if (onSuccess != null) onSuccess.run();
+                } catch (Exception error) {
+                    if (onFailure != null) onFailure.accept(error);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            logger.warn("提取队列已满或已关闭，跳过活动会话记忆恢复");
+            if (onFailure != null) onFailure.accept(e);
+        }
+    }
+
+    /**
+     * 异步提交会话结束提取任务。
+     * 只分析最后一次成功增量提取后的尾部；没有可靠游标的恢复场景自动全量分析。
+     */
+    public void submitExtractFull(String sourceSessionId, String workspacePath,
+                                  List<ContextMessage> history) {
+        submitExtractFull(sourceSessionId, workspacePath, history, null, null);
+    }
+
+    public void submitExtractFull(String sourceSessionId, String workspacePath,
+                                  List<ContextMessage> history,
+                                  Runnable onSuccess,
+                                  Consumer<Throwable> onFailure) {
+        if (history == null || history.isEmpty()) return;
+        String sessionKey = requireSessionKey(sourceSessionId);
+        List<ContextMessage> snapshot = new ArrayList<>(history);
+        try {
+            extractQueue.submit(() -> {
+                try {
+                    if (!doFinalExtract(sessionKey, workspacePath, snapshot)) {
                         throw new IllegalStateException("记忆提取执行失败");
                     }
                     if (onSuccess != null) onSuccess.run();
@@ -115,29 +205,64 @@ public class MemoryExtractor {
         }
     }
 
-    private void doIncrementalExtract(String workspacePath, List<ContextMessage> history) {
-        int lastSize = lastExtractedSize.get();
+    private void doIncrementalExtract(String sourceSessionId, String workspacePath,
+                                      List<ContextMessage> history) {
+        int lastSize = extractedSize(sourceSessionId, history.size());
         if (lastSize >= history.size()) {
             logger.info("无新对话内容，跳过增量提取");
             return;
         }
         List<ContextMessage> toExtract = history.subList(lastSize, history.size());
         logger.info("增量提取, 新消息数={}, 总消息数={}", toExtract.size(), history.size());
-        if (doExtract(workspacePath, toExtract)) {
-            lastExtractedSize.set(history.size());
+        if (doExtract(sourceSessionId, workspacePath, toExtract)) {
+            extractedSizes.put(sourceSessionId, history.size());
         }
     }
 
-    private boolean doFullExtract(String workspacePath, List<ContextMessage> history) {
-        logger.info("全量提取, 消息数={}", history.size());
-        boolean success = doExtract(workspacePath, history);
+    private boolean doFinalExtract(String sourceSessionId, String workspacePath,
+                                   List<ContextMessage> history) {
+        int lastSize = extractedSize(sourceSessionId, history.size());
+        List<ContextMessage> tail = history.subList(lastSize, history.size());
+        logger.info("会话结束尾部提取, 新消息数={}, 总消息数={}",
+                tail.size(), history.size());
+        boolean success = tail.isEmpty()
+                || doExtract(sourceSessionId, workspacePath, tail);
+        if (success && !tail.isEmpty()) {
+            extractedSizes.put(sourceSessionId, history.size());
+        }
+        closeSessionClient(sourceSessionId);
+        extractedSizes.remove(sourceSessionId);
+        return success;
+    }
+
+    private boolean doActiveRecovery(String sourceSessionId, String workspacePath,
+                                     List<ContextMessage> history) {
+        int lastSize = extractedSize(sourceSessionId, history.size());
+        List<ContextMessage> tail = history.subList(lastSize, history.size());
+        logger.info("活动恢复记忆提取, 新消息数={}, 总消息数={}",
+                tail.size(), history.size());
+        boolean success = tail.isEmpty()
+                || doExtract(sourceSessionId, workspacePath, tail);
         if (success) {
-            lastExtractedSize.set(history.size());
+            extractedSizes.put(sourceSessionId, history.size());
         }
         return success;
     }
 
-    private boolean doExtract(String workspacePath, List<ContextMessage> history) {
+    private int extractedSize(String sourceSessionId, int historySize) {
+        int lastSize = extractedSizes.getOrDefault(sourceSessionId, 0);
+        if (lastSize <= historySize) {
+            return lastSize;
+        }
+        logger.warn("记忆提取历史发生回退，重置游标, sessionId={}, extracted={}, current={}",
+                sourceSessionId, lastSize, historySize);
+        extractedSizes.remove(sourceSessionId);
+        closeSessionClient(sourceSessionId);
+        return 0;
+    }
+
+    private boolean doExtract(String sourceSessionId, String workspacePath,
+                              List<ContextMessage> history) {
         String historyText = serializeHistory(history);
         MemoryIndex existingIndex;
         ReentrantLock snapshotLock = locks.lockFor(fileStore, workspacePath);
@@ -150,11 +275,9 @@ public class MemoryExtractor {
         List<String> availableSkills = scanAvailableSkills(workspacePath);
         String prompt = MemoryPromptTemplate.build(historyText, existingIndex, availableSkills);
 
-        String groupId = "memory_extractor__" + workspacePath.hashCode();
-
-        try (MemoryAcpClient client = new MemoryAcpClient(
-                workspacePath, groupId, config.getSubClientTimeout(), robotParam, config.getModel())) {
-            client.start();
+        try {
+            MemoryExtractionClient client = getOrCreateClient(
+                    sourceSessionId, workspacePath);
             String response = client.sendPromptSync(prompt);
             logger.info("记忆提取子 Client 返回, 长度={}", response.length());
 
@@ -177,9 +300,77 @@ public class MemoryExtractor {
             logger.info("记忆提取完成, 操作数={}", actions.size());
             return true;
         } catch (Exception e) {
+            closeSessionClient(sourceSessionId);
             logger.error("记忆提取失败, workspacePath={}", workspacePath, e);
             return false;
         }
+    }
+
+    private MemoryExtractionClient getOrCreateClient(String sourceSessionId,
+                                                      String workspacePath)
+            throws IOException {
+        MemoryExtractionClient existing = sessionClients.get(sourceSessionId);
+        if (existing != null) {
+            return existing;
+        }
+        String groupId = "memory_extractor__" + workspacePath.hashCode()
+                + "__" + sourceSessionId.hashCode();
+        String clientWorkDir = executionWorkDir == null
+                || executionWorkDir.trim().isEmpty()
+                ? workspacePath : executionWorkDir.trim();
+        MemoryExtractionClient created = clientFactory.create(
+                clientWorkDir, groupId, config.getSubClientTimeout(),
+                robotParam, config);
+        sessionClients.put(sourceSessionId, created);
+        return created;
+    }
+
+    private static MemoryExtractionClient createClient(
+            String workspacePath, String groupId, int timeoutSeconds,
+            AcpRobotParam robotParam, MemoryConfig memoryConfig) throws IOException {
+        MemoryAcpClient client = new MemoryAcpClient(
+                workspacePath, groupId, timeoutSeconds, robotParam,
+                memoryConfig == null ? null : memoryConfig.getExecutionModel());
+        client.start();
+        return client;
+    }
+
+    private String requireSessionKey(String sourceSessionId) {
+        if (sourceSessionId == null || sourceSessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sourceSessionId 不能为空");
+        }
+        return sourceSessionId.trim();
+    }
+
+    private void closeSessionClient(String sourceSessionId) {
+        MemoryExtractionClient client = sessionClients.remove(sourceSessionId);
+        if (client == null) return;
+        try {
+            client.close();
+        } catch (IOException e) {
+            logger.warn("关闭 Memory session 失败, sourceSessionId={}",
+                    sourceSessionId, e);
+        }
+    }
+
+    private void closeAllSessionClients() {
+        for (Map.Entry<String, MemoryExtractionClient> entry
+                : sessionClients.entrySet()) {
+            closeSessionClient(entry.getKey());
+        }
+    }
+
+    interface MemoryExtractionClient extends AutoCloseable {
+        String sendPromptSync(String promptText) throws IOException;
+
+        @Override
+        void close() throws IOException;
+    }
+
+    interface MemoryClientFactory {
+        MemoryExtractionClient create(String workspacePath, String groupId,
+                                      int timeoutSeconds, AcpRobotParam robotParam,
+                                      MemoryConfig memoryConfig) throws IOException;
     }
 
     // ==================== 对话历史序列化 ====================
@@ -316,12 +507,15 @@ public class MemoryExtractor {
         } catch (InterruptedException e) {
             extractQueue.shutdownNow();
             Thread.currentThread().interrupt();
+        } finally {
+            closeAllSessionClients();
         }
     }
 
     /** 立即取消排队和正在等待的记忆模型调用，不参与进程 stop 的等待。 */
     public void shutdownNow() {
         extractQueue.shutdownNow();
+        closeAllSessionClients();
     }
 
     // ==================== Skill 扫描 ====================

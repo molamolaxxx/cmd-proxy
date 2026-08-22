@@ -50,6 +50,19 @@ public class AcpClientRegistry {
      */
     public void createSession(String groupId, String workspacePath,
                               AcpRobotParam robotParam) throws IOException {
+        try {
+            createSession(groupId, workspacePath, robotParam, null);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("初始化 AcpClient 失败", e);
+        }
+    }
+
+    /** Creates, fully wires, and only then starts a client. */
+    public void createSession(String groupId, String workspacePath,
+                              AcpRobotParam robotParam,
+                              ClientInitializer initializer) throws Exception {
         synchronized (sessionLock(groupId)) {
             // 如果已存在，先关闭旧 client
             AcpClient old = clients.remove(groupId);
@@ -74,9 +87,17 @@ public class AcpClientRegistry {
             if (isClearContext) {
                 client.setForceNewSession(true);
             }
-            client.start();
-            clients.put(groupId, client);
-            logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());
+            try {
+                if (initializer != null) initializer.initialize(client);
+                client.start();
+                clients.put(groupId, client);
+                logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());
+            } catch (Exception e) {
+                try { client.close(); } catch (IOException closeError) {
+                    logger.warn("关闭启动失败的 AcpClient 失败, groupId={}", groupId, closeError);
+                }
+                throw e;
+            }
         }
     }
 
@@ -105,8 +126,8 @@ public class AcpClientRegistry {
                 replacement.setTargetRestoreSessionId(targetRestoreSessionId);
             }
             try {
-                replacement.start();
                 if (initializer != null) initializer.initialize(replacement);
+                replacement.start();
                 clients.put(groupId, replacement);
                 logger.info("groupId={} 会话替换成功, sessionId={}",
                         groupId, replacement.getSessionId());
@@ -218,6 +239,17 @@ public class AcpClientRegistry {
      * 恢复指定 sessionId 的会话：关闭旧 client，创建新 client 并指定恢复目标。
      */
     public void restoreSession(String groupId, String targetSessionId) throws IOException {
+        try {
+            restoreSession(groupId, targetSessionId, null);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("恢复 AcpClient 失败", e);
+        }
+    }
+
+    public void restoreSession(String groupId, String targetSessionId,
+                               ClientInitializer initializer) throws Exception {
         synchronized (sessionLock(groupId)) {
             AcpClient old = clients.remove(groupId);
             String workspacePath = null;
@@ -232,10 +264,18 @@ public class AcpClientRegistry {
 
             AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
             client.setTargetRestoreSessionId(targetSessionId);
-            client.start();
-            clients.put(groupId, client);
-            logger.info("groupId={} 会话恢复成功, sessionId={}",
-                    groupId, client.getSessionId());
+            try {
+                if (initializer != null) initializer.initialize(client);
+                client.start();
+                clients.put(groupId, client);
+                logger.info("groupId={} 会话恢复成功, sessionId={}",
+                        groupId, client.getSessionId());
+            } catch (Exception e) {
+                try { client.close(); } catch (IOException closeError) {
+                    logger.warn("关闭恢复失败的 AcpClient 失败, groupId={}", groupId, closeError);
+                }
+                throw e;
+            }
         }
     }
 

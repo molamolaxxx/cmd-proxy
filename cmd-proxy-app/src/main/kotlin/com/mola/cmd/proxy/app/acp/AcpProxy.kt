@@ -75,6 +75,9 @@ object AcpProxy {
     /** 全局 robot 注册表，name -> AcpRobotParam */
     private val globalRobotRegistry = ConcurrentHashMap<String, AcpRobotParam>()
 
+    /** 包含禁用项的完整配置注册表，供记忆执行 Robot 等配置引用解析。 */
+    private val configuredRobotRegistry = ConcurrentHashMap<String, AcpRobotParam>()
+
     /** 定时任务管理器（全局单例） */
     private val scheduleTaskManager = ScheduleTaskManager()
 
@@ -127,7 +130,7 @@ object AcpProxy {
         groupWorkDirMap: Map<String, String> = emptyMap(),
         groupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
         teamSourceGroupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
-        configuredRobotNames: Set<String> = emptySet(),
+        configuredRobots: Collection<AcpRobotParam> = emptyList(),
         channels: List<ChannelConfig> = emptyList()
     ) {
         ensureShutdownHook()
@@ -140,7 +143,10 @@ object AcpProxy {
         } else {
             JSON.parseArray(chatterIdsJson, String::class.java).toList()
         }
-        this.configuredRobotNames.addAll(configuredRobotNames)
+        configuredRobots.filter { it.name.isNotBlank() }.forEach {
+            configuredRobotRegistry[it.name] = it
+            configuredRobotNames.add(it.name)
+        }
         // 注册命令
         CmdReceiver.register("acp", "acp") { param ->
             mutableMapOf<String, String>()
@@ -211,12 +217,10 @@ object AcpProxy {
                         return@submit
                     }
 
-                    registry.createSession(groupId, workDir, robot)
-
-                    val client = registry.getClient(groupId) ?: return@submit
-
-                    featureInitializer.initialize(
-                        AcpClientFeatureInitializer.Context.main(groupId), client, robot)
+                    registry.createSession(groupId, workDir, robot) { client ->
+                        featureInitializer.initialize(
+                            AcpClientFeatureInitializer.Context.main(groupId), client, robot)
+                    }
 
                     log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
                         groupId, robot?.name ?: "unknown", workDir ?: "default",
@@ -323,13 +327,13 @@ object AcpProxy {
                     if (options.targetRestoreSessionId != null) {
                         client.setTargetRestoreSessionId(options.targetRestoreSessionId)
                     }
-                    client.start()
                     featureInitializer.initialize(
                         AcpClientFeatureInitializer.Context.team(
                             member.acpClientId, member.sourceGroupId,
                             team.teamId, member.teamMemberId),
                         client, robot
                     )
+                    client.start()
                     client
                 } catch (e: Exception) {
                     try {
@@ -768,14 +772,14 @@ object AcpProxy {
                     return@register resultMap
                 }
 
-                registry.restoreSession(groupId, sessionId)
+                registry.restoreSession(groupId, sessionId) { restored ->
+                    featureInitializer.initialize(
+                        AcpClientFeatureInitializer.Context.main(groupId),
+                        restored, restored.robotParam)
+                }
 
                 val newClient = registry.getClient(groupId)
                 if (newClient != null) {
-                    featureInitializer.initialize(
-                        AcpClientFeatureInitializer.Context.main(groupId),
-                        newClient, newClient.robotParam)
-
                     Thread {
                         try {
                             replaySessionSnapshot(groupId, newClient)
@@ -1038,10 +1042,17 @@ object AcpProxy {
         if (robot == null || !robot.isMemoryEnabled) return
 
         val memCfg = robot.memory
-        val mgr = memoryManagers.getOrCreate(groupId, memCfg, robot)
+        val executionRobot = resolveMemoryExecutionRobot(robot)
+        val executionWorkDir = if (memCfg.isRobotExecution) {
+            executionRobot?.workDir
+        } else {
+            null
+        }
+        val mgr = memoryManagers.getOrCreate(
+            groupId, memCfg, robot, executionRobot, executionWorkDir)
         client.setMemoryManager(mgr)
         setupTurnCallback(client, memCfg, mgr)
-        recoverPendingMemoryExtractions(client, mgr)
+        client.setAfterSessionReady { recoverPendingMemoryExtractions(client, mgr) }
     }
 
     /**
@@ -1054,7 +1065,9 @@ object AcpProxy {
             client.clientIdentity.historyNamespace,
             client.workspacePath,
             manager,
-            pendingMemoryRecoveryClaims
+            pendingMemoryRecoveryClaims,
+            if (client.isRestoredSession) client.sessionId else null,
+            if (client.isRestoredSession) client.conversationHistory.size else 0
         )
     }
 
@@ -1070,6 +1083,7 @@ object AcpProxy {
             if (turnCount.incrementAndGet() % interval == 0) {
                 log.info("每 {} 轮触发记忆提取, groupId={}", interval, client.groupId)
                 memoryManager.submitExtract(
+                    client.sessionId,
                     client.workspacePath,
                     client.conversationHistory
                 )
@@ -1157,8 +1171,15 @@ object AcpProxy {
         for (name in allowedNames) {
             val targetRobot = globalRobotRegistry[name] ?: continue
             if (targetRobot.isMemoryEnabled) {
+                val executionRobot = resolveMemoryExecutionRobot(targetRobot)
+                val executionWorkDir = if (targetRobot.memory.isRobotExecution) {
+                    executionRobot?.workDir
+                } else {
+                    null
+                }
                 val memMgr = memoryManagers.getOrCreate(
-                    "subagent:$name", targetRobot.memory, targetRobot)
+                    "subagent:$name", targetRobot.memory, targetRobot,
+                    executionRobot, executionWorkDir)
                 subAgentMemoryMap[name] = memMgr
             }
         }
@@ -1268,14 +1289,15 @@ object AcpProxy {
      */
     fun startScheduler(groupRobotMap: Map<String, AcpRobotParam>) {
         // 设置执行回调：检查 client 状态，空闲则新建 session 并执行
-        scheduleTaskManager.setScopedExecutionCallback { owner, taskId, groupName, prompt, authPrincipal ->
+        scheduleTaskManager.setScopedExecutionCallback { owner, taskId, groupName, prompt, authPrincipal, channelDelivery ->
             if (owner.isTeam) {
                 val manager = teamManager
                 if (manager == null) {
                     log.error("Team 定时任务执行失败：TeamManager 不存在, owner={}", owner)
                     false
                 } else {
-                    manager.executeScheduledPrompt(owner, taskId, groupName, prompt, authPrincipal)
+                    manager.executeScheduledPrompt(
+                        owner, taskId, groupName, prompt, authPrincipal, channelDelivery)
                 }
             } else {
                 val robotName = owner.robotName
@@ -1314,10 +1336,12 @@ object AcpProxy {
                             targetGroupId, client.sessionId,
                             replacement.sessionId, "SCHEDULE")
                         replacement.send(prompt, null,
-                            PromptOptions.forScheduleExecution(authPrincipal))
+                            replacement.promptOptionsForScheduleExecution(
+                                authPrincipal, channelDelivery))
                     } else if (boundSessionId == client.sessionId) {
                         registry.sendMessage(targetGroupId,
-                            prompt, null, PromptOptions.forScheduleExecution(authPrincipal))
+                            prompt, null, client.promptOptionsForScheduleExecution(
+                                authPrincipal, channelDelivery))
                     } else {
                         try {
                             val replacement = registry.replaceSessionIfCurrent(
@@ -1333,7 +1357,8 @@ object AcpProxy {
                                 targetGroupId, client.sessionId,
                                 replacement.sessionId, "SCHEDULE_RESTORE")
                             replacement.send(prompt, null,
-                                PromptOptions.forScheduleExecution(authPrincipal))
+                                replacement.promptOptionsForScheduleExecution(
+                                    authPrincipal, channelDelivery))
                         } catch (e: Exception) {
                             log.error(
                                 "定时会话分组恢复失败，等待下一轮重试, owner={}, groupName={}, sessionId={}",
@@ -1508,6 +1533,7 @@ object AcpProxy {
         pendingMemoryRecoveryClaims.clear()
         abilityServices.clear()
         globalRobotRegistry.clear()
+        configuredRobotRegistry.clear()
         globalGroupRobotRegistry.clear()
         robotToGroupIdMap.clear()
         activeChatterIds = emptyList()
@@ -1632,7 +1658,9 @@ object AcpProxy {
      * 按 robot 维度热重载：只重建指定 robot 的 ACP 进程，不影响其他 robot。
      */
     @Synchronized
-    fun reloadRobot(robotName: String, robot: AcpRobotParam, chatterIds: List<String>) {
+    fun reloadRobot(robotName: String, robot: AcpRobotParam,
+                    chatterIds: List<String>,
+                    configuredRobots: Collection<AcpRobotParam>) {
         log.info("开始 robot 级热重载: robot={}, enabled={}, onlySubAgent={}, onlyTeamMember={}",
             robotName, robot.isEnabled, robot.isOnlySubAgent, robot.isOnlyTeamMember)
 
@@ -1649,22 +1677,38 @@ object AcpProxy {
                 "robot identity changed or is not active; use full ACP service refresh")
         }
 
+        // 单 Robot 刷新也同步完整配置快照，使记忆所有者能立即读取被引用
+        // Robot 的最新配置；这里只更新配置对象，不额外重建其它 Robot。
+        val latestConfiguredRobots = configuredRobots
+            .filter { it.name.isNotBlank() }
+            .associateBy { it.name }
+        configuredRobotRegistry.entries.removeIf {
+            !latestConfiguredRobots.containsKey(it.key)
+        }
+        configuredRobotRegistry.putAll(latestConfiguredRobots)
+        configuredRobotNames.clear()
+        configuredRobotNames.addAll(latestConfiguredRobots.keys)
+
         // 1. 找到该 robot 的所有旧 groupId，逐一关闭
         val oldGroupIds = registry.getGroupIdsByRobot(robotName)
         val remainsTeamSource = robot.isEnabled && !robot.isOnlySubAgent
         for (groupId in oldGroupIds) {
             registry.closeByGroupId(groupId)
+            // 新 client 必须按最新记忆执行方式重建 manager；旧 Team 引用由
+            // MemoryManagerRegistry 延迟到全局 stop 再关闭。
+            memoryManagers.remove(groupId)
             // MAIN → Team-only 时 Team client 仍按 sourceGroupId 共用这些服务。
             if (!remainsTeamSource) {
-                memoryManagers.remove(groupId)
                 abilityServices.remove(groupId)
             }
             log.info("robot '{}' 旧 client 已关闭, groupId={}", robotName, groupId)
         }
         globalGroupRobotRegistry.entries.removeIf { it.value.name == robotName }
         robotToGroupIdMap.remove(robotName)
+        memoryManagers.remove("subagent:$robotName")
 
         // 2. 更新全局 robot 注册表
+        configuredRobotRegistry[robotName] = robot
         if (robot.isEnabled && !robot.isOnlyTeamMember) {
             globalRobotRegistry[robotName] = robot
         } else {
@@ -1690,11 +1734,11 @@ object AcpProxy {
 
             for (groupId in newGroupIds) {
                 try {
-                    registry.createSession(groupId, robot.workDir, robot)
-                    val client = registry.getClient(groupId) ?: continue
-
-                    featureInitializer.initialize(
-                        AcpClientFeatureInitializer.Context.main(groupId), client, robot)
+                    registry.createSession(groupId, robot.workDir, robot) { created ->
+                        featureInitializer.initialize(
+                            AcpClientFeatureInitializer.Context.main(groupId), created, robot)
+                    }
+                    if (registry.getClient(groupId) == null) continue
 
                     // 更新 robotToGroupIdMap（取第一个新 groupId）
                     robotToGroupIdMap.putIfAbsent(robotName, groupId)
@@ -1738,6 +1782,23 @@ object AcpProxy {
         }
 
         log.info("robot 级热重载完成: robot={}", robotName)
+    }
+
+    /**
+     * 解析记忆模型真正使用的 Robot。完整配置注册表故意包含禁用 Robot；
+     * 引用不存在时禁止静默回退，避免记忆跑到错误的供应商。
+     */
+    private fun resolveMemoryExecutionRobot(ownerRobot: AcpRobotParam): AcpRobotParam? {
+        val memory = ownerRobot.memory
+        if (!memory.isRobotExecution) return ownerRobot
+        val targetName = memory.robotName?.trim().orEmpty()
+        val target = configuredRobotRegistry[targetName]
+        if (target == null) {
+            log.error(
+                "robot '{}' 的记忆执行 Robot 不存在: '{}'，本实例记忆功能不初始化",
+                ownerRobot.name, targetName)
+        }
+        return target
     }
 
     private fun teamMemberSourceDescriptors(): List<TeamMemberSourceDescriptor> {

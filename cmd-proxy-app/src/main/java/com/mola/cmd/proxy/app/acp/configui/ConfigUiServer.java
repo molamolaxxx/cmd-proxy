@@ -171,8 +171,6 @@ public class ConfigUiServer {
                 proxied(this::handleChannelBindingTargets));
         server.createContext("/api/team/sharing-status",
                 proxied(this::handleTeamSharingStatus));
-        server.createContext("/api/mcp-auth/v1/servers/register", this::handleMcpRegister);
-        server.createContext("/api/mcp-auth/v1/check", this::handleMcpCheck);
         server.createContext("/api/mcp-auth/v1/servers", proxied(this::handleMcpServers));
         server.createContext("/api/mcp-auth/v1/principals", proxied(this::handleMcpPrincipals));
         server.createContext("/api/mcp-auth/v1/policies", proxied(this::handleMcpPolicies));
@@ -184,7 +182,6 @@ public class ConfigUiServer {
         server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
 
         server.start();
-        McpAuthManager.getInstance().setBaseUrl("http://127.0.0.1:" + port);
         logger.info("ConfigUI 已启动: http://localhost:{}", port);
     }
 

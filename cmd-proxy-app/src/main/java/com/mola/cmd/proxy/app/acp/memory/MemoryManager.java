@@ -35,13 +35,21 @@ public class MemoryManager implements MemoryManagerBridge {
 
     public MemoryManager(MemoryConfig config, AcpRobotParam robotParam,
                          MemoryScopeLockRegistry locks) {
+        this(config, robotParam, robotParam, null, locks);
+    }
+
+    public MemoryManager(MemoryConfig config, AcpRobotParam ownerRobot,
+                         AcpRobotParam executionRobot, String executionWorkDir,
+                         MemoryScopeLockRegistry locks) {
         this.config = config;
         this.locks = locks;
-        String effectiveRobotName = config.isRobotScope() ? robotParam.getName() : null;
+        String effectiveRobotName = config.isRobotScope() ? ownerRobot.getName() : null;
         this.fileStore = new MemoryFileStore(config.getBaseDir(), effectiveRobotName);
         this.loader = new MemoryLoader(fileStore, config);
-        this.extractor = new MemoryExtractor(config, fileStore, robotParam, locks);
-        this.dreamer = new MemoryDreamer(config, fileStore, robotParam, locks);
+        this.extractor = executionRobot == null ? null : new MemoryExtractor(
+                config, fileStore, executionRobot, executionWorkDir, locks);
+        this.dreamer = executionRobot == null ? null : new MemoryDreamer(
+                config, fileStore, executionRobot, executionWorkDir, locks);
     }
 
     // ==================== MemoryManagerBridge 实现 ====================
@@ -64,20 +72,45 @@ public class MemoryManager implements MemoryManagerBridge {
     }
 
     @Override
-    public void submitExtract(String workspacePath, List<ContextMessage> history) {
-        if (!config.isWriteEnabled() || history == null || history.isEmpty()) return;
-        extractor.submitExtract(workspacePath, history);
+    public void submitExtract(String sourceSessionId, String workspacePath,
+                              List<ContextMessage> history) {
+        if (!config.isWriteEnabled() || extractor == null
+                || history == null || history.isEmpty()) return;
+        extractor.submitExtract(sourceSessionId, workspacePath, history);
     }
 
     @Override
-    public void submitExtractFull(String workspacePath, List<ContextMessage> history,
-                                  Runnable onSuccess,
-                                  Consumer<Throwable> onFailure) {
-        if (!config.isWriteEnabled() || history == null || history.isEmpty()) {
+    public void resumeSession(String sourceSessionId, int historySize) {
+        if (!config.isWriteEnabled() || extractor == null) return;
+        extractor.resumeSession(sourceSessionId, historySize);
+    }
+
+    @Override
+    public void submitRecoverActive(String sourceSessionId, String workspacePath,
+                                    List<ContextMessage> history,
+                                    Runnable onSuccess,
+                                    Consumer<Throwable> onFailure) {
+        if (!config.isWriteEnabled() || extractor == null
+                || history == null || history.isEmpty()) {
             if (onSuccess != null) onSuccess.run();
             return;
         }
-        extractor.submitExtractFull(workspacePath, history, onSuccess, onFailure);
+        extractor.submitRecoverActive(sourceSessionId, workspacePath, history,
+                onSuccess, onFailure);
+    }
+
+    @Override
+    public void submitExtractFull(String sourceSessionId, String workspacePath,
+                                  List<ContextMessage> history,
+                                  Runnable onSuccess,
+                                  Consumer<Throwable> onFailure) {
+        if (!config.isWriteEnabled() || extractor == null
+                || history == null || history.isEmpty()) {
+            if (onSuccess != null) onSuccess.run();
+            return;
+        }
+        extractor.submitExtractFull(sourceSessionId, workspacePath, history,
+                onSuccess, onFailure);
     }
 
     @Override
@@ -205,7 +238,7 @@ public class MemoryManager implements MemoryManagerBridge {
      * 手动触发记忆整理（供 acpMemoryDream 命令调用）。
      */
     public void triggerDream(String workspacePath) {
-        if (!config.isWriteEnabled()) return;
+        if (!config.isWriteEnabled() || dreamer == null) return;
         dreamer.submitDream(workspacePath);
     }
 
@@ -213,6 +246,7 @@ public class MemoryManager implements MemoryManagerBridge {
      * 检查并触发自动整理。
      */
     private void checkAndTriggerDream(String workspacePath) {
+        if (dreamer == null) return;
         try {
             if (dreamer.shouldDream(workspacePath)) {
                 logger.info("满足自动整理条件，触发 Memory Dream, workspacePath={}", workspacePath);
@@ -227,13 +261,13 @@ public class MemoryManager implements MemoryManagerBridge {
      * 关闭记忆系统，释放资源。
      */
     public void shutdown() {
-        extractor.shutdown();
-        dreamer.shutdown();
+        if (extractor != null) extractor.shutdown();
+        if (dreamer != null) dreamer.shutdown();
     }
 
     /** 进程 stop 使用：取消队列，不等待任何模型调用完成。 */
     public void shutdownNow() {
-        extractor.shutdownNow();
-        dreamer.shutdownNow();
+        if (extractor != null) extractor.shutdownNow();
+        if (dreamer != null) dreamer.shutdownNow();
     }
 }

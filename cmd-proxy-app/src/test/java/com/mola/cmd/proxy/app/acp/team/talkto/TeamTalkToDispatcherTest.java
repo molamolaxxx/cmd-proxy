@@ -184,8 +184,9 @@ public class TeamTalkToDispatcherTest {
         assertTrue(result.contains("已成功"));
         assertNotNull(fixture.target.lastPrompt);
         assertTrue(fixture.target.lastPrompt.contains("hello"));
-        assertTrue(fixture.target.lastPrompt.contains("\"target\":\"member-1\""));
-        assertTrue(fixture.target.lastPrompt.contains("\"_depth\":1"));
+        assertTrue(fixture.target.lastPrompt.contains("target 精确设置为：member-1"));
+        assertTrue(fixture.target.lastPrompt.contains("_depth 设置为：1"));
+        assertFalse(fixture.target.lastPrompt.contains("\"action\""));
         assertEquals(Arrays.asList(
                         TeamEventType.TALK_TO_SEND,
                         TeamEventType.MESSAGE_CHUNK,

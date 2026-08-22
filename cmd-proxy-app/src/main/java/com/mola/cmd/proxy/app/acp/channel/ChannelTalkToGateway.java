@@ -4,6 +4,8 @@ import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToContactProvider;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
@@ -59,6 +61,11 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
     }
 
     public String createRoute(String channelId, ChannelReplyRoute route, String ownerKey) {
+        return createRoute(channelId, route, ownerKey, false);
+    }
+
+    private String createRoute(String channelId, ChannelReplyRoute route, String ownerKey,
+                               boolean proactiveOnly) {
         cleanupExpired();
         if (routes.size() >= maxRoutes) {
             routes.entrySet().stream()
@@ -72,8 +79,32 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         long now = System.currentTimeMillis();
         long routeExpiry = route.getExpiresAt() > 0 ? route.getExpiresAt() : now + ttlMs;
         routes.put(target, new RouteEntry(channelId, route, now,
-                Math.min(routeExpiry, now + ttlMs), ownerKey));
+                Math.min(routeExpiry, now + ttlMs), ownerKey, proactiveOnly));
         return target;
+    }
+
+    @Override
+    public ChannelTurnContext restoreChannelTurn(ChannelDeliveryContext context,
+                                                 String senderGroupId) {
+        if (context == null) return null;
+        ChannelConfig config = configs.get(context.getChannelId());
+        if (config == null || !config.isEnabled()
+                || senderGroupId == null
+                || !senderGroupId.equals(bindingOwnerKey(config.getBinding()))) {
+            return null;
+        }
+        String chatType = trim(context.getChatType());
+        if (!("group".equals(chatType) || "single".equals(chatType))) return null;
+        String address = trim(context.getConversationAddress());
+        if (address.isEmpty()) return null;
+        long expiresAt = System.currentTimeMillis() + ttlMs;
+        ChannelReplyRoute route = new ChannelReplyRoute(null, null,
+                "group".equals(chatType) ? context.getSenderId() : address,
+                "group".equals(chatType) ? address : "", chatType, expiresAt);
+        String replyTarget = createRoute(context.getChannelId(), route,
+                senderGroupId, true);
+        return new ChannelTurnContext(context.getChannelId(), replyTarget, chatType,
+                address, context.getSenderId(), context.getSenderDisplayName());
     }
 
     public void discard(String target) {
@@ -263,12 +294,14 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         private boolean preciseConsumed;
 
         private RouteEntry(String channelId, ChannelReplyRoute route,
-                           long createdAt, long expiresAt, String ownerKey) {
+                           long createdAt, long expiresAt, String ownerKey,
+                           boolean preciseConsumed) {
             this.channelId = channelId;
             this.route = route;
             this.createdAt = createdAt;
             this.expiresAt = expiresAt;
             this.ownerKey = ownerKey;
+            this.preciseConsumed = preciseConsumed;
         }
     }
 }

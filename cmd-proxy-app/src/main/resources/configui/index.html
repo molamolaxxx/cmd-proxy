@@ -473,6 +473,7 @@ if(!config.robots.length){c.innerHTML='<div class="filter-empty"><span class="ma
 if(!entries.length){c.innerHTML='<div class="filter-empty"><span class="material-icons">search_off</span><p>没有匹配的 Robot</p><small>试试减少关键词或调整筛选条件</small></div>';return}
 c.innerHTML=paged.items.map(function(entry){var r=entry.item,i=entry.index;
 var mem=(r.memory&&(r.memory.readEnabled!==false||r.memory.writeEnabled!==false))?('读'+(r.memory.readEnabled!==false?'✓':'✗')+'/写'+(r.memory.writeEnabled!==false?'✓':'✗')):'关闭';
+if(mem!=='关闭'&&r.memory.executionMode==='robot')mem+=' / Robot: '+esc(r.memory.robotName||'未选择');
 var sharing=(teamSharingRuntime.grants||[]).filter(function(g){return g.robotName===r.name});
 var sharingTeams=sharing.reduce(function(n,g){return n+(g.teamCount||0)},0);
 var sharingMembers=sharing.reduce(function(n,g){return n+(g.memberCount||0)},0);
@@ -623,8 +624,8 @@ function toggleRobot(i){config.robots[i].enabled=!config.robots[i].enabled;markD
 
 function openRobotDialog(idx){
 editIdx=idx;
-var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,onlyTeamMember:false,teamSharedWithChatterIds:[],scheduleEnabled:false,autoNewSession:{enabled:false,checkIntervalMinutes:360,idleMinutes:180},memory:{readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
-if(!r.memory)r.memory={readEnabled:true,writeEnabled:true,scope:'workspace',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};if(r.memory.enabled!==undefined&&r.memory.readEnabled===undefined){r.memory.readEnabled=r.memory.enabled;r.memory.writeEnabled=r.memory.enabled;delete r.memory.enabled;}
+var r=idx>=0?JSON.parse(JSON.stringify(config.robots[idx])):{name:'',signature:'',workDir:'',agentProvider:'KIRO_CLI',avatar:'',enabled:true,abilityAutoRefresh:true,onlySubAgent:false,onlyTeamMember:false,teamSharedWithChatterIds:[],scheduleEnabled:false,autoNewSession:{enabled:false,checkIntervalMinutes:360,idleMinutes:180},memory:{readEnabled:true,writeEnabled:true,scope:'workspace',executionMode:'model',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5},subAgents:[],contacts:[]};
+if(!r.memory)r.memory={readEnabled:true,writeEnabled:true,scope:'workspace',executionMode:'model',extractIntervalTurns:5,indexMaxLines:200,maxEntriesPerProject:30,projectExpireDays:30,subClientTimeout:120,dreamEnabled:true,dreamMinHours:24,dreamMinSessions:5};if(r.memory.enabled!==undefined&&r.memory.readEnabled===undefined){r.memory.readEnabled=r.memory.enabled;r.memory.writeEnabled=r.memory.enabled;delete r.memory.enabled;}
 if(!r.autoNewSession)r.autoNewSession={enabled:false,checkIntervalMinutes:360,idleMinutes:180};
 dlgSubAgents=r.subAgents?r.subAgents.slice():[];
 dlgContacts=r.contacts?r.contacts.slice():[];
@@ -660,7 +661,9 @@ var h='<div class="section-title">基本信息</div>'+
 '<div class="field-group"><label>索引最大行数</label><input type="number" id="dMemIndex" min="1" value="'+(m.indexMaxLines||200)+'"></div>'+
 '<div class="field-group"><label>项目最大条目</label><input type="number" id="dMemProject" min="1" value="'+(m.maxEntriesPerProject||30)+'"></div>'+
 '<div class="field-group"><label>项目过期天数</label><input type="number" id="dMemExpire" min="1" value="'+(m.projectExpireDays||30)+'"></div>'+
-'<div class="field-group"><label>记忆模型</label><input type="text" id="dMemModel" placeholder="留空则沿用主模型" value="'+esc(m.model||'')+'"></div>'+
+'<div class="field-group"><label>记忆执行方式</label><select id="dMemExecutionMode" onchange="toggleMemExecutionPanel()"><option value="model"'+(m.executionMode!=='robot'?' selected':'')+'>指定模型</option><option value="robot"'+(m.executionMode==='robot'?' selected':'')+'>指定 Robot</option></select></div>'+
+'<div class="field-group" id="dMemModelPanel" style="'+(m.executionMode==='robot'?'display:none':'')+'"><label>记忆模型</label><input type="text" id="dMemModel" placeholder="留空则沿用主模型" value="'+esc(m.model||'')+'"></div>'+
+'<div class="field-group" id="dMemRobotPanel" style="'+(m.executionMode==='robot'?'':'display:none')+'"><label>记忆 Robot</label><select id="dMemRobot">'+memoryRobotOptions(m.robotName)+'</select><div style="color:#757575;font-size:12px;margin-top:6px">继承所选 Robot 的 Provider、模型、认证、代理和工作目录配置</div></div>'+
 '<div class="field-group"><label>子Client超时(秒)</label><input type="number" id="dMemTimeout" min="10" value="'+(m.subClientTimeout||120)+'"></div>'+
 '<div class="field-group"><label>&nbsp;</label><div class="toggle-row" style="border:none;padding:0"><div class="toggle-label">Dream整理</div><label class="switch"><input type="checkbox" id="dMemDream"'+(m.dreamEnabled!==false?' checked':'')+'><span class="slider"></span></label></div></div>'+
 '<div class="field-group"><label>Dream最小间隔(时)</label><input type="number" id="dMemDreamH" min="1" value="'+(m.dreamMinHours||24)+'"></div>'+
@@ -674,6 +677,13 @@ document.getElementById('robotDialog').classList.add('show');
 }
 
 function toggleMemPanel(){var show=document.getElementById('dMemRead').checked||document.getElementById('dMemWrite').checked;document.getElementById('memPanel').style.display=show?'':'none'}
+function toggleMemExecutionPanel(){var robot=document.getElementById('dMemExecutionMode').value==='robot';document.getElementById('dMemModelPanel').style.display=robot?'none':'';document.getElementById('dMemRobotPanel').style.display=robot?'':'none'}
+function memoryRobotOptions(selected){
+var robots=config.robots||[],found=false,html='<option value="">请选择 Robot</option>';
+robots.forEach(function(robot){var name=robot.name||'';if(!name)return;if(name===selected)found=true;html+='<option value="'+esc(name)+'"'+(name===selected?' selected':'')+'>'+esc(name)+(robot.enabled===false?'（已禁用）':'')+'</option>'});
+if(selected&&!found)html+='<option value="'+esc(selected)+'" selected>'+esc(selected)+'（不存在）</option>';
+return html;
+}
 function toggleAutoNewSessionPanel(){document.getElementById('dAutoNewSessionPanel').style.display=document.getElementById('dAutoNewSession').checked?'':'none'}
 function toggleProxyPanel(){document.getElementById('proxyPanel').style.display=document.getElementById('dProxyEnabled').checked?'':'none'}
 function toggleExclusiveRobotRole(role){if(role==='sub'&&document.getElementById('dOnlySub').checked)document.getElementById('dOnlyTeam').checked=false;if(role==='team'&&document.getElementById('dOnlyTeam').checked)document.getElementById('dOnlySub').checked=false}
@@ -742,7 +752,11 @@ autoNewSession:{enabled:document.getElementById('dAutoNewSession').checked,check
 var memReadEnabled=document.getElementById('dMemRead').checked;
 var memWriteEnabled=document.getElementById('dMemWrite').checked;
 if(memReadEnabled||memWriteEnabled){
+var memExecutionMode=document.getElementById('dMemExecutionMode').value;
+var memRobotName=document.getElementById('dMemRobot').value.trim();
+if(memExecutionMode==='robot'&&!memRobotName){showSnackbar('请选择记忆 Robot');return}
 robot.memory={readEnabled:memReadEnabled,writeEnabled:memWriteEnabled,scope:document.getElementById('dMemScope').value,
+executionMode:memExecutionMode,robotName:memRobotName||undefined,
 extractIntervalTurns:parseInt(document.getElementById('dMemExtract').value)||5,
 indexMaxLines:parseInt(document.getElementById('dMemIndex').value)||200,
 maxEntriesPerProject:parseInt(document.getElementById('dMemProject').value)||30,

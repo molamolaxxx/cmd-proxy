@@ -9,6 +9,8 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
@@ -276,6 +278,16 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         for (ExternalTalkToGateway gateway : externalGateways) {
             if (gateway.supports(target)) gateway.release(target);
         }
+    }
+
+    public ChannelTurnContext restoreChannelTurn(ChannelDeliveryContext context,
+                                                 String senderGroupId) {
+        if (context == null) return null;
+        for (ExternalTalkToGateway gateway : externalGateways) {
+            ChannelTurnContext restored = gateway.restoreChannelTurn(context, senderGroupId);
+            if (restored != null) return restored;
+        }
+        return null;
     }
 
     @Override

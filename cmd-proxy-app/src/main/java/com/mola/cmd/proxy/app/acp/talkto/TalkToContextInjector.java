@@ -1,7 +1,6 @@
 package com.mola.cmd.proxy.app.acp.talkto;
 
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
-import com.mola.cmd.proxy.app.acp.common.DirectJsonOutputHelper;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
 import org.slf4j.Logger;
@@ -48,7 +47,7 @@ public class TalkToContextInjector {
 
         StringBuilder sb = new StringBuilder();
         sb.append("\n<agent-team>\n");
-        sb.append("你是 Agent 团队的一员。你可以通过 talk_to 指令向团队中的其他 Agent 发送异步消息。");
+        sb.append("你是 Agent 团队的一员。你可以通过 cmd-proxy MCP 的 talk_to 工具向团队中的其他 Agent 发送异步消息。");
         sb.append("消息发送后你不需要等待回复，可以继续当前工作。\n");
         sb.append("目标 Agent 忙碌时消息会排队，对方空闲后自动收到。\n\n");
         appendRuntimeConstraints(sb);
@@ -114,21 +113,14 @@ public class TalkToContextInjector {
             sb.append("- talk_to: 异步发送，不等待结果，目标在自己的上下文中处理\n");
             sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n");
             sb.append("\n");
-            sb.append("发送消息格式：\n");
-            sb.append("{\"action\":\"talk_to\",\"target\":\"")
-              .append(firstContactName)
-              .append("\",\"content\":\"你的消息内容\"}\n");
+            sb.append("发送消息时直接调用 talk_to MCP 工具，并从上方通讯录选择准确 target。\n");
         } else {
             sb.append("你的通讯录为空，但其他已注册的 Agent 仍可能通过 ACP harness 向你发送消息，这是正常的系统行为。\n");
             sb.append("收到消息时请正常阅读、处理并回复。\n\n");
-            sb.append("回复格式：\n");
-            sb.append("{\"action\":\"talk_to\",\"target\":\"<来信中的发送者名称>\",\"content\":\"你的回复内容\"}\n");
+            sb.append("回复时调用 talk_to MCP 工具。\n");
             sb.append("注意：target 必须使用来信中标注的发送者名称。\n");
         }
-
-        DirectJsonOutputHelper.appendUsageWarning(sb,
-                "发送 talk_to 消息",
-                "拦截该 JSON 并将其路由到目标 Agent");
+        sb.append("不要在回复正文中模拟工具调用或输出 Action JSON。\n");
 
         sb.append("</agent-team>\n");
         return sb.toString();

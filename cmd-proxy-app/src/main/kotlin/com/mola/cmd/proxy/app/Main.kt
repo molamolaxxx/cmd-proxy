@@ -5,6 +5,7 @@ import com.alibaba.fastjson.JSONObject
 import com.alibaba.fastjson.serializer.SerializerFeature
 import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.acp.AcpRobotParam
+import com.mola.cmd.proxy.app.acp.action.CmdProxyControlServer
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry
 import com.mola.cmd.proxy.app.acp.configui.ConfigUiServer
 import com.mola.cmd.proxy.app.mcp.McpProxy
@@ -35,6 +36,9 @@ private val reloading = AtomicBoolean(false)
 
 /** 当前实例实际使用的 ConfigUI 端口，热重载时复用，避免重复分配 */
 private var activeConfigUiPort = 0
+
+/** 与 ConfigUI 解耦、始终监听回环地址的 MCP/鉴权运行控制面。 */
+private var cmdProxyControlServer: CmdProxyControlServer? = null
 
 fun main(args: Array<String>) {
     val mode = args.firstOrNull {
@@ -117,6 +121,9 @@ private fun startAcp() {
         log.info("ConfigUI 已禁用，跳过端口分配")
     }
 
+    // MCP 和 MCP 鉴权属于 ACP 运行面，不能依赖可选的 ConfigUI。
+    startCmdProxyControlServer()
+
     // 多环境冲突检查：与主机上其它存活实例比对 chatterIds / robot 名称
     try {
         registerInstance(config)
@@ -146,6 +153,24 @@ private fun startAcp() {
     }
 
     startAcpServices(config)
+}
+
+private fun startCmdProxyControlServer() {
+    if (cmdProxyControlServer != null) return
+    try {
+        val controlServer = CmdProxyControlServer()
+        controlServer.start()
+        cmdProxyControlServer = controlServer
+        Runtime.getRuntime().addShutdownHook(Thread({
+            try {
+                controlServer.close()
+            } catch (e: Exception) {
+                log.warn("关闭 cmd-proxy 控制服务失败", e)
+            }
+        }, "cmd-proxy-control-shutdown"))
+    } catch (e: Exception) {
+        abort("cmd-proxy MCP 控制服务启动失败", e)
+    }
 }
 
 private fun abort(reason: String, e: Exception): Nothing {
@@ -268,7 +293,7 @@ private fun startAcpServices(config: JSONObject) {
     AcpProxy.start(
         groupIdList, robotsJsonStr, chatterIdsJsonStr,
         groupWorkDirMap, groupRobotMap, teamSourceGroupRobotMap,
-        allRobots.map { it.name }.toSet(), channels)
+        allRobots, channels)
 }
 
 private fun startConfigUiServer(config: JSONObject) {
@@ -372,7 +397,7 @@ private fun reloadRobot(robotName: String) {
 
         val chatterIds = chatterIdsArray.toJavaList(String::class.java)
 
-        AcpProxy.reloadRobot(robotName, robot, chatterIds)
+        AcpProxy.reloadRobot(robotName, robot, chatterIds, allRobots)
     } catch (e: Exception) {
         log.error("robot 级热重载失败, robot={}", robotName, e)
         throw e

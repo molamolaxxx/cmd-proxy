@@ -20,24 +20,46 @@ public interface MemoryManagerBridge {
      * 提交增量记忆提取任务到异步队列。
      * 只分析上次提取之后的新对话。每 N 轮触发时使用。
      */
-    void submitExtract(String workspacePath, List<ContextMessage> history);
+    void submitExtract(String sourceSessionId, String workspacePath,
+                       List<ContextMessage> history);
 
     /**
-     * 提交全量记忆提取任务到异步队列。
-     * 分析完整对话历史。session 结束时使用，确保不遗漏。
+     * 登记恢复会话已经加载的历史基线。基线之前的消息不应再次参与增量提取。
      */
-    default void submitExtractFull(String workspacePath,
+    default void resumeSession(String sourceSessionId, int historySize) {
+    }
+
+    /**
+     * 补偿当前仍在使用的恢复会话。成功后保留专属 Memory session 和提取游标，
+     * 供后续增量提取继续复用；失败时不得推进游标。
+     */
+    default void submitRecoverActive(String sourceSessionId,
+                                     String workspacePath,
+                                     List<ContextMessage> history,
+                                     Runnable onSuccess,
+                                     Consumer<Throwable> onFailure) {
+        submitExtractFull(sourceSessionId, workspacePath, history,
+                onSuccess, onFailure);
+    }
+
+    /**
+     * 提交会话结束记忆提取任务到异步队列。
+     * 实现应只分析尚未成功提取的尾部；恢复时没有游标则以完整历史兜底。
+     */
+    default void submitExtractFull(String sourceSessionId,
+                                   String workspacePath,
                                    List<ContextMessage> history) {
-        submitExtractFull(workspacePath, history, () -> {
+        submitExtractFull(sourceSessionId, workspacePath, history, () -> {
         }, ignored -> {
         });
     }
 
     /**
-     * 提交可确认完成结果的全量提取任务。只有记忆索引实际更新完成（或模型判断
+     * 提交可确认完成结果的会话结束提取任务。只有记忆索引实际更新完成（或模型判断
      * 无需更新）后才调用 onSuccess；提交失败、队列取消或执行异常调用 onFailure。
      */
-    void submitExtractFull(String workspacePath, List<ContextMessage> history,
+    void submitExtractFull(String sourceSessionId, String workspacePath,
+                           List<ContextMessage> history,
                            Runnable onSuccess, Consumer<Throwable> onFailure);
 
     /**

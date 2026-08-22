@@ -24,8 +24,16 @@ public final class MemoryManagerRegistry {
 
     public MemoryManager getOrCreate(String ownerKey, MemoryConfig config,
                                      AcpRobotParam robotParam) {
+        return getOrCreate(ownerKey, config, robotParam, robotParam, null);
+    }
+
+    public MemoryManager getOrCreate(String ownerKey, MemoryConfig config,
+                                     AcpRobotParam ownerRobot,
+                                     AcpRobotParam executionRobot,
+                                     String executionWorkDir) {
         return managers.computeIfAbsent(ownerKey,
-                ignored -> new MemoryManager(config, robotParam, locks));
+                ignored -> new MemoryManager(config, ownerRobot, executionRobot,
+                        executionWorkDir, locks));
     }
 
     public Optional<MemoryManager> get(String ownerKey) {

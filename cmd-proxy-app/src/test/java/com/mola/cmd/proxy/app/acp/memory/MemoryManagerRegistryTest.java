@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.memory;
 
+import com.alibaba.fastjson.JSON;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.memory.model.DreamState;
 import com.mola.cmd.proxy.app.acp.memory.model.MemoryConfig;
@@ -68,5 +69,60 @@ public class MemoryManagerRegistryTest {
         locks.lockFor(new MemoryFileStore(root, "Robot A"), "/workspace");
         locks.lockFor(new MemoryFileStore(root, "Robot B"), "/workspace");
         assertEquals(2, locks.size());
+    }
+
+    @Test
+    public void memoryExecutionDefaultsToModelAndRobotModeDisablesModelOverride() {
+        MemoryConfig legacy = JSON.parseObject(
+                "{\"model\":\"legacy-memory-model\"}", MemoryConfig.class);
+        assertEquals("model", legacy.getExecutionMode());
+        assertEquals("legacy-memory-model", legacy.getExecutionModel());
+
+        legacy.setExecutionMode("robot");
+        legacy.setRobotName("Memory Robot");
+        assertEquals("Memory Robot", legacy.getRobotName());
+        assertEquals(null, legacy.getExecutionModel());
+    }
+
+    @Test
+    public void selectedExecutionRobotDoesNotChangeMemoryOwnerScope() throws Exception {
+        String root = temporaryFolder.newFolder("owner-scope-memory").getAbsolutePath();
+        MemoryConfig config = new MemoryConfig();
+        config.setBaseDir(root);
+        config.setScope("robot");
+        config.setExecutionMode("robot");
+        config.setRobotName("Executor");
+        AcpRobotParam owner = new AcpRobotParam();
+        owner.setName("Owner");
+        AcpRobotParam executor = new AcpRobotParam();
+        executor.setName("Executor");
+
+        MemoryManagerRegistry registry = new MemoryManagerRegistry();
+        MemoryManager manager = registry.getOrCreate(
+                "owner-group", config, owner, executor, "/executor/workspace");
+        manager.incrementSessionCount("/source/workspace");
+
+        assertEquals(1, new MemoryFileStore(root, "Owner")
+                .loadDreamState("/source/workspace").getSessionsSinceLastDream());
+        assertEquals(0, new MemoryFileStore(root, "Executor")
+                .loadDreamState("/source/workspace").getSessionsSinceLastDream());
+        registry.shutdownAll();
+    }
+
+    @Test
+    public void missingExecutionRobotKeepsMemoryReadsAvailable() throws Exception {
+        MemoryConfig config = new MemoryConfig();
+        config.setBaseDir(temporaryFolder.newFolder("missing-executor-memory")
+                .getAbsolutePath());
+        AcpRobotParam owner = new AcpRobotParam();
+        owner.setName("Owner");
+        MemoryManagerRegistry registry = new MemoryManagerRegistry();
+
+        MemoryManager manager = registry.getOrCreate(
+                "missing-executor", config, owner, null, null);
+
+        assertEquals("", manager.buildMemoryPrompt("/source/workspace"));
+        manager.triggerDream("/source/workspace");
+        registry.shutdownAll();
     }
 }

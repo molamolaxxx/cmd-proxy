@@ -5,6 +5,8 @@ import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
@@ -129,8 +131,9 @@ public class ChannelTalkToGatewayTest {
         assertTrue(prompt.contains("发送者 userid: zhangsan"));
         assertTrue(prompt.contains("会话类型: group"));
         assertTrue(prompt.contains("群聊 chatid: chat-123"));
-        assertTrue(prompt.contains("\"action\":\"talk_to\""));
-        assertTrue(prompt.contains("\"target\":\"回复\""));
+        assertTrue(prompt.contains("talk_to MCP 工具"));
+        assertTrue(prompt.contains("target 指定为“回复”"));
+        assertFalse(prompt.contains("\"action\""));
         assertTrue(prompt.contains("同一逻辑 turn 可以回复多次"));
         assertFalse(prompt.contains("reply_to_origin"));
         assertFalse(prompt.contains("channel:wecom-main:r_token"));
@@ -172,6 +175,50 @@ public class ChannelTalkToGatewayTest {
 
         assertEquals("current-chat", adapter.lastChatId);
         assertNotEquals("different-default-group", adapter.lastChatId);
+    }
+
+    @Test
+    public void scheduledDirectConversationRestoresFreshProactiveRoute() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelConfig> configs = Collections.singletonMap(
+                "wecom-main", config("bound-group", "different-default"));
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter), configs);
+        ChannelDeliveryContext delivery = new ChannelDeliveryContext(
+                "wecom-main", "single", "user-42", "user-42", "Mola");
+
+        ChannelTurnContext restored = gateway.restoreChannelTurn(
+                delivery, "bound-group");
+        assertNotNull(restored);
+        String result = gateway.deliver(new TalkToRequest(
+                restored.getReplyTarget(), "喝水提醒", 0), "robot", "bound-group");
+
+        assertTrue(result.contains("已发送到当前会话"));
+        assertEquals(0, adapter.preciseCalls.get());
+        assertEquals(1, adapter.proactiveCalls.get());
+        assertEquals("user-42", adapter.lastChatId);
+        assertNotEquals("different-default", adapter.lastChatId);
+    }
+
+    @Test
+    public void scheduledGroupConversationRestoresExactChatAndRejectsWrongOwner() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        Map<String, ChannelConfig> configs = Collections.singletonMap(
+                "wecom-main", config("bound-group", "different-default"));
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter), configs);
+        ChannelDeliveryContext delivery = new ChannelDeliveryContext(
+                "wecom-main", "group", "chat-42", "user-42", "Mola");
+
+        assertNull(gateway.restoreChannelTurn(delivery, "other-group"));
+        ChannelTurnContext restored = gateway.restoreChannelTurn(
+                delivery, "bound-group");
+        assertNotNull(restored);
+        gateway.deliver(new TalkToRequest(restored.getReplyTarget(),
+                "群提醒", 0), "robot", "bound-group");
+
+        assertEquals("chat-42", adapter.lastChatId);
+        assertEquals(1, adapter.calls.get());
     }
 
     @Test

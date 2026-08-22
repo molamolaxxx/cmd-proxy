@@ -48,6 +48,7 @@ object CmdSender {
         val prop = RpcProperties()
         prop.startConfigServer = false
         prop.serverPort = serverPort
+        prop.maxClientTimeout = 60 * 1000 * 10
         protoRpcConfigFactory.init(prop)
     }
 

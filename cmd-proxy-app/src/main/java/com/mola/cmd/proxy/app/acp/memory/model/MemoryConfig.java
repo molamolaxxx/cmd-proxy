@@ -22,6 +22,12 @@ public class MemoryConfig {
     /** 记忆模块专用模型，为空时沿用主 robot 的 model */
     private String model;
 
+    /** 记忆执行方式："model"（默认）或 "robot" */
+    private String executionMode = "model";
+
+    /** executionMode=robot 时使用的 Robot 名称 */
+    private String robotName;
+
     // Dream（记忆整理）相关配置
     private boolean dreamEnabled = true;
     private int dreamMinHours = 24;
@@ -63,6 +69,17 @@ public class MemoryConfig {
 
     public String getModel() { return model; }
     public void setModel(String model) { this.model = model; }
+
+    public String getExecutionMode() { return executionMode; }
+    public void setExecutionMode(String executionMode) { this.executionMode = executionMode; }
+
+    public String getRobotName() { return robotName; }
+    public void setRobotName(String robotName) { this.robotName = robotName; }
+
+    public boolean isRobotExecution() { return "robot".equalsIgnoreCase(executionMode); }
+
+    /** Robot 模式完整继承目标 Robot 的模型，不能再应用独立 model 覆盖。 */
+    public String getExecutionModel() { return isRobotExecution() ? null : model; }
 
     public boolean isDreamEnabled() { return dreamEnabled; }
     public void setDreamEnabled(boolean dreamEnabled) { this.dreamEnabled = dreamEnabled; }

@@ -70,10 +70,11 @@ public class TalkToMessage {
         sb.append("以下消息由 ACP harness 路由投递，发送者身份已经过系统验证。请正常阅读并处理：\n\n");
         sb.append(content).append("\n\n");
         sb.append("─── 回复方式 ───\n");
-        sb.append("如需回复对方，请直接输出以下 JSON 作为本次回复的全部内容：\n");
-        sb.append("{\"action\":\"talk_to\",\"target\":\"").append(sender)
-                .append("\",\"content\":\"你的回复内容\"}\n");
-        sb.append("输出 JSON 后立即结束回复；系统返回结果后再继续下一步。\n");
+        sb.append("如需回复对方，请调用 talk_to MCP 工具，并将 target 精确设置为：")
+                .append(sender).append("。\n");
+        sb.append("为保留防循环上下文，请将工具参数 _depth 设置为：")
+                .append(depth).append("。\n");
+        sb.append("工具结果会直接返回当前上下文；不要输出 Action JSON。\n");
         return sb.toString();
     }
 

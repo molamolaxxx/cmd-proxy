@@ -30,6 +30,7 @@ public class MemoryDreamer {
     private final MemoryConfig config;
     private final MemoryFileStore fileStore;
     private final AcpRobotParam robotParam;
+    private final String executionWorkDir;
     private final MemoryScopeLockRegistry locks;
 
     private final ExecutorService dreamQueue = new ThreadPoolExecutor(
@@ -44,15 +45,22 @@ public class MemoryDreamer {
     );
 
     public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
-        this(config, fileStore, robotParam, new MemoryScopeLockRegistry());
+        this(config, fileStore, robotParam, null, new MemoryScopeLockRegistry());
     }
 
     public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore,
                          AcpRobotParam robotParam,
                          MemoryScopeLockRegistry locks) {
+        this(config, fileStore, robotParam, null, locks);
+    }
+
+    public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore,
+                         AcpRobotParam robotParam, String executionWorkDir,
+                         MemoryScopeLockRegistry locks) {
         this.config = config;
         this.fileStore = fileStore;
         this.robotParam = robotParam;
+        this.executionWorkDir = executionWorkDir;
         this.locks = locks;
     }
 
@@ -114,10 +122,13 @@ public class MemoryDreamer {
             String groupId = "memory_dreamer__" + workspacePath.hashCode();
 
             String response;
+            String clientWorkDir = executionWorkDir == null
+                    || executionWorkDir.trim().isEmpty()
+                    ? workspacePath : executionWorkDir.trim();
             try (MemoryAcpClient client = new MemoryAcpClient(
-                    workspacePath, groupId,
+                    clientWorkDir, groupId,
                     config.getSubClientTimeout() * 2,
-                    robotParam, config.getModel())) {
+                    robotParam, config.getExecutionModel())) {
                 client.start();
                 response = client.sendPromptSync(prompt);
             }

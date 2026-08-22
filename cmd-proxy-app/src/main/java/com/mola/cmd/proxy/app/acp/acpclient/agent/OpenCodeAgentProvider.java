@@ -13,8 +13,8 @@ import java.util.Map;
 /**
  * OpenCode 的 AgentProvider 实现。
  * <p>
- * opencode 通过 {@code opencode acp} 启动 ACP 子进程，
- * MCP servers 由 opencode 自身配置管理，无需 Client 端传入。
+ * opencode 通过 {@code opencode acp} 启动 ACP 子进程。cmd-proxy 读取其 MCP 配置，
+ * 与运行时内置 MCP 一起通过 ACP {@code session/new}/{@code session/load} 显式传入。
  */
 public class OpenCodeAgentProvider implements AgentProvider {
 

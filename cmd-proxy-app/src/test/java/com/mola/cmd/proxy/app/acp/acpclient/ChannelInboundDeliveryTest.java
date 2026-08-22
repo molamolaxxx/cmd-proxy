@@ -31,8 +31,9 @@ public class ChannelInboundDeliveryTest {
 
         assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.DIRECT, result.getStatus());
         assertNotNull(client.lastPrompt);
-        assertTrue(client.lastPrompt.contains("\"action\":\"talk_to\""));
-        assertTrue(client.lastPrompt.contains("\"target\":\"回复\""));
+        assertTrue(client.lastPrompt.contains("talk_to MCP 工具"));
+        assertTrue(client.lastPrompt.contains("target 指定为“回复”"));
+        assertFalse(client.lastPrompt.contains("\"action\""));
         assertTrue(client.lastPrompt.contains("同一逻辑 turn 可以回复多次"));
         assertFalse(client.lastPrompt.contains("reply_to_origin"));
         assertFalse(client.lastPrompt.contains("channel:wecom:r1"));
