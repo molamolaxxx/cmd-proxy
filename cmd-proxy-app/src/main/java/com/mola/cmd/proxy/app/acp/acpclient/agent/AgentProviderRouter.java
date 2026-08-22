@@ -19,6 +19,7 @@ public class AgentProviderRouter {
         providers.put(AgentProviderType.OPENCODE, new OpenCodeAgentProvider());
         providers.put(AgentProviderType.CLAUDE_AGENT_ACP, new ClaudeAgentAcpProvider());
         providers.put(AgentProviderType.CODEX_ACP, new CodexAcpProvider());
+        providers.put(AgentProviderType.DEEPSEEK_HARNESS_ACP, new DeepSeekHarnessAcpProvider());
     }
 
     public static AgentProviderRouter getInstance() {

@@ -20,6 +20,7 @@ import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey
 import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions
+import com.mola.cmd.proxy.app.acp.acpclient.PromptCommandResult
 import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher
 import com.mola.cmd.proxy.app.acp.channel.ChannelManager
@@ -526,6 +527,15 @@ object AcpProxy {
         )
     }
 
+    private fun promptCommandResult(result: PromptCommandResult): Map<String, String> {
+        return linkedMapOf(
+            "accepted" to result.isAccepted.toString(),
+            "code" to result.code,
+            // 保留旧调用一直读取的 result 字段。
+            "result" to result.result
+        )
+    }
+
     /**
      * 为指定 groupId 列表注册所有 cmdGroupList 维度的命令处理器。
      * 此方法在 {@link #start} 和 {@link #reloadRobot} 中复用，
@@ -601,13 +611,16 @@ object AcpProxy {
                 val groupId = param.getString("groupId")
                 if (groupId.isNullOrBlank()) {
                     resultMap["result"] = "groupId不能为空"
+                    resultMap["accepted"] = "false"
+                    resultMap["code"] = "REJECTED_STATE"
                     return@register resultMap
                 }
-                registry.cancelPrompt(groupId)
-                resultMap["result"] = "已发送取消指令，groupId=$groupId"
+                resultMap.putAll(promptCommandResult(registry.cancelPromptWithResult(groupId)))
             } catch (e: Exception) {
                 log.error("acpCancelPrompt 失败", e)
                 resultMap["result"] = "取消失败: ${e.message}"
+                resultMap["accepted"] = "false"
+                resultMap["code"] = "CANCEL_FAILED"
             }
             resultMap
         }
@@ -642,7 +655,8 @@ object AcpProxy {
             resultMap
         }
 
-        CmdReceiver.register("acpSendMessage", groupIds, "向ACP会话发送消息，groupId和message必填，files可选") { params ->
+        CmdReceiver.register("acpSendMessage", groupIds,
+            "向ACP会话发送消息，groupId和message必填，files可选，busyPolicy可选INTERRUPT") { params ->
             val resultMap = mutableMapOf<String, String>()
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
@@ -650,10 +664,14 @@ object AcpProxy {
                 val message = param.getString("message")
                 if (groupId.isNullOrBlank()) {
                     resultMap["result"] = "groupId不能为空"
+                    resultMap["accepted"] = "false"
+                    resultMap["code"] = "REJECTED_STATE"
                     return@register resultMap
                 }
                 if (message.isNullOrBlank()) {
                     resultMap["result"] = "message不能为空"
+                    resultMap["accepted"] = "false"
+                    resultMap["code"] = "REJECTED_STATE"
                     return@register resultMap
                 }
                 val files: MutableList<Map<String, String>>? = if (param.containsKey("files")) {
@@ -666,11 +684,14 @@ object AcpProxy {
                         map as Map<String, String>
                     }?.toMutableList()
                 } else null
-                registry.sendMessage(groupId, message, files)
-                resultMap["result"] = "消息发送成功"
+                resultMap.putAll(registry.sendMessageWithResult(
+                    groupId, message, files,
+                    param.getString("busyPolicy")).let(::promptCommandResult))
             } catch (e: Exception) {
                 log.error("acpSendMessage 失败", e)
                 resultMap["result"] = "发送消息失败: ${e.message}"
+                resultMap["accepted"] = "false"
+                resultMap["code"] = "REJECTED_STATE"
             }
             resultMap
         }

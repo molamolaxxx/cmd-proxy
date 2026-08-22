@@ -7,6 +7,7 @@ import com.mola.cmd.proxy.client.resp.CmdResponseContent;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * AcpResponseListener 的默认实现，将 agent 输出通过 sendContent 回调。
@@ -16,6 +17,8 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     private final String groupId;
     private final AcpResponseContentRenderer renderer;
     private final AcpResponseContentRenderer.Output output;
+    private final AtomicReference<String> nextTermination =
+            new AtomicReference<>();
 
     /** 缓冲模式：开启后 sendContent 不立即发送，而是攒到 buffer 中 */
     private boolean buffering = false;
@@ -54,6 +57,16 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     @Override
     public void onMessage(String text) {
         renderer.onMessage(text);
+    }
+
+    @Override
+    public void markNextTermination(String termination) {
+        nextTermination.set(termination);
+    }
+
+    @Override
+    public void clearNextTermination() {
+        nextTermination.set(null);
     }
 
     @Override
@@ -112,13 +125,22 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
     }
 
     private void doCallback(String content, boolean end) {
-        Map<String, String> resultMap = new HashMap<>();
-        resultMap.put("groupId", groupId);
-        resultMap.put("content", content);
-        resultMap.put("end", end ? "Y" : "N");
+        Map<String, String> resultMap = buildResultMap(content, end);
         CmdResponseContent response = new CmdResponseContent(
                 UUID.randomUUID().toString(), resultMap);
         RpcCallbackRetry.run("ACP response group=" + groupId, () ->
                 CmdReceiver.INSTANCE.callback("acp", "acp", response));
+    }
+
+    Map<String, String> buildResultMap(String content, boolean end) {
+        Map<String, String> resultMap = new HashMap<>();
+        resultMap.put("groupId", groupId);
+        resultMap.put("content", content);
+        resultMap.put("end", end ? "Y" : "N");
+        String termination = end ? nextTermination.getAndSet(null) : null;
+        if (termination != null) {
+            resultMap.put("termination", termination);
+        }
+        return resultMap;
     }
 }

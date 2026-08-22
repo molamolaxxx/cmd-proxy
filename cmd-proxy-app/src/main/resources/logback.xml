@@ -6,7 +6,9 @@
         </encoder>
     </appender>
 
-    <root level="DEBUG">
+    <logger name="com.mola.rpc.core.excutors.task.RpcTask" level="WARN" />
+
+    <root level="INFO">
         <appender-ref ref="CONSOLE" />
     </root>
 </configuration>

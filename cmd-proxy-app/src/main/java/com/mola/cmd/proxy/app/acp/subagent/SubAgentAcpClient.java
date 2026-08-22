@@ -82,8 +82,10 @@ public class SubAgentAcpClient extends AbstractAcpClient {
         JsonObject params = new JsonObject();
         params.addProperty("cwd", workspacePath);
 
-        JsonArray mcpServers = McpConfigLoader.loadFromPaths(mcpConfigPaths, authSessionId,
-                McpAuthManager.getInstance().getBaseUrl(), workspacePath);
+        JsonArray mcpServers = agentProvider.supportsClientMcpServers()
+                ? McpConfigLoader.loadFromPaths(mcpConfigPaths, authSessionId,
+                    McpAuthManager.getInstance().getBaseUrl(), workspacePath)
+                : new JsonArray();
         params.add("mcpServers", mcpServers);
         logger.info("SubAgent session/new 携带 {} 个 MCP server, workspace={}",
                 mcpServers.size(), workspacePath);

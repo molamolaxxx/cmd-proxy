@@ -296,11 +296,11 @@ public abstract class AbstractAcpClient implements Closeable {
     }
 
     /**
-     * 正常关闭：session/end → 等待 → destroy → destroyForcibly。
+     * 正常关闭：Provider session close → 必要时关闭 stdin → 等待 → destroy → destroyForcibly。
      */
     private void closeCurrentSessionGracefully() {
         Process currentProcess = process;
-        boolean endSent = false;
+        boolean closeSent = false;
 
         if (currentProcess != null && currentProcess.isAlive()
                 && writer != null && sessionId != null && !sessionId.trim().isEmpty()) {
@@ -315,17 +315,23 @@ public abstract class AbstractAcpClient implements Closeable {
                     sendJson(cancelNotification);
                     logger.info("关闭 BUSY client 前已发送 session/cancel, sessionId={}", sessionId);
                 }
-                sendJson(buildRequest("session/end", params));
-                endSent = true;
-                logger.info("已发送 session/end, sessionId={}, logicalId={}",
-                        sessionId, clientIdentity.getLogicalId());
+                String closeMethod = agentProvider.getSessionCloseMethod();
+                if (closeMethod != null && !closeMethod.trim().isEmpty()) {
+                    sendJson(buildRequest(closeMethod.trim(), params));
+                    closeSent = true;
+                    logger.info("已发送 {}, sessionId={}, logicalId={}",
+                            closeMethod.trim(), sessionId, clientIdentity.getLogicalId());
+                }
+                if (agentProvider.closeInputAfterSessionClose()) {
+                    closeProcessInput();
+                }
             } catch (IOException e) {
-                logger.warn("发送 session/end 失败，将进入进程关闭兜底, sessionId={}",
-                        sessionId, e);
+                logger.warn("发送 session close 失败，将进入进程关闭兜底, sessionId={}", sessionId, e);
             }
         }
 
-        if (currentProcess != null && currentProcess.isAlive() && endSent
+        if (currentProcess != null && currentProcess.isAlive()
+                && (closeSent || agentProvider.closeInputAfterSessionClose())
                 && awaitProcessExit(currentProcess, gracefulShutdownTimeoutMillis())) {
             closeProcessStreams();
             clearProcessReferences();
@@ -348,6 +354,17 @@ public abstract class AbstractAcpClient implements Closeable {
 
         closeProcessStreams();
         clearProcessReferences();
+    }
+
+    private void closeProcessInput() {
+        BufferedWriter currentWriter = writer;
+        writer = null;
+        if (currentWriter == null) return;
+        try {
+            currentWriter.close();
+        } catch (IOException e) {
+            logger.debug("关闭 ACP stdin 失败, logicalId={}", clientIdentity.getLogicalId(), e);
+        }
     }
 
     private boolean awaitProcessExit(Process target, long timeoutMillis) {
@@ -446,17 +463,7 @@ public abstract class AbstractAcpClient implements Closeable {
     }
 
     private void startProcess(boolean useFallbackCommand) throws IOException {
-        List<String> cmd = new ArrayList<>();
-        cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand() : agentProvider.getCommand());
-        cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs() : agentProvider.getArgs()));
-
-        // 追加 provider 特定的额外参数（如 --model）
-        List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);
-        if (extraArgs != null && !extraArgs.isEmpty()) {
-            cmd.addAll(extraArgs);
-        }
-
-        ProcessBuilder pb = new ProcessBuilder(cmd);
+        ProcessBuilder pb = new ProcessBuilder();
         pb.redirectErrorStream(false);
 
         String home = System.getProperty("user.home");
@@ -494,6 +501,21 @@ public abstract class AbstractAcpClient implements Closeable {
                 pb.environment().put("no_proxy", noProxy.trim());
             }
         }
+
+        // Provider 可在启动前完成一次性 CLI/profile 安装。准备流程必须自行保证幂等和并发安全。
+        agentProvider.prepareLaunch(robotParamRef, pb.environment());
+
+        // prepareLaunch 可能刚刚安装了可执行文件，因此在准备完成后再解析最终启动命令。
+        List<String> cmd = new ArrayList<>();
+        cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand() : agentProvider.getCommand());
+        cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs() : agentProvider.getArgs()));
+
+        // 追加 provider 特定的额外参数（如 --model）
+        List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);
+        if (extraArgs != null && !extraArgs.isEmpty()) {
+            cmd.addAll(extraArgs);
+        }
+        pb.command(cmd);
 
         logger.info("启动 ACP 进程: {}, PATH contains node: {}", cmd,
                 pb.environment().getOrDefault("PATH", "").contains("node"));
@@ -790,8 +812,7 @@ public abstract class AbstractAcpClient implements Closeable {
     }
 
     /**
-     * 自动回复 permission 请求。
-     * 从 Agent 提供的 options 中优先选择 allow_always，其次 allow_once。
+     * 按 Provider/Robot 策略回复 permission 请求。
      */
     protected void autoAllowPermission(JsonObject msg) throws IOException {
         if (!msg.has("id")) return;
@@ -799,45 +820,52 @@ public abstract class AbstractAcpClient implements Closeable {
 
         logger.info("收到 permission 请求: {}", gson.toJson(msg));
 
-        // 从 options 中找到合适的 optionId
+        AgentProvider.PermissionPolicy policy = agentProvider.getPermissionPolicy(robotParamRef);
         String selectedOptionId = null;
         JsonObject params = msg.getAsJsonObject("params");
         if (params != null && params.has("options") && params.get("options").isJsonArray()) {
-            JsonArray options = params.getAsJsonArray("options");
-            String allowOnceId = null;
-            for (JsonElement opt : options) {
-                if (!opt.isJsonObject()) continue;
-                JsonObject optObj = opt.getAsJsonObject();
-                String kind = optObj.has("kind") ? optObj.get("kind").getAsString() : "";
-                String optId = optObj.has("optionId") ? optObj.get("optionId").getAsString() : "";
-                if ("allow_always".equals(kind)) {
-                    selectedOptionId = optId;
-                    break;
-                }
-                if ("allow_once".equals(kind) && allowOnceId == null) {
-                    allowOnceId = optId;
-                }
-            }
-            if (selectedOptionId == null) {
-                selectedOptionId = allowOnceId;
-            }
-        }
-        // fallback：兼容未提供 options 的场景
-        if (selectedOptionId == null) {
-            selectedOptionId = "allow_always";
+            selectedOptionId = selectPermissionOption(
+                    params.getAsJsonArray("options"), policy);
         }
 
         JsonObject outcomeObj = new JsonObject();
-        outcomeObj.addProperty("outcome", "selected");
-        outcomeObj.addProperty("optionId", selectedOptionId);
+        if (selectedOptionId == null) {
+            // 无可用的安全选项时 fail closed，不伪造 Agent 未提供的 optionId。
+            outcomeObj.addProperty("outcome", "cancelled");
+        } else {
+            outcomeObj.addProperty("outcome", "selected");
+            outcomeObj.addProperty("optionId", selectedOptionId);
+        }
         JsonObject permResult = new JsonObject();
         permResult.add("outcome", outcomeObj);
         JsonObject permResp = new JsonObject();
         permResp.addProperty("jsonrpc", JSONRPC_VERSION);
         permResp.add("id", permId);
         permResp.add("result", permResult);
-        logger.info("回复 permission: selectedOptionId={}, response={}", selectedOptionId, gson.toJson(permResp));
+        logger.info("回复 permission: policy={}, selectedOptionId={}, response={}",
+                policy, selectedOptionId, gson.toJson(permResp));
         sendJson(permResp);
+    }
+
+    String selectPermissionOption(JsonArray options, AgentProvider.PermissionPolicy policy) {
+        String allowAlways = null;
+        String allowOnce = null;
+        String reject = null;
+        for (JsonElement option : options) {
+            if (!option.isJsonObject()) continue;
+            JsonObject object = option.getAsJsonObject();
+            String kind = object.has("kind") ? object.get("kind").getAsString() : "";
+            String optionId = object.has("optionId") ? object.get("optionId").getAsString() : "";
+            if (optionId.trim().isEmpty()) continue;
+            if ("allow_always".equals(kind) && allowAlways == null) allowAlways = optionId;
+            if ("allow_once".equals(kind) && allowOnce == null) allowOnce = optionId;
+            if (("reject_once".equals(kind) || "reject_always".equals(kind)) && reject == null) {
+                reject = optionId;
+            }
+        }
+        if (policy == AgentProvider.PermissionPolicy.REJECT) return reject;
+        if (policy == AgentProvider.PermissionPolicy.ALLOW_ONCE) return allowOnce;
+        return allowAlways != null ? allowAlways : allowOnce;
     }
 
     /**

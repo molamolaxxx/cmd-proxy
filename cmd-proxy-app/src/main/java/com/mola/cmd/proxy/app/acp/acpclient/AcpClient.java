@@ -42,6 +42,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 /**
  * ACP 主 Client，继承 {@link AbstractAcpClient}，负责：
@@ -126,6 +127,15 @@ public class AcpClient extends AbstractAcpClient {
 
     /** session/new 或 session/load 完成并进入 READY 后执行的非阻塞生命周期回调。 */
     private Runnable afterSessionReady;
+
+    /** 每个 prompt turn 真正完成 BUSY -> READY 后执行。 */
+    private Runnable afterTurnReady;
+
+    /** prompt turn 异常终止并离开可投递生命周期时执行。 */
+    private Runnable afterTurnFailed;
+
+    /** 中断 pending 存在时，将 provider 的取消异常恢复成可继续投递的 READY。 */
+    private BooleanSupplier recoverTurnFailureToReady;
 
     /** 当前 client 是否通过 session/load 恢复。 */
     private volatile boolean restoredSession;
@@ -215,6 +225,18 @@ public class AcpClient extends AbstractAcpClient {
         this.afterSessionReady = afterSessionReady;
     }
 
+    public void setAfterTurnReady(Runnable afterTurnReady) {
+        this.afterTurnReady = afterTurnReady;
+    }
+
+    public void setAfterTurnFailed(Runnable afterTurnFailed) {
+        this.afterTurnFailed = afterTurnFailed;
+    }
+
+    public void setRecoverTurnFailureToReady(BooleanSupplier recoverTurnFailureToReady) {
+        this.recoverTurnFailureToReady = recoverTurnFailureToReady;
+    }
+
     public boolean isRestoredSession() {
         return restoredSession;
     }
@@ -289,6 +311,9 @@ public class AcpClient extends AbstractAcpClient {
     protected void createSession() throws IOException {
         // 指定恢复目标 sessionId（acpRestoreSession 场景）
         if (targetRestoreSessionId != null) {
+            if (!agentProvider.supportsSessionLoad()) {
+                throw new IOException("Provider 不支持 session/load: " + agentProvider.getName());
+            }
             try {
                 loadSession(targetRestoreSessionId);
             } catch (IOException e) {
@@ -303,7 +328,7 @@ public class AcpClient extends AbstractAcpClient {
         }
 
         // clearContext 场景下强制创建新会话，跳过历史恢复
-        if (!forceNewSession) {
+        if (!forceNewSession && agentProvider.supportsSessionLoad()) {
             String latestSessionId = historyManager.findLatestSessionId();
             if (latestSessionId != null) {
                 try {
@@ -319,6 +344,9 @@ public class AcpClient extends AbstractAcpClient {
                     historyManager.reset();
                 }
             }
+        } else if (!forceNewSession) {
+            // Provider 无恢复能力时，旧 sessionId 不能作为下一次启动的恢复基线。
+            historyManager.reset();
         }
 
         newSession();
@@ -475,14 +503,17 @@ public class AcpClient extends AbstractAcpClient {
                             guardedListener, effectiveOptions);
                     releaseMcpAuthBinding(effectiveOptions);
                     if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
-                        // turn 结束且 generation 仍有效时才检查 inbox
-                        checkAndDeliverInbox();
+                        notifyAfterTurnReady();
+                        // 中断式 pending 优先；仍为 READY 时才检查 inbox。
+                        if (getState() == State.READY) checkAndDeliverInbox();
                     }
                 } catch (Exception e) {
                     releaseMcpAuthBinding(effectiveOptions);
                     logger.error("ACP send 失败", e);
                     releaseChannelTurn(effectiveOptions);
-                    if (setStateIfActive(generation, State.ERROR)) {
+                    if (!recoverInterruptedTurnFailure(generation, guardedListener, e)
+                            && setStateIfActive(generation, State.ERROR)) {
+                        notifyAfterTurnFailed();
                         guardedListener.onError(e);
                     }
                 } finally {
@@ -494,9 +525,57 @@ public class AcpClient extends AbstractAcpClient {
             releaseMcpAuthBinding(effectiveOptions);
             releaseChannelTurn(effectiveOptions);
             if (setStateIfActive(generation, State.ERROR)) {
+                notifyAfterTurnFailed();
                 guardedListener.onError(e);
             }
         }
+    }
+
+    private void notifyAfterTurnReady() {
+        Runnable callback = afterTurnReady;
+        if (callback == null) return;
+        try {
+            callback.run();
+        } catch (RuntimeException e) {
+            logger.warn("turn READY 后处理失败, sessionId={}", sessionId, e);
+        }
+    }
+
+    private void notifyAfterTurnFailed() {
+        Runnable callback = afterTurnFailed;
+        if (callback == null) return;
+        try {
+            callback.run();
+        } catch (RuntimeException e) {
+            logger.warn("turn 失败后处理失败, sessionId={}", sessionId, e);
+        }
+    }
+
+    private boolean shouldRecoverTurnFailureToReady() {
+        BooleanSupplier callback = recoverTurnFailureToReady;
+        if (callback == null) return false;
+        try {
+            return callback.getAsBoolean();
+        } catch (RuntimeException e) {
+            logger.warn("检查中断 pending 失败, sessionId={}", sessionId, e);
+            return false;
+        }
+    }
+
+    /** Package-private deterministic seam for interrupted-provider failure ordering tests. */
+    boolean recoverInterruptedTurnFailure(long generation,
+                                          AcpResponseListener listener,
+                                          Exception error) {
+        if (!shouldRecoverTurnFailureToReady()) return false;
+        // 仍为 BUSY 时先终止旧流，避免新请求抢入后才收到旧 turn error。
+        listener.onError(error);
+        if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
+            notifyAfterTurnReady();
+            if (getState() == State.READY) checkAndDeliverInbox();
+        } else {
+            notifyAfterTurnFailed();
+        }
+        return true;
     }
 
     static void notifyScheduleExecutionStarted(AcpResponseListener listener,
@@ -607,6 +686,11 @@ public class AcpClient extends AbstractAcpClient {
     // ==================== MCP 配置加载 ====================
 
     private JsonArray loadMcpServersFromConfigs() {
+        if (!agentProvider.supportsClientMcpServers()) {
+            logger.info("Provider 不接受 Client MCP 注入，session 将使用空 mcpServers: {}",
+                    agentProvider.getName());
+            return new JsonArray();
+        }
         String baseUrl = McpAuthManager.getInstance().getBaseUrl();
         JsonArray servers = McpConfigLoader.loadFromPaths(mcpConfigPaths, authSessionId,
                 baseUrl, workspacePath);

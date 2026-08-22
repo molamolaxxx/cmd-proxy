@@ -6,6 +6,16 @@ package com.mola.cmd.proxy.app.acp.acpclient.listener;
  */
 public interface AcpResponseListener {
 
+    /** Marks the next terminal callback as the boundary of an interrupted turn. */
+    default void markNextTermination(String termination) {
+        // Optional metadata for transports that support structured termination callbacks.
+    }
+
+    /** Clears a marker installed before a cancellation attempt that subsequently failed. */
+    default void clearNextTermination() {
+        // Optional metadata for transports that support structured termination callbacks.
+    }
+
     /**
      * 收到 agent 文本消息时回调（agent_message_chunk）
      *

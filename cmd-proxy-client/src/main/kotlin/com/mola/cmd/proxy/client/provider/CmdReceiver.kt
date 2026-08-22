@@ -165,7 +165,10 @@ object CmdReceiver {
                 return CmdInvokeResponse.error("not available cmd ${param.cmdName} " +
                         "in group $cmdGroup")
             }
-            log.info("execute cmd : {}, param : {}", param.cmdName, JSON.toJSONString(param))
+            if (log.isDebugEnabled) {
+                log.debug("execute cmd : {}, param : {}",
+                        param.cmdName, JSON.toJSONString(param))
+            }
             val resultMap = receiverFuncMap[funcKey]?.invoke(param)!!
             return CmdInvokeResponse.success(CmdResponseContent(param.cmdId, resultMap))
         }

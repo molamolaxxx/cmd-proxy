@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bigdata_edu - 创建实例</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #333; }
+
+/* 顶部导航 */
+.navbar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 56px; padding: 0 40px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.1);
+  position: relative; z-index: 10;
+}
+.navbar .logo { font-family: "Courier New", monospace; font-size: 22px; font-weight: bold; font-style: italic; color: #2a6496; }
+.navbar nav { display: flex; align-items: center; gap: 32px; font-size: 15px; }
+.navbar nav a { text-decoration: none; color: #555; position: relative; padding-bottom: 4px; }
+.navbar nav a:hover { color: #3a9eea; }
+.navbar nav a.active { color: #3a9eea; border-bottom: 3px solid #3a9eea; }
+.navbar nav a.login { color: #3a9eea; font-weight: bold; border: none; }
+.navbar nav .arrow::after { content: " ▾"; font-size: 10px; }
+
+/* 主体 */
+.main { display: flex; min-height: calc(100vh - 56px); }
+
+/* 背景图层 */
+.main {
+  background: linear-gradient(rgba(0,0,0,.55), rgba(0,0,0,.55)),
+    url('https://images.unsplash.com/photo-1524995997946-a1c2e315a42f?w=1600') center/cover no-repeat;
+}
+
+/* 左侧步骤条 */
+.sidebar { width: 260px; padding: 40px 24px; flex-shrink: 0; }
+.step { display: flex; align-items: flex-start; margin-bottom: 48px; position: relative; }
+.step::after {
+  content: ''; position: absolute; left: 16px; top: 38px;
+  width: 1px; height: 48px; background: rgba(255,255,255,.25);
+}
+.step:last-child::after { display: none; }
+.step-circle {
+  width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: bold; flex-shrink: 0; margin-right: 12px;
+}
+.step.done .step-circle { background: #3a9eea; color: #fff; }
+.step.active .step-circle { background: #5cb85c; color: #fff; }
+.step.pending .step-circle { background: rgba(255,255,255,.25); color: rgba(255,255,255,.5); }
+.step-text h4 { color: #fff; font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.step-text p { color: rgba(255,255,255,.6); font-size: 12px; }
+.step.pending .step-text h4 { color: rgba(255,255,255,.5); }
+
+/* 右侧内容区 */
+.content { flex: 1; padding: 36px 48px 48px; }
+.content h1 { color: #fff; font-size: 32px; font-weight: 400; margin-bottom: 8px; }
+.content .subtitle { color: rgba(255,255,255,.7); font-size: 14px; margin-bottom: 32px; }
+
+/* 参数网格 */
+.params { display: grid; grid-template-columns: 1fr 1fr; gap: 28px 60px; }
+.param-item { position: relative; }
+.param-label { color: rgba(255,255,255,.85); font-size: 14px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+.param-label .help {
+  width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.4);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,.4); font-size: 12px; cursor: pointer; margin-left: 8px;
+}
+.param-label .help:hover { border-color: #3a9eea; color: #3a9eea; }
+
+/* 滑块 */
+.slider-wrap { position: relative; height: 6px; background: rgba(255,255,255,.2); border-radius: 3px; }
+.slider-fill { height: 100%; background: #3a9eea; border-radius: 3px; }
+.slider-thumb {
+  width: 18px; height: 18px; background: #fff; border: 2px solid #3a9eea; border-radius: 50%;
+  position: absolute; top: 50%; transform: translate(-50%, -50%); cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,.2);
+}
+
+/* 创建按钮 */
+.create-btn {
+  margin-top: 48px; padding: 14px 64px; background: #3a9eea; color: #fff;
+  border: none; border-radius: 4px; font-size: 16px; cursor: pointer; letter-spacing: 2px;
+}
+.create-btn:hover { background: #2e8ad8; }
+
+/* 弹窗遮罩 */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-overlay.hidden { display: none; }
+.modal {
+  background: #fff; border-radius: 6px; padding: 32px 36px; width: 480px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.25); position: relative;
+}
+.modal h3 { font-size: 18px; color: #333; margin-bottom: 20px; font-weight: 600; }
+.modal p { font-size: 14px; color: #666; line-height: 1.8; }
+.modal .close-btn {
+  position: absolute; top: 16px; right: 20px; background: none; border: none;
+  font-size: 20px; color: #999; cursor: pointer;
+}
+.modal .close-btn:hover { color: #333; }
+.modal .confirm-btn {
+  margin-top: 24px; float: right; padding: 8px 28px; background: #3a9eea; color: #fff;
+  border: none; border-radius: 4px; font-size: 14px; cursor: pointer;
+}
+.modal .confirm-btn:hover { background: #2e8ad8; }
+</style>
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<div class="navbar">
+  <div class="logo">bigdata_edu</div>
+  <nav>
+    <a href="#">首页</a>
+    <a href="#" class="active arrow">项目演示</a>
+    <a href="#">新建实例</a>
+    <a href="#" class="arrow">个人管理</a>
+    <a href="#" class="arrow">公共管理</a>
+    <a href="#">专家评审</a>
+    <a href="#">使用说明</a>
+    <a href="#" class="login">登录</a>
+  </nav>
+</div>
+
+<div class="main">
+  <!-- 左侧步骤 -->
+  <div class="sidebar">
+    <div class="step done">
+      <div class="step-circle">1</div>
+      <div class="step-text"><h4>算法介绍</h4></div>
+    </div>
+    <div class="step done">
+      <div class="step-circle">2</div>
+      <div class="step-text"><h4>数据上传</h4><p>上传待评价的三元组数据</p></div>
+    </div>
+    <div class="step active">
+      <div class="step-circle">3</div>
+      <div class="step-text"><h4>创建实例</h4><p>选择实例配置创建实例</p></div>
+    </div>
+    <div class="step pending">
+      <div class="step-circle">4</div>
+      <div class="step-text"><h4>实例监控</h4><p>监控您刚才创建的实例</p></div>
+    </div>
+    <div class="step pending">
+      <div class="step-circle">5</div>
+      <div class="step-text"><h4>评价结果</h4><p>查看实例生成的结果</p></div>
+    </div>
+  </div>
+
+  <!-- 右侧内容 -->
+  <div class="content">
+    <h1>创建实例</h1>
+    <p class="subtitle">请根据提示选择相应的配置</p>
+
+    <div class="params">
+      <div class="param-item">
+        <div class="param-label">实体评价最大线程数：4 <span class="help" onclick="openModal()">?</span></div>
+        <div class="slider-wrap">
+          <div class="slider-fill" style="width:40%"></div>
+          <div class="slider-thumb" style="left:40%"></div>
+        </div>
+      </div>
+      <div class="param-item">
+        <div class="param-label">候选关系对个数：10 <span class="help" onclick="openModal()">?</span></div>
+        <div class="slider-wrap">
+          <div class="slider-fill" style="width:50%"></div>
+          <div class="slider-thumb" style="left:50%"></div>
+        </div>
+      </div>
+      <div class="param-item">
+        <div class="param-label">三元组评价最大线程数：2 <span class="help" onclick="openModal()">?</span></div>
+        <div class="slider-wrap">
+          <div class="slider-fill" style="width:20%"></div>
+          <div class="slider-thumb" style="left:20%"></div>
+        </div>
+      </div>
+      <div class="param-item">
+        <div class="param-label">三元组的实体相似度阈值：80% <span class="help" onclick="openModal()">?</span></div>
+        <div class="slider-wrap">
+          <div class="slider-fill" style="width:80%"></div>
+          <div class="slider-thumb" style="left:80%"></div>
+        </div>
+      </div>
+      <div class="param-item">
+        <div class="param-label">关系置信度阈值：50 <span class="help" onclick="openModal()">?</span></div>
+        <div class="slider-wrap">
+          <div class="slider-fill" style="width:50%"></div>
+          <div class="slider-thumb" style="left:50%"></div>
+        </div>
+      </div>
+      <div class="param-item">
+        <div class="param-label">关系评价占总评价的权重：0.7 <span class="help" onclick="openModal()">?</span></div>
+        <div class="slider-wrap">
+          <div class="slider-fill" style="width:70%"></div>
+          <div class="slider-thumb" style="left:70%"></div>
+        </div>
+      </div>
+    </div>
+
+    <button class="create-btn">创建实例</button>
+  </div>
+</div>
+
+<!-- 弹窗 -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <button class="close-btn" onclick="closeModal()">✕</button>
+    <h3>三元组质量评价参数说明</h3>
+    <p>筛选关系置信度大于该阈值的三元组作为参考三元组，置信度越高，参考系的置信度也就越高。但可参考的三元组也就越少</p>
+    <button class="confirm-btn" onclick="closeModal()">确定</button>
+  </div>
+</div>
+
+<script>
+function openModal() { document.getElementById('modal').classList.remove('hidden'); }
+function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+</script>
+</body>
+</html>

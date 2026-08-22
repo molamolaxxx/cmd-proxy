@@ -24,6 +24,7 @@ public class AcpClientRegistry {
 
     private final ConcurrentHashMap<String, AcpClient> clients = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> sessionLocks = new ConcurrentHashMap<>();
+    private final MainAcpPromptCoordinator promptCoordinator = new MainAcpPromptCoordinator();
 
     @FunctionalInterface
     public interface ClientInitializer {
@@ -64,6 +65,7 @@ public class AcpClientRegistry {
                               AcpRobotParam robotParam,
                               ClientInitializer initializer) throws Exception {
         synchronized (sessionLock(groupId)) {
+            promptCoordinator.clear(groupId);
             // 如果已存在，先关闭旧 client
             AcpClient old = clients.remove(groupId);
             boolean isClearContext = false;
@@ -84,6 +86,7 @@ public class AcpClientRegistry {
             }
 
             AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
+            wirePromptLifecycle(groupId, client);
             if (isClearContext) {
                 client.setForceNewSession(true);
             }
@@ -114,12 +117,14 @@ public class AcpClientRegistry {
             }
             String workspacePath = current.getWorkspacePath();
             AcpRobotParam robotParam = current.getRobotParam();
+            promptCoordinator.clear(groupId);
             clients.remove(groupId, current);
             try { current.close(); } catch (IOException e) {
                 logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
             }
 
             AcpClient replacement = new AcpClient(workspacePath, groupId, robotParam);
+            wirePromptLifecycle(groupId, replacement);
             if (targetRestoreSessionId == null) {
                 replacement.setForceNewSession(true);
             } else {
@@ -168,7 +173,24 @@ public class AcpClientRegistry {
      * 发送消息：向指定 groupId 的 AcpClient 发送用户消息，可附带文件。
      */
     public void sendMessage(String groupId, String message, List<Map<String, String>> files) {
-        sendMessage(groupId, message, files, PromptOptions.defaults());
+        PromptCommandResult result = sendMessageWithResult(groupId, message, files, null);
+        if (!result.isAccepted()) {
+            throw new IllegalStateException(result.getResult());
+        }
+    }
+
+    public PromptCommandResult sendMessageWithResult(String groupId, String message,
+                                                     List<Map<String, String>> files,
+                                                     String busyPolicy) {
+        synchronized (sessionLock(groupId)) {
+            AcpClient client = clients.get(groupId);
+            if (client == null) {
+                return PromptCommandResult.rejected(
+                        "REJECTED_STATE", "groupId=" + groupId + " 的会话不存在，请先调用 createSession");
+            }
+            return promptCoordinator.send(groupId, port(client), message, files,
+                    MainAcpPromptCoordinator.BusyPolicy.from(busyPolicy));
+        }
     }
 
     public void sendMessage(String groupId, String message, List<Map<String, String>> files,
@@ -187,13 +209,23 @@ public class AcpClientRegistry {
      * 取消指定 groupId 当前正在进行的 prompt turn。
      */
     public void cancelPrompt(String groupId) throws IOException {
+        PromptCommandResult result = cancelPromptWithResult(groupId);
+        if (!result.isAccepted()) {
+            if ("CANCEL_FAILED".equals(result.getCode())) {
+                throw new IOException(result.getResult());
+            }
+            throw new IllegalStateException(result.getResult());
+        }
+    }
+
+    public PromptCommandResult cancelPromptWithResult(String groupId) {
         synchronized (sessionLock(groupId)) {
             AcpClient client = clients.get(groupId);
             if (client == null) {
-                throw new IllegalStateException(
-                        "groupId=" + groupId + " 的会话不存在，请先调用 createSession");
+                return PromptCommandResult.rejected(
+                        "REJECTED_STATE", "groupId=" + groupId + " 的会话不存在，请先调用 createSession");
             }
-            client.cancel();
+            return promptCoordinator.cancel(port(client));
         }
     }
 
@@ -224,6 +256,7 @@ public class AcpClientRegistry {
      */
     public void closeByGroupId(String groupId) {
         synchronized (sessionLock(groupId)) {
+            promptCoordinator.clear(groupId);
             AcpClient client = clients.remove(groupId);
             if (client != null) {
                 try {
@@ -251,6 +284,7 @@ public class AcpClientRegistry {
     public void restoreSession(String groupId, String targetSessionId,
                                ClientInitializer initializer) throws Exception {
         synchronized (sessionLock(groupId)) {
+            promptCoordinator.clear(groupId);
             AcpClient old = clients.remove(groupId);
             String workspacePath = null;
             AcpRobotParam robotParam = null;
@@ -263,6 +297,7 @@ public class AcpClientRegistry {
             }
 
             AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
+            wirePromptLifecycle(groupId, client);
             client.setTargetRestoreSessionId(targetSessionId);
             try {
                 if (initializer != null) initializer.initialize(client);
@@ -292,18 +327,72 @@ public class AcpClientRegistry {
     }
 
     private void closeAll(boolean deferMemoryExtraction) {
-        for (Map.Entry<String, AcpClient> entry : clients.entrySet()) {
-            try {
-                if (deferMemoryExtraction) {
-                    entry.getValue().closeForShutdown();
-                } else {
-                    entry.getValue().close();
+        for (Map.Entry<String, AcpClient> entry : snapshotClients().entrySet()) {
+            String groupId = entry.getKey();
+            synchronized (sessionLock(groupId)) {
+                promptCoordinator.clear(groupId);
+                AcpClient client = clients.remove(groupId);
+                if (client == null) continue;
+                try {
+                    if (deferMemoryExtraction) {
+                        client.closeForShutdown();
+                    } else {
+                        client.close();
+                    }
+                } catch (IOException e) {
+                    logger.warn("关闭 AcpClient 失败, groupId={}", groupId, e);
                 }
-            } catch (IOException e) {
-                logger.warn("关闭 AcpClient 失败, groupId={}", entry.getKey(), e);
             }
         }
+        promptCoordinator.clearAll();
         clients.clear();
         logger.info("所有 AcpClient 已关闭");
+    }
+
+    private void wirePromptLifecycle(String groupId, AcpClient client) {
+        client.setAfterTurnReady(() -> onClientTurnReady(groupId, client));
+        client.setAfterTurnFailed(() -> clearPendingIfCurrent(groupId, client));
+        client.setRecoverTurnFailureToReady(
+                () -> hasInterruptPendingForCurrent(groupId, client));
+    }
+
+    private void onClientTurnReady(String groupId, AcpClient client) {
+        synchronized (sessionLock(groupId)) {
+            if (clients.get(groupId) != client) {
+                promptCoordinator.clear(groupId);
+                return;
+            }
+            promptCoordinator.onReady(groupId, port(client));
+        }
+    }
+
+    private void clearPendingIfCurrent(String groupId, AcpClient client) {
+        synchronized (sessionLock(groupId)) {
+            if (clients.get(groupId) == client) promptCoordinator.clear(groupId);
+        }
+    }
+
+    private boolean hasInterruptPendingForCurrent(String groupId, AcpClient client) {
+        synchronized (sessionLock(groupId)) {
+            return clients.get(groupId) == client
+                    && promptCoordinator.hasPending(groupId, port(client));
+        }
+    }
+
+    private static MainAcpPromptCoordinator.ClientPort port(AcpClient client) {
+        return new MainAcpPromptCoordinator.ClientPort() {
+            @Override public Object identity() { return client; }
+            @Override public AbstractAcpClient.State state() { return client.getState(); }
+            @Override public void send(String message, List<Map<String, String>> files) {
+                client.send(message, files);
+            }
+            @Override public void cancel() throws IOException { client.cancel(); }
+            @Override public void markNextTermination(String termination) {
+                client.getGlobalListener().markNextTermination(termination);
+            }
+            @Override public void clearNextTermination() {
+                client.getGlobalListener().clearNextTermination();
+            }
+        };
     }
 }

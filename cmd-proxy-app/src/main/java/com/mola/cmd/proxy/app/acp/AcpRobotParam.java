@@ -27,6 +27,9 @@ public class AcpRobotParam {
     private String model;
     private String apiKey;
     private String codexHome;
+    private String deepSeekBaseUrl;
+    private String dshHome;
+    private String permissionPolicy;
 
     private boolean proxyEnabled;
     private String httpProxy;
@@ -78,6 +81,9 @@ public class AcpRobotParam {
         }
         if ("CODEX_ACP".equalsIgnoreCase(agentProvider)) {
             return "img/codex.png";
+        }
+        if ("DEEPSEEK_HARNESS_ACP".equalsIgnoreCase(agentProvider)) {
+            return "img/deepseek.png";
         }
         return "img/kiro.png";
     }
@@ -218,6 +224,15 @@ public class AcpRobotParam {
 
     public String getCodexHome() { return codexHome; }
     public void setCodexHome(String codexHome) { this.codexHome = codexHome; }
+
+    public String getDeepSeekBaseUrl() { return deepSeekBaseUrl; }
+    public void setDeepSeekBaseUrl(String deepSeekBaseUrl) { this.deepSeekBaseUrl = deepSeekBaseUrl; }
+
+    public String getDshHome() { return dshHome; }
+    public void setDshHome(String dshHome) { this.dshHome = dshHome; }
+
+    public String getPermissionPolicy() { return permissionPolicy; }
+    public void setPermissionPolicy(String permissionPolicy) { this.permissionPolicy = permissionPolicy; }
 
     public boolean isProxyEnabled() { return proxyEnabled; }
     public void setProxyEnabled(boolean proxyEnabled) { this.proxyEnabled = proxyEnabled; }

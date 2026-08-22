@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build and Refresh cmd-proxy Docker"
+  short_description: "Build, redact, verify, and refresh one Agent image"
+  default_prompt: "Use $cmd-proxy-docker-image to build, verify, replace, and clean up the single cmd-proxy Agent runtime image."

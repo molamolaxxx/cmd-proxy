@@ -1,6 +1,8 @@
 package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
 import org.junit.Test;
 
 import java.io.*;
@@ -78,9 +80,26 @@ public class AbstractAcpClientShutdownTest {
         assertTrue(endIndex > cancelIndex);
     }
 
+    @Test
+    public void deepSeekHarnessUsesSessionCloseInsteadOfSessionEnd() throws Exception {
+        FakeProcess process = FakeProcess.graceful();
+        TestClient client = new TestClient(new DeepSeekHarnessAcpProvider());
+        StringWriter output = client.attach(process, "dsh-session");
+
+        client.close();
+
+        assertTrue(output.toString().contains("\"method\":\"session/close\""));
+        assertFalse(output.toString().contains("session/end"));
+        assertFalse(process.destroyCalled);
+    }
+
     private static final class TestClient extends AbstractAcpClient {
         private TestClient() {
-            super(new KiroCliAgentProvider(), ".",
+            this(new KiroCliAgentProvider());
+        }
+
+        private TestClient(AgentProvider provider) {
+            super(provider, ".",
                     AcpClientIdentity.main("group-1", "Robot One", "Robot One"), null);
         }
 

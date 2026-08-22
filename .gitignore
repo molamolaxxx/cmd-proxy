@@ -36,3 +36,10 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Runtime / local ###
+logs/
+.directory
+
+### Agent skills (build/ is otherwise a NetBeans pattern) ###
+!.agents/skills/cmd-proxy-docker-image/scripts/build/

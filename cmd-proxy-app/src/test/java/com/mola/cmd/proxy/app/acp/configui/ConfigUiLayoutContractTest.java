@@ -73,6 +73,20 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("executionMode:memExecutionMode,robotName:memRobotName||undefined"));
     }
 
+    @Test
+    public void exposesDeepSeekHarnessProviderWithSafeRuntimeControls() throws Exception {
+        String html = loadConfigUi();
+
+        assertTrue(html.contains("value=\"DEEPSEEK_HARNESS_ACP\""));
+        assertTrue(html.contains("DeepSeek Harness (ACP·实验性)"));
+        assertTrue(html.contains("id=\"dDeepSeekBaseUrl\""));
+        assertTrue(html.contains("id=\"dDshHome\""));
+        assertTrue(html.contains("id=\"dPermissionPolicy\""));
+        assertTrue(html.contains("value=\"REJECT\""));
+        assertTrue(html.contains("需要 Node.js 22+"));
+        assertTrue(html.contains("permissionPolicy:provider==='DEEPSEEK_HARNESS_ACP'"));
+    }
+
     private String loadConfigUi() throws Exception {
         InputStream input = getClass().getResourceAsStream("/configui/index.html");
         ByteArrayOutputStream output = new ByteArrayOutputStream();

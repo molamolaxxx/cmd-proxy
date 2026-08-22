@@ -29,11 +29,11 @@ class LogUtil {
                     objects: Array<out Any>?,
                     throwable: Throwable?
                 ): FilterReply {
-                    return if (level.levelStr == "debug" || level.levelStr == "DEBUG") {
+                    return if (level == Level.DEBUG) {
                         FilterReply.DENY
-                    } else FilterReply.ACCEPT
+                    } else FilterReply.NEUTRAL
                 }
-            };
+            }
             turboFilterList.add(turboFilter)
         }
     }

@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.acpclient.agent;
 import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
@@ -17,6 +18,23 @@ import java.util.Map;
  * 不同的 agent 实现只需提供此接口的实现类即可接入。
  */
 public interface AgentProvider {
+
+    enum PermissionPolicy {
+        REJECT,
+        ALLOW_ONCE,
+        ALLOW_ALWAYS;
+
+        public static PermissionPolicy fromString(String value, PermissionPolicy fallback) {
+            if (value == null || value.trim().isEmpty()) {
+                return fallback;
+            }
+            try {
+                return valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                return fallback;
+            }
+        }
+    }
 
     /**
      * Provider 对上下文压缩生命周期的标准化描述。
@@ -142,6 +160,17 @@ public interface AgentProvider {
     }
 
     /**
+     * 在创建 Agent 子进程前准备 Provider 所需的本地运行时。
+     * <p>
+     * 默认无需准备；需要一次性安装 CLI、初始化 profile 等操作的 Provider 可覆写。
+     * 传入的是最终子进程环境，准备命令应复用其中的 PATH、HOME、代理和 Provider home。
+     */
+    default void prepareLaunch(AcpRobotParam robotParam, Map<String, String> environment)
+            throws IOException {
+        // no-op
+    }
+
+    /**
      * 获取 ACP session 创建或恢复后需要立即应用的配置项。
      * <p>
      * 返回值会通过标准 {@code session/set_config_option} 请求逐项设置，适用于
@@ -168,5 +197,41 @@ public interface AgentProvider {
      */
     default boolean isAgentMessageControlArtifact(String text) {
         return false;
+    }
+
+    /**
+     * 是否支持通过 {@code session/load} 恢复会话。
+     */
+    default boolean supportsSessionLoad() {
+        return true;
+    }
+
+    /**
+     * 是否接受 ACP Client 在 session/new/session/load 中传入 MCP Server。
+     */
+    default boolean supportsClientMcpServers() {
+        return true;
+    }
+
+    /**
+     * 当前 Provider 用于释放单个 session 的协议方法；返回 null 表示没有单 session 关闭方法。
+     */
+    default String getSessionCloseMethod() {
+        return "session/end";
+    }
+
+    /**
+     * 关闭 session 后是否需要关闭 stdin，以触发 connection-owned ACP Server 优雅退出。
+     */
+    default boolean closeInputAfterSessionClose() {
+        return false;
+    }
+
+    /**
+     * 权限请求的自动处理策略。既有 Provider 保持历史行为；高风险 Provider 可覆写安全默认值。
+     */
+    default PermissionPolicy getPermissionPolicy(AcpRobotParam robotParam) {
+        String configured = robotParam != null ? robotParam.getPermissionPolicy() : null;
+        return PermissionPolicy.fromString(configured, PermissionPolicy.ALLOW_ALWAYS);
     }
 }

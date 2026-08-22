@@ -26,6 +26,16 @@ public final class LifecycleGuardedAcpResponseListener implements AcpResponseLis
     }
 
     @Override
+    public void markNextTermination(String termination) {
+        delegate.markNextTermination(termination);
+    }
+
+    @Override
+    public void clearNextTermination() {
+        delegate.clearNextTermination();
+    }
+
+    @Override
     public void onMessage(String text) {
         forward("onMessage", () -> delegate.onMessage(text));
     }

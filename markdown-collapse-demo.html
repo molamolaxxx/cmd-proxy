@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Markdown Collapse Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 40px; color: #ccc; }
+
+  #content {
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  /* details/summary 样式 */
+  #content details {
+    background: #252540;
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+
+  #content details summary {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #e0e0e0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    list-style: none; /* 去掉默认三角 */
+    user-select: none;
+  }
+  #content details summary::-webkit-details-marker { display: none; }
+
+  /* 自定义箭头 */
+  #content details summary::before {
+    content: '▶';
+    font-size: 10px;
+    color: #888;
+    transition: transform 0.2s;
+    display: inline-block;
+  }
+  #content details[open] summary::before {
+    transform: rotate(90deg);
+  }
+
+  #content details summary:hover { background: #2e2e4a; }
+
+  #content details .detail-body {
+    padding: 4px 16px 10px;
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  #content details .detail-body a { color: #7ecf8e; text-decoration: none; }
+  #content details .detail-body a:visited { color: #b39ddb; }
+  #content details .detail-body a:hover { text-decoration: underline; }
+  #content details .detail-body .meta { font-size: 11px; color: #777; }
+
+  /* 普通 markdown 内容样式 */
+  #content p { margin: 8px 0; font-size: 14px; line-height: 1.6; }
+  #content h2 { color: #e0e0e0; margin: 16px 0 8px; font-size: 16px; }
+  #content code { background: #2e2e4a; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div id="content"></div>
+
+<script>
+const markdown = `
+## 搜索结果示例
+
+下面的内容使用 \`<details>\` 和 \`<summary>\` 实现折叠：
+
+<details open>
+<summary>🌐 Web search: <strong>agentclientprotocol.com session stop RFD</strong> &nbsp;&nbsp; <span style="color:#888;font-size:12px">11 results</span></summary>
+<div class="detail-body">
+
+<span class="meta">agentclientprotocol.com  2026年1月15日</span>
+[Session Config Options](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2025年11月24日</span>
+[Agent Client Protocol](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com</span>
+[Agent Client Protocol](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2026年2月4日</span>
+[Requests for Dialog (RFDs)](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2026年2月2日</span>
+[Agent Client Protocol](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2025年12月19日</span>
+[Session Usage and Context Status](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2025年12月9日</span>
+[Request Cancellation Mechanism](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2026年3月9日</span>
+[Authentication Methods](https://agentclientprotocol.com)
+
+<span class="meta">agentclientprotocol.com  2026年3月9日</span>
+[Closing active sessions](https://agentclientprotocol.com)
+
+</div>
+</details>
+
+<details>
+<summary>📁 另一个可折叠区块（默认收起）</summary>
+<div class="detail-body">
+
+这里是被折叠的内容，点击上方箭头展开。
+
+- 支持 **Markdown** 语法
+- 支持 \`代码\` 片段
+- 支持 [链接](https://example.com)
+
+</div>
+</details>
+
+以上就是在 marked.parse 渲染的 Markdown 中实现折叠效果的方式。
+`;
+
+document.getElementById('content').innerHTML = marked.parse(markdown);
+</script>
+</body>
+</html>

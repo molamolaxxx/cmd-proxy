@@ -1,0 +1,4 @@
+interface:
+  display_name: "cmd-proxy 项目开发"
+  short_description: "快速理解 cmd-proxy、定位故障并安全完成开发验证"
+  default_prompt: "使用 $cmd-proxy 快速了解项目，并定位问题或完成开发任务。"
