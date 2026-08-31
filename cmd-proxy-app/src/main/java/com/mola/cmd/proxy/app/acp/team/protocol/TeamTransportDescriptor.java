@@ -58,6 +58,7 @@ public final class TeamTransportDescriptor {
                         TeamTransportProtocol.GET_STATUS_COMMAND,
                         TeamTransportProtocol.GET_CONTEXT_USAGE_COMMAND,
                         TeamTransportProtocol.MEMORY_DREAM_COMMAND,
+                        TeamTransportProtocol.READ_TEXT_FILE_COMMAND,
                         TeamTransportProtocol.TALK_TO_DELIVER_COMMAND))
                 : Collections.singletonList(TeamTransportProtocol.DESCRIBE_COMMAND);
     }

@@ -8,6 +8,7 @@ import com.mola.cmd.proxy.app.acp.memory.model.MemoryEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -136,6 +137,22 @@ public class MemoryManager implements MemoryManagerBridge {
             fileStore.touchMemory(workspacePath, filePath);
         } catch (Exception e) {
             logger.warn("记忆访问强化失败: {}", filePath, e);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public void onMemoryToolInput(String workspacePath,
+                                  Collection<String> inputStrings) {
+        if (!config.isWriteEnabled() || inputStrings == null
+                || inputStrings.isEmpty()) return;
+        ReentrantLock lock = locks.lockFor(fileStore, workspacePath);
+        lock.lock();
+        try {
+            fileStore.touchMemoriesReferenced(workspacePath, inputStrings);
+        } catch (Exception e) {
+            logger.warn("记忆明细访问检测失败", e);
         } finally {
             lock.unlock();
         }

@@ -122,6 +122,11 @@ public class DreamPromptTemplate {
         sb.append("识别同一主题被拆分成多条的情况，合并为一条完整的记忆。\n");
         sb.append("判断标准：type 相同 + tags 高度重叠 + title/summary 语义相近。\n\n");
 
+        sb.append("### 优先级 9：决策摘要规范化\n");
+        sb.append("summary 应是脱离 detail 也能直接用于未来决策的一句话核心结论，包含适用场景、应采取的做法，以及最关键的禁止项或例外。\n");
+        sb.append("如果 summary 只是主题标签或标题复述，可仅 UPDATE summary；背景、推导、证据和完整边界继续保留在 detail。\n");
+        sb.append("summary 建议 40~120 字且必须单行，不要为了改写 summary 删除仍然有效的 detail。\n\n");
+
         sb.append("### 安全护栏\n");
         sb.append("- 保守原则：如果不确定一条记忆是否应该被删除或修改，保留它（NOOP）。误保留的代价远低于误删除。\n");
         sb.append("- 单次整理操作总数不应超过记忆总数的 50%，避免一次性大规模清理导致信息丢失。\n");
@@ -140,7 +145,7 @@ public class DreamPromptTemplate {
         sb.append("    \"result\": {\n");
         sb.append("      \"type\": \"feedback\",\n");
         sb.append("      \"title\": \"合并后的标题\",\n");
-        sb.append("      \"summary\": \"合并后的一句话概要\",\n");
+        sb.append("      \"summary\": \"合并后可直接用于决策的单行核心结论\",\n");
         sb.append("      \"detail\": \"合并后的完整内容\",\n");
         sb.append("      \"tags\": [\"tag1\", \"tag2\"]\n");
         sb.append("    }\n");

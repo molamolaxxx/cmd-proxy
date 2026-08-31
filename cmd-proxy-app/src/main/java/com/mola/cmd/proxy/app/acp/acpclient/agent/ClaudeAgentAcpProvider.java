@@ -14,7 +14,7 @@ import java.util.Map;
 /**
  * Claude Agent ACP 的 AgentProvider 实现。
  * <p>
- * 通过 {@code npx @agentclientprotocol/claude-agent-acp} 启动适配器子进程，
+ * 通过 cmd-proxy 管理的精确 npm 版本启动适配器子进程，
  * 该适配器将 Claude Agent SDK 包装为标准 ACP JSON-RPC over stdio。
  * <p>
  * 凭证仍由 Claude Agent SDK 的 settings 解析；MCP 配置则由 cmd-proxy 从
@@ -24,15 +24,30 @@ import java.util.Map;
 public class ClaudeAgentAcpProvider implements AgentProvider {
 
     private static final String HOME = System.getProperty("user.home");
+    private static final NpmProviderRuntimeManager RUNTIME_MANAGER =
+            NpmProviderRuntimeManager.getInstance();
 
     @Override
     public String getCommand() {
-        return System.getProperty("os.name").toLowerCase().contains("win") ? "npx.cmd" : "npx";
+        return System.getProperty("os.name").toLowerCase().contains("win")
+                ? "claude-agent-acp.cmd" : "claude-agent-acp";
     }
 
     @Override
     public String[] getArgs() {
-        return new String[]{"-y", "@agentclientprotocol/claude-agent-acp"};
+        return new String[0];
+    }
+
+    @Override
+    public String getCommand(AcpRobotParam robotParam, Map<String, String> environment) {
+        return RUNTIME_MANAGER.preparedCommand(environment);
+    }
+
+    @Override
+    public void prepareLaunch(AcpRobotParam robotParam, Map<String, String> environment)
+            throws java.io.IOException {
+        RUNTIME_MANAGER.prepareLaunch(
+                AgentProviderType.CLAUDE_AGENT_ACP, robotParam, environment);
     }
 
     @Override
@@ -45,9 +60,8 @@ public class ClaudeAgentAcpProvider implements AgentProvider {
         if (workspacePath != null && !workspacePath.trim().isEmpty()) {
             paths.add(Paths.get(workspacePath, ".mcp.json"));
         }
-        // 这些配置必须通过 ACP session/new 传入，cmd-proxy 才能为每个 runtime
-        // 注入独立的 MCP 鉴权上下文；不能只依赖 Claude SDK 自行加载。
-        return paths;
+        // 统一共享配置（.cmd-proxy/mcp.json）优先级最低，同名时优先 Claude 自身配置。
+        return appendSharedMcpConfigPaths(paths, workspacePath);
     }
 
     @Override

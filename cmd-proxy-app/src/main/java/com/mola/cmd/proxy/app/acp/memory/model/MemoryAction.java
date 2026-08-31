@@ -1,6 +1,5 @@
 package com.mola.cmd.proxy.app.acp.memory.model;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -17,9 +16,10 @@ public class MemoryAction {
     private String type;        // user | feedback | project | reference
     private String title;
     private String summary;
-    private String detail;
-    private List<String> tags = new ArrayList<>();
-    private List<String> relatedSkills = new ArrayList<>();
+    private String detail;       // ADD 专用的完整明细
+    private String detailAppend; // UPDATE 专用，本次需要追加到旧明细的新信息
+    private List<String> tags;
+    private List<String> relatedSkills;
 
     public ActionType getAction() { return action; }
     public void setAction(ActionType action) { this.action = action; }
@@ -38,6 +38,9 @@ public class MemoryAction {
 
     public String getDetail() { return detail; }
     public void setDetail(String detail) { this.detail = detail; }
+
+    public String getDetailAppend() { return detailAppend; }
+    public void setDetailAppend(String detailAppend) { this.detailAppend = detailAppend; }
 
     public List<String> getTags() { return tags; }
     public void setTags(List<String> tags) { this.tags = tags; }

@@ -15,6 +15,7 @@ public class AcpRobotParam {
     private boolean enabled = true;
     private MemoryConfig memory;
     private String agentProvider = "KIRO_CLI";
+    private String providerVersion;
     private boolean abilityAutoRefresh = true;
     private List<SubAgentRef> subAgents;
     private boolean onlySubAgent;
@@ -29,6 +30,7 @@ public class AcpRobotParam {
     private String codexHome;
     private String deepSeekBaseUrl;
     private String dshHome;
+    private String dshAgentPreset;
     private String permissionPolicy;
 
     private boolean proxyEnabled;
@@ -132,6 +134,9 @@ public class AcpRobotParam {
         this.agentProvider = agentProvider;
     }
 
+    public String getProviderVersion() { return providerVersion; }
+    public void setProviderVersion(String providerVersion) { this.providerVersion = providerVersion; }
+
     public List<SubAgentRef> getSubAgents() {
         return subAgents;
     }
@@ -230,6 +235,9 @@ public class AcpRobotParam {
 
     public String getDshHome() { return dshHome; }
     public void setDshHome(String dshHome) { this.dshHome = dshHome; }
+
+    public String getDshAgentPreset() { return dshAgentPreset; }
+    public void setDshAgentPreset(String dshAgentPreset) { this.dshAgentPreset = dshAgentPreset; }
 
     public String getPermissionPolicy() { return permissionPolicy; }
     public void setPermissionPolicy(String permissionPolicy) { this.permissionPolicy = permissionPolicy; }

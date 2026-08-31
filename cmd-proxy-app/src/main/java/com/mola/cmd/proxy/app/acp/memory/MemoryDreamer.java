@@ -228,6 +228,9 @@ public class MemoryDreamer {
                         }
                         for (MemoryEntry entry : index.getMemories()) {
                             if (entry.getId().equals(action.getId())) {
+                                // detail 不存储在索引中。即使 Dream 只更新 summary/title，
+                                // 写回前也必须从明细文件恢复旧正文，避免被 summary 覆盖。
+                                entry.setDetail(fileStore.readDetailBody(entry));
                                 Map<String, String> fields = action.getFields();
                                 if (fields.containsKey("detail")) entry.setDetail(fields.get("detail"));
                                 if (fields.containsKey("summary")) entry.setSummary(fields.get("summary"));

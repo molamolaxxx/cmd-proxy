@@ -950,6 +950,24 @@ public final class TeamManager implements AutoCloseable {
         return replaceSession(requestId, command, TeamMemberStartOptions.newSession());
     }
 
+    public com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult readTextFile(
+            String requestId, TeamMemberCommand command) {
+        try {
+            MemberRoute route = requireMemberRoute(command, false);
+            ensureGrantActive(route.team);
+            AcpClient client = requireExistingClient(route);
+            return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewReader.read(
+                    requestId, client.getWorkspacePath(), command.getPath(),
+                    command.getMaxBytes(), command.getCharset());
+        } catch (IllegalArgumentException e) {
+            return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
+                    requestId, "INVALID_ARGUMENT", e.getMessage(), false);
+        } catch (MemberRouteException e) {
+            return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
+                    requestId, e.code.name(), e.getMessage(), false);
+        }
+    }
+
     public TeamCommandResult deliverTalkTo(TeamTalkToDeliverCommand command) {
         String requestId = command == null ? "" : command.getRequestId();
         try {

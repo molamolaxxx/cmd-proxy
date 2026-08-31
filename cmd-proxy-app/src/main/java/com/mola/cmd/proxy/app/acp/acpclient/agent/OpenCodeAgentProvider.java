@@ -19,10 +19,24 @@ import java.util.Map;
 public class OpenCodeAgentProvider implements AgentProvider {
 
     private static final String HOME = System.getProperty("user.home");
+    private static final NpmProviderRuntimeManager RUNTIME_MANAGER =
+            NpmProviderRuntimeManager.getInstance();
 
     @Override
     public String getCommand() {
         return System.getProperty("os.name").toLowerCase().contains("win") ? "opencode.cmd" : "opencode";
+    }
+
+    @Override
+    public String getCommand(AcpRobotParam robotParam, Map<String, String> environment) {
+        return RUNTIME_MANAGER.preparedCommand(environment);
+    }
+
+    @Override
+    public void prepareLaunch(AcpRobotParam robotParam, Map<String, String> environment)
+            throws java.io.IOException {
+        RUNTIME_MANAGER.prepareLaunch(AgentProviderType.OPENCODE, robotParam, environment);
+        environment.put("OPENCODE_DISABLE_AUTOUPDATE", "true");
     }
 
     @Override
@@ -39,7 +53,8 @@ public class OpenCodeAgentProvider implements AgentProvider {
         if (workspacePath != null && !workspacePath.trim().isEmpty()) {
             paths.add(Paths.get(workspacePath, "opencode.json"));
         }
-        return paths;
+        // 统一共享配置（.cmd-proxy/mcp.json）优先级最低，同名时优先 OpenCode 自身配置。
+        return appendSharedMcpConfigPaths(paths, workspacePath);
     }
 
     @Override

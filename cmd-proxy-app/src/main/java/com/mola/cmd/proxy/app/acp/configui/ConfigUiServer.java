@@ -4,6 +4,11 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderType;
+import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager;
+import com.mola.cmd.proxy.app.acp.common.PathResolver;
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
 import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
@@ -180,6 +185,14 @@ public class ConfigUiServer {
         server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
         server.createContext("/api/update-jar", proxied(this::handleUpdateJar));
         server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
+        server.createContext("/api/provider-runtime/releases",
+                proxied(this::handleProviderRuntimeReleases));
+        server.createContext("/api/provider-runtime/status",
+                proxied(this::handleProviderRuntimeStatus));
+        server.createContext("/api/provider-runtime/install",
+                proxied(this::handleProviderRuntimeInstall));
+        server.createContext("/api/provider-runtime/job",
+                proxied(this::handleProviderRuntimeJob));
 
         server.start();
         logger.info("ConfigUI 已启动: http://localhost:{}", port);
@@ -425,6 +438,8 @@ public class ConfigUiServer {
         String raw = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
         // 通过 fastjson 解析再序列化，确保输出标准 JSON（消除尾逗号等非标准语法）
         JSONObject json = JSON.parseObject(raw);
+        appendDshRuntimeProjection(json);
+        appendProviderRuntimeProjection(json);
         maskChannelSecrets(json);
         String content = JSON.toJSONString(json, SerializerFeature.PrettyFormat);
         sendResponse(exchange, 200, "application/json", content);
@@ -441,6 +456,11 @@ public class ConfigUiServer {
         if (json.getJSONArray("robots") != null) {
             for (int i = 0; i < json.getJSONArray("robots").size(); i++) {
                 JSONObject robot = json.getJSONArray("robots").getJSONObject(i);
+                if (robot != null) {
+                    robot.remove("_dshProfileBundles");
+                    robot.remove("_dshProfileError");
+                    robot.remove("_providerRuntime");
+                }
                 if (robot != null && robot.getBooleanValue("onlySubAgent")
                         && robot.getBooleanValue("onlyTeamMember")) {
                     sendResponse(exchange, 400, "application/json",
@@ -453,6 +473,158 @@ public class ConfigUiServer {
         json.remove("globalProxyEnabled");
         ChannelConfigFileStore.saveUiConfig(json, SECRET_MASK);
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+    }
+
+    /** Adds read-only DSH profile state to GET /api/config; POST strips it again. */
+    private void appendDshRuntimeProjection(JSONObject json) {
+        com.alibaba.fastjson.JSONArray robots = json.getJSONArray("robots");
+        if (robots == null) return;
+        DeepSeekHarnessAcpProvider provider = new DeepSeekHarnessAcpProvider();
+        for (int i = 0; i < robots.size(); i++) {
+            JSONObject robot = robots.getJSONObject(i);
+            if (robot == null || !"DEEPSEEK_HARNESS_ACP".equalsIgnoreCase(
+                    robot.getString("agentProvider"))) {
+                continue;
+            }
+            try {
+                AcpRobotParam param = robot.toJavaObject(AcpRobotParam.class);
+                robot.put("_dshProfileBundles", provider.getInstalledProfileBundles(param));
+            } catch (Exception e) {
+                logger.warn("读取 DSH profile bundles 失败, robot={}", robot.getString("name"), e);
+                robot.put("_dshProfileBundles", java.util.Collections.emptyList());
+                robot.put("_dshProfileError", e.getMessage());
+            }
+        }
+    }
+
+    /** Adds installed npm runtime versions without persisting projection fields. */
+    private void appendProviderRuntimeProjection(JSONObject json) {
+        com.alibaba.fastjson.JSONArray robots = json.getJSONArray("robots");
+        if (robots == null) return;
+        NpmProviderRuntimeManager manager = NpmProviderRuntimeManager.getInstance();
+        for (int i = 0; i < robots.size(); i++) {
+            JSONObject robot = robots.getJSONObject(i);
+            if (robot == null) continue;
+            AgentProviderType type = AgentProviderType.fromString(robot.getString("agentProvider"));
+            if (!manager.supports(type)) continue;
+            NpmProviderRuntimeManager.RuntimeStatus status = manager.status(type);
+            JSONObject runtime = new JSONObject(true);
+            runtime.put("provider", type.name());
+            runtime.put("packageName", status.getPackageName());
+            runtime.put("selectedVersion", robot.getString("providerVersion"));
+            runtime.put("installedVersions", status.getInstalledVersions());
+            robot.put("_providerRuntime", runtime);
+        }
+    }
+
+    private void handleProviderRuntimeReleases(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            AgentProviderType type = requiredNpmProvider(exchange);
+            NpmProviderRuntimeManager.ReleaseCatalog catalog =
+                    NpmProviderRuntimeManager.getInstance().fetchReleases(type);
+            JSONObject result = new JSONObject(true);
+            result.put("provider", catalog.getProvider().name());
+            result.put("packageName", catalog.getPackageName());
+            result.put("distTags", catalog.getDistTags());
+            result.put("versions", catalog.getVersions());
+            result.put("installedVersions", catalog.getInstalledVersions());
+            sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_PROVIDER", e.getMessage())));
+        } catch (Exception e) {
+            logger.warn("读取 Provider 发行版本失败", e);
+            sendResponse(exchange, 502, "application/json",
+                    JSON.toJSONString(apiError("REGISTRY_UNAVAILABLE", e.getMessage())));
+        }
+    }
+
+    private void handleProviderRuntimeStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            AgentProviderType type = requiredNpmProvider(exchange);
+            NpmProviderRuntimeManager.RuntimeStatus status =
+                    NpmProviderRuntimeManager.getInstance().status(type);
+            JSONObject result = new JSONObject(true);
+            result.put("provider", status.getProvider().name());
+            result.put("packageName", status.getPackageName());
+            result.put("installedVersions", status.getInstalledVersions());
+            sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_PROVIDER", e.getMessage())));
+        }
+    }
+
+    private void handleProviderRuntimeInstall(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject request = JSON.parseObject(readBody(exchange));
+            AgentProviderType type = AgentProviderType.fromString(
+                    request == null ? null : request.getString("provider"));
+            NpmProviderRuntimeManager manager = NpmProviderRuntimeManager.getInstance();
+            if (!manager.supports(type)) {
+                throw new IllegalArgumentException("provider is not npm-managed: " + type);
+            }
+            String version = request == null ? null : request.getString("version");
+            Map<String, String> environment = new java.util.LinkedHashMap<>(System.getenv());
+            String home = System.getProperty("user.home");
+            environment.put("PATH", PathResolver.enrichPath(home,
+                    environment.get("PATH") == null ? "" : environment.get("PATH")));
+            NpmProviderRuntimeManager.InstallJob job =
+                    manager.startInstall(type, version, environment);
+            sendResponse(exchange, 202, "application/json",
+                    JSON.toJSONString(providerJobJson(job)));
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_REQUEST", e.getMessage())));
+        }
+    }
+
+    private void handleProviderRuntimeJob(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String jobId = param(exchange, "jobId");
+        NpmProviderRuntimeManager.InstallJob job =
+                NpmProviderRuntimeManager.getInstance().job(jobId);
+        if (job == null) {
+            sendResponse(exchange, 404, "application/json",
+                    JSON.toJSONString(apiError("JOB_NOT_FOUND", "安装任务不存在")));
+            return;
+        }
+        sendResponse(exchange, 200, "application/json",
+                JSON.toJSONString(providerJobJson(job)));
+    }
+
+    private AgentProviderType requiredNpmProvider(HttpExchange exchange) throws IOException {
+        AgentProviderType type = AgentProviderType.fromString(param(exchange, "provider"));
+        if (!NpmProviderRuntimeManager.getInstance().supports(type)) {
+            throw new IllegalArgumentException("provider is not npm-managed: " + type);
+        }
+        return type;
+    }
+
+    private JSONObject providerJobJson(NpmProviderRuntimeManager.InstallJob job) {
+        JSONObject result = new JSONObject(true);
+        result.put("jobId", job.getJobId());
+        result.put("provider", job.getProvider().name());
+        result.put("version", job.getVersion());
+        result.put("status", job.getStatus());
+        result.put("progress", job.getProgress());
+        result.put("message", job.getMessage());
+        return result;
     }
 
     private void handleChannelStatus(HttpExchange exchange) throws IOException {

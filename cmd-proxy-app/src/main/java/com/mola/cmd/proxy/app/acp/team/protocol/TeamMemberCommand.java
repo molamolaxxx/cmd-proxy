@@ -14,6 +14,9 @@ public final class TeamMemberCommand {
     private List<Map<String, String>> files;
     private String sessionId;
     private Integer limit;
+    private String path;
+    private Integer maxBytes;
+    private String charset;
 
     @SuppressWarnings("unused")
     private TeamMemberCommand() {
@@ -28,4 +31,7 @@ public final class TeamMemberCommand {
     public List<Map<String, String>> getFiles() { return files; }
     public String getSessionId() { return sessionId; }
     public Integer getLimit() { return limit; }
+    public String getPath() { return path; }
+    public Integer getMaxBytes() { return maxBytes; }
+    public String getCharset() { return charset; }
 }

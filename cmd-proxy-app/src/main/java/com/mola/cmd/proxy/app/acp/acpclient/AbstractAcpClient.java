@@ -507,7 +507,8 @@ public abstract class AbstractAcpClient implements Closeable {
 
         // prepareLaunch 可能刚刚安装了可执行文件，因此在准备完成后再解析最终启动命令。
         List<String> cmd = new ArrayList<>();
-        cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand() : agentProvider.getCommand());
+        cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand()
+                : agentProvider.getCommand(robotParamRef, pb.environment()));
         cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs() : agentProvider.getArgs()));
 
         // 追加 provider 特定的额外参数（如 --model）

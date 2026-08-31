@@ -444,6 +444,9 @@ public class MemoryExtractor {
                 if (obj.has("title")) action.setTitle(obj.get("title").getAsString());
                 if (obj.has("summary")) action.setSummary(obj.get("summary").getAsString());
                 if (obj.has("detail")) action.setDetail(obj.get("detail").getAsString());
+                if (obj.has("detailAppend")) {
+                    action.setDetailAppend(obj.get("detailAppend").getAsString());
+                }
                 if (obj.has("tags") && obj.get("tags").isJsonArray()) {
                     List<String> tags = new ArrayList<>();
                     for (JsonElement tag : obj.getAsJsonArray("tags")) {

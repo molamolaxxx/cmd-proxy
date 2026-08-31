@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -76,4 +77,15 @@ public interface MemoryManagerBridge {
      * @param filePath      被读取的文件路径
      */
     void onMemoryAccessed(String workspacePath, String filePath);
+
+    /**
+     * 记录一次工具调用中出现的记忆明细引用。
+     * <p>
+     * 与 {@link #onMemoryAccessed(String, String)} 的结构化 path 入口不同，
+     * inputStrings 也可能包含 Bash/exec 的完整命令。实现方只应匹配当前索引中
+     * 已知的明细文件绝对路径，同一次工具调用对同一记忆最多计数一次。
+     */
+    default void onMemoryToolInput(String workspacePath,
+                                   Collection<String> inputStrings) {
+    }
 }

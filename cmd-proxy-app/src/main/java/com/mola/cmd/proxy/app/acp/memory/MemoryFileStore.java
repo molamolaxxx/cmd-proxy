@@ -21,6 +21,8 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -61,6 +63,8 @@ public class MemoryFileStore {
     private static final String MEMORIES_DIR = "memories";
     private static final String ARCHIVE_DIR = "archive";
     private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+    private static final Pattern DETAIL_FRONTMATTER = Pattern.compile(
+            "\\A---\\r?\\n.*?\\r?\\n---\\r?\\n(?:\\r?\\n)?", Pattern.DOTALL);
 
     private final String baseDir;
     /** scope=robot 时非 null，用于在 workspacePath 下追加 robot 子目录 */
@@ -118,6 +122,10 @@ public class MemoryFileStore {
         Path memoriesDir = getProjectDir(workspacePath).resolve(MEMORIES_DIR);
         try {
             Files.createDirectories(memoriesDir);
+            if (entry.getTags() == null) entry.setTags(new ArrayList<>());
+            if (entry.getRelatedSkills() == null) {
+                entry.setRelatedSkills(new ArrayList<>());
+            }
             String fileName = buildFileName(entry.getType(), entry.getTitle());
             Path filePath = memoriesDir.resolve(fileName);
 
@@ -153,6 +161,52 @@ public class MemoryFileStore {
         }
     }
 
+    /**
+     * 从索引指向的 Markdown 文件读取明细正文，不包含 YAML frontmatter。
+     * UPDATE 必须先调用此方法恢复索引中未持久化的 detail，再执行部分字段更新。
+     */
+    public String readDetailBody(MemoryEntry entry) throws IOException {
+        if (entry == null || entry.getFile() == null
+                || entry.getFile().trim().isEmpty()) {
+            throw new IOException("记忆明细路径为空");
+        }
+        Path path = Paths.get(entry.getFile());
+        if (!Files.isRegularFile(path)) {
+            throw new IOException("记忆明细文件不存在: " + path);
+        }
+        String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+        if (!content.startsWith("---")) {
+            return trimTrailingLineBreaks(content);
+        }
+        Matcher matcher = DETAIL_FRONTMATTER.matcher(content);
+        if (!matcher.find()) {
+            throw new IOException("记忆明细 frontmatter 格式无效: " + path);
+        }
+        return trimTrailingLineBreaks(content.substring(matcher.end()));
+    }
+
+    private String appendDetail(String oldDetail, String addition, String now) {
+        String oldText = trimTrailingLineBreaks(oldDetail);
+        String newText = addition == null ? "" : addition.trim();
+        if (newText.isEmpty()) return oldText;
+        if (oldText.isEmpty()) return newText;
+        if (oldText.contains(newText)) return oldText;
+        String updateDate = now != null && now.length() >= 10
+                ? now.substring(0, 10) : now;
+        return oldText + "\n\n## " + updateDate + " 更新\n\n" + newText;
+    }
+
+    private String trimTrailingLineBreaks(String value) {
+        if (value == null || value.isEmpty()) return "";
+        int end = value.length();
+        while (end > 0) {
+            char c = value.charAt(end - 1);
+            if (c != '\n' && c != '\r') break;
+            end--;
+        }
+        return value.substring(0, end);
+    }
+
     // ==================== 删除与归档 ====================
 
     /**
@@ -182,21 +236,83 @@ public class MemoryFileStore {
      * @param filePath      被读取的明细文件路径
      */
     public void touchMemory(String workspacePath, String filePath) {
+        if (filePath == null) return;
+        touchMemoriesReferenced(workspacePath,
+                Collections.singletonList(filePath));
+    }
+
+    /**
+     * 记录一次工具调用中引用到的记忆明细。references 可以是结构化文件路径，
+     * 也可以是包含绝对路径的 Bash/exec 命令。同一次调用对同一记忆只计一次。
+     * accessCount 的语义是“检测到的明细文件访问次数”，不代表 Agent 最终采用
+     * 了该记忆的结论。
+     *
+     * @return 本次更新的记忆条目数
+     */
+    public int touchMemoriesReferenced(String workspacePath,
+                                       Collection<String> references) {
+        if (references == null || references.isEmpty()) return 0;
         MemoryIndex index = loadIndex(workspacePath);
         String now = ZonedDateTime.now().format(ISO_FORMATTER);
         boolean changed = false;
+        int touched = 0;
         for (MemoryEntry entry : index.getMemories()) {
-            if (filePath.equals(entry.getFile())) {
+            if (isReferenced(workspacePath, entry.getFile(), references)) {
                 entry.setLastAccessedAt(now);
                 entry.setAccessCount(entry.getAccessCount() + 1);
                 changed = true;
-                logger.info("记忆访问强化: id={}, accessCount={}", entry.getId(), entry.getAccessCount());
-                break;
+                touched++;
+                logger.info("记忆明细访问已记录: id={}, accessCount={}",
+                        entry.getId(), entry.getAccessCount());
             }
         }
         if (changed) {
             saveIndex(workspacePath, index);
         }
+        return touched;
+    }
+
+    private boolean isReferenced(String workspacePath, String indexedFile,
+                                 Collection<String> references) {
+        if (indexedFile == null || indexedFile.isEmpty()) return false;
+        String normalizedIndexed;
+        try {
+            normalizedIndexed = Paths.get(indexedFile).toAbsolutePath()
+                    .normalize().toString();
+        } catch (Exception e) {
+            normalizedIndexed = indexedFile;
+        }
+        for (String reference : references) {
+            if (reference == null || reference.isEmpty()) continue;
+            // Bash/exec 常把明细绝对路径放在 cmd 字符串中；直接匹配当前索引中的
+            // 已知路径，无需解析 shell，也不会把未知 memories/ 路径计入访问。
+            if (reference.contains(indexedFile)
+                    || reference.contains(normalizedIndexed)) {
+                return true;
+            }
+            // 结构化 path 允许相对 workspace 的路径和未规范化路径。
+            if (!containsShellSyntax(reference)) {
+                try {
+                    Path candidate = Paths.get(reference);
+                    if (!candidate.isAbsolute()) {
+                        candidate = Paths.get(workspacePath).resolve(candidate);
+                    }
+                    if (candidate.toAbsolutePath().normalize().toString()
+                            .equals(normalizedIndexed)) {
+                        return true;
+                    }
+                } catch (Exception ignored) {
+                    // 非路径字符串由上面的已知绝对路径包含判断处理。
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean containsShellSyntax(String value) {
+        return value.indexOf(' ') >= 0 || value.indexOf('\t') >= 0
+                || value.indexOf('\n') >= 0 || value.indexOf('|') >= 0
+                || value.indexOf(';') >= 0 || value.indexOf('&') >= 0;
     }
 
     // ==================== 批量操作 ====================
@@ -224,8 +340,10 @@ public class MemoryFileStore {
                     newEntry.setTitle(action.getTitle());
                     newEntry.setSummary(action.getSummary());
                     newEntry.setDetail(action.getDetail());
-                    newEntry.setTags(action.getTags());
-                    newEntry.setRelatedSkills(action.getRelatedSkills());
+                    newEntry.setTags(action.getTags() != null
+                            ? action.getTags() : new ArrayList<>());
+                    newEntry.setRelatedSkills(action.getRelatedSkills() != null
+                            ? action.getRelatedSkills() : new ArrayList<>());
                     newEntry.setCreatedAt(now);
                     newEntry.setUpdatedAt(now);
                     writeDetail(workspacePath, newEntry);
@@ -240,13 +358,22 @@ public class MemoryFileStore {
                         if (entry.getId().equals(action.getId())) {
                             String oldTitle = entry.getTitle();
                             String oldSummary = entry.getSummary();
+                            try {
+                                entry.setDetail(readDetailBody(entry));
+                            } catch (IOException e) {
+                                throw new IllegalStateException(
+                                        "无法安全更新记忆 " + entry.getId()
+                                                + "：旧明细读取失败", e);
+                            }
+                            if (action.getType() != null) entry.setType(action.getType());
                             if (action.getTitle() != null) entry.setTitle(action.getTitle());
                             if (action.getSummary() != null) entry.setSummary(action.getSummary());
-                            if (action.getDetail() != null) entry.setDetail(action.getDetail());
-                            if (action.getTags() != null && !action.getTags().isEmpty()) {
+                            entry.setDetail(appendDetail(entry.getDetail(),
+                                    action.getDetailAppend(), now));
+                            if (action.getTags() != null) {
                                 entry.setTags(action.getTags());
                             }
-                            if (action.getRelatedSkills() != null && !action.getRelatedSkills().isEmpty()) {
+                            if (action.getRelatedSkills() != null) {
                                 entry.setRelatedSkills(action.getRelatedSkills());
                             }
                             entry.setUpdatedAt(now);

@@ -55,6 +55,7 @@ public class MemoryAcpClient extends AbstractAcpClient
         override.setCodexHome(original.getCodexHome());
         override.setDeepSeekBaseUrl(original.getDeepSeekBaseUrl());
         override.setDshHome(original.getDshHome());
+        override.setDshAgentPreset(original.getDshAgentPreset());
         override.setPermissionPolicy(original.getPermissionPolicy());
         override.setProxyEnabled(original.isProxyEnabled());
         override.setHttpProxy(original.getHttpProxy());

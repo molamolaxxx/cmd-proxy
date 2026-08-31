@@ -28,30 +28,33 @@ import java.util.Map;
 public class CodexAcpProvider implements AgentProvider {
 
     private static final Gson GSON = new Gson();
-    private static final String NPX_PACKAGE = "@agentclientprotocol/codex-acp";
+    private static final NpmProviderRuntimeManager RUNTIME_MANAGER =
+            NpmProviderRuntimeManager.getInstance();
     @Override
     public String getCommand() {
-        return System.getProperty("os.name").toLowerCase().contains("win") ? "npx.cmd" : "npx";
+        return System.getProperty("os.name").toLowerCase().contains("win")
+                ? "codex-acp.cmd" : "codex-acp";
     }
 
     @Override
     public String[] getArgs() {
-        return new String[]{"-y", NPX_PACKAGE};
+        return new String[0];
+    }
+
+    @Override
+    public String getCommand(AcpRobotParam robotParam, Map<String, String> environment) {
+        return RUNTIME_MANAGER.preparedCommand(environment);
+    }
+
+    @Override
+    public void prepareLaunch(AcpRobotParam robotParam, Map<String, String> environment)
+            throws java.io.IOException {
+        RUNTIME_MANAGER.prepareLaunch(AgentProviderType.CODEX_ACP, robotParam, environment);
     }
 
     @Override
     public boolean hasFallbackCommand() {
-        return true;
-    }
-
-    @Override
-    public String getFallbackCommand() {
-        return "codex-acp";
-    }
-
-    @Override
-    public String[] getFallbackArgs() {
-        return new String[0];
+        return false;
     }
 
     @Override
@@ -71,7 +74,8 @@ public class CodexAcpProvider implements AgentProvider {
             // 并保证 session/load 恢复时仍会重新挂载这些 MCP server。
             paths.add(Paths.get(workspacePath, ".codex", "config.toml"));
         }
-        return paths;
+        // 统一共享配置（.cmd-proxy/mcp.json）优先级最低，同名时优先 Codex 自身配置。
+        return appendSharedMcpConfigPaths(paths, workspacePath);
     }
 
     @Override

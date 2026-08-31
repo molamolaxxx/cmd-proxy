@@ -3,8 +3,16 @@ package com.mola.cmd.proxy.app.acp.acpclient.agent;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import com.mola.cmd.proxy.app.utils.CmdProxyHome;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -26,6 +34,8 @@ public class DeepSeekHarnessAcpProvider implements AgentProvider {
 
     private static final DeepSeekHarnessRuntimeInstaller RUNTIME_INSTALLER =
             new DeepSeekHarnessRuntimeInstaller();
+    private static final NpmProviderRuntimeManager NPM_RUNTIME_MANAGER =
+            NpmProviderRuntimeManager.getInstance();
 
     @Override
     public String getCommand() {
@@ -36,18 +46,20 @@ public class DeepSeekHarnessAcpProvider implements AgentProvider {
     }
 
     @Override
+    public String getCommand(AcpRobotParam robotParam, Map<String, String> environment) {
+        return NPM_RUNTIME_MANAGER.preparedCommand(environment);
+    }
+
+    @Override
     public String[] getArgs() {
         return new String[]{"--profile", "acp"};
     }
 
     @Override
     public List<Path> getMcpConfigPaths(String workspacePath) {
-        List<Path> paths = new ArrayList<>();
-        paths.add(CmdProxyHome.resolve("mcp.json"));
-        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
-            paths.add(Paths.get(workspacePath, ".cmd-proxy", "mcp.json"));
-        }
-        return paths;
+        // DeepSeek Harness 没有自身格式的 MCP 配置，只加载统一共享配置
+        // （$CMD_PROXY_HOME/mcp.json 与 <workspace>/.cmd-proxy/mcp.json）。
+        return appendSharedMcpConfigPaths(Collections.emptyList(), workspacePath);
     }
 
     @Override
@@ -75,7 +87,11 @@ public class DeepSeekHarnessAcpProvider implements AgentProvider {
     @Override
     public void prepareLaunch(AcpRobotParam robotParam, Map<String, String> environment)
             throws java.io.IOException {
-        Path runtimeHome = managedRuntimeHome();
+        NPM_RUNTIME_MANAGER.prepareLaunch(
+                AgentProviderType.DEEPSEEK_HARNESS_ACP, robotParam, environment);
+        String resolvedVersion = environment.get(NpmProviderRuntimeManager.ENV_VERSION);
+        Path runtimeHome = NPM_RUNTIME_MANAGER.runtimeHome(
+                AgentProviderType.DEEPSEEK_HARNESS_ACP, resolvedVersion);
         String managedBin = managedRuntimeBin(runtimeHome).toString();
         String currentPath = environment.get("PATH");
         if (currentPath == null || currentPath.trim().isEmpty()) {
@@ -88,10 +104,56 @@ public class DeepSeekHarnessAcpProvider implements AgentProvider {
 
     @Override
     public Map<String, String> getInitialSessionConfigOptions(AcpRobotParam robotParam) {
-        if (robotParam == null || isBlank(robotParam.getModel())) {
+        if (robotParam == null) {
             return Collections.emptyMap();
         }
-        return Collections.singletonMap("model", robotParam.getModel().trim());
+        Map<String, String> options = new LinkedHashMap<>();
+        if (!isBlank(robotParam.getDshAgentPreset())) {
+            options.put("agent", robotParam.getDshAgentPreset().trim());
+        }
+        if (!isBlank(robotParam.getModel())) {
+            options.put("model", robotParam.getModel().trim());
+        }
+        return options;
+    }
+
+    /**
+     * 读取当前 Robot 的 ACP profile 实际 bundle 顺序，供 ConfigUI 只读展示。
+     * 不触发运行时/profile 安装，也不修改 manifest。
+     */
+    public List<String> getInstalledProfileBundles(AcpRobotParam robotParam) throws IOException {
+        Path manifest = resolveDshHome(robotParam).resolve("profiles").resolve("acp")
+                .resolve("package.json");
+        if (!Files.isRegularFile(manifest)) {
+            return Collections.emptyList();
+        }
+        try (BufferedReader reader = Files.newBufferedReader(manifest, StandardCharsets.UTF_8)) {
+            JsonElement parsed = JsonParser.parseReader(reader);
+            if (!parsed.isJsonObject()) {
+                throw new IOException("DSH profile package.json 不是 JSON 对象: " + manifest);
+            }
+            JsonObject root = parsed.getAsJsonObject();
+            JsonObject dsh = object(root, "dsh");
+            JsonObject profile = object(dsh, "profile");
+            JsonArray bundles = array(profile, "bundles");
+            if (bundles == null) {
+                return Collections.emptyList();
+            }
+            List<String> result = new ArrayList<>();
+            for (JsonElement bundle : bundles) {
+                if (bundle.isJsonPrimitive() && bundle.getAsJsonPrimitive().isString()) {
+                    String name = bundle.getAsString();
+                    if (!isBlank(name)) {
+                        result.add(name.trim());
+                    }
+                }
+            }
+            return Collections.unmodifiableList(result);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("读取 DSH profile bundles 失败: " + manifest, e);
+        }
     }
 
     @Override
@@ -169,5 +231,19 @@ public class DeepSeekHarnessAcpProvider implements AgentProvider {
 
     private boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
+    }
+
+    private JsonObject object(JsonObject parent, String name) {
+        if (parent == null || !parent.has(name) || !parent.get(name).isJsonObject()) {
+            return null;
+        }
+        return parent.getAsJsonObject(name);
+    }
+
+    private JsonArray array(JsonObject parent, String name) {
+        if (parent == null || !parent.has(name) || !parent.get(name).isJsonArray()) {
+            return null;
+        }
+        return parent.getAsJsonArray(name);
     }
 }

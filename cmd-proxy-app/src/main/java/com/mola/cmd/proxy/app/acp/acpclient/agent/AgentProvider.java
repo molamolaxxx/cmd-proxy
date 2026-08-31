@@ -2,9 +2,12 @@ package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
 import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.utils.CmdProxyHome;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -59,6 +62,15 @@ public interface AgentProvider {
     String getCommand();
 
     /**
+     * Resolve the executable after {@link #prepareLaunch(AcpRobotParam, Map)}.
+     * Version-managed providers use the prepared absolute path from the child environment;
+     * ordinary providers retain the historical command.
+     */
+    default String getCommand(AcpRobotParam robotParam, Map<String, String> environment) {
+        return getCommand();
+    }
+
+    /**
      * agent 命令参数，如 ["acp"]
      */
     String[] getArgs();
@@ -98,6 +110,28 @@ public interface AgentProvider {
      */
     default List<Path> getMcpConfigPaths(String workspacePath, AcpRobotParam robotParam) {
         return getMcpConfigPaths(workspacePath);
+    }
+
+    /**
+     * 在 Provider 自身 MCP 配置路径之后追加统一共享配置（.cmd-proxy/mcp.json）。
+     * <p>
+     * 所有 Provider 共享同一份 JSON 格式的 MCP 配置：用户级
+     * {@code $CMD_PROXY_HOME/mcp.json}（默认 {@code ~/.cmd-proxy/mcp.json}）与工作区级
+     * {@code <workspace>/.cmd-proxy/mcp.json}。共享配置追加在 Provider 自身配置之后，
+     * 优先级最低：McpConfigLoader 按列表顺序加载，先加载的 server 占位，因此同名时
+     * Provider 自身配置优先。
+     *
+     * @param paths         Provider 自身的 MCP 配置路径（按优先级从高到低）
+     * @param workspacePath 当前工作目录
+     * @return 追加共享配置后的完整路径列表
+     */
+    default List<Path> appendSharedMcpConfigPaths(List<Path> paths, String workspacePath) {
+        List<Path> result = new ArrayList<>(paths);
+        result.add(CmdProxyHome.resolve("mcp.json"));
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            result.add(Paths.get(workspacePath, ".cmd-proxy", "mcp.json"));
+        }
+        return result;
     }
 
     /**

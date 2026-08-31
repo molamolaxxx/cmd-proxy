@@ -1814,30 +1814,44 @@ public class AcpClient extends AbstractAcpClient {
      }
 
 
-     /**
-     * 检测工具调用是否读取了记忆明细文件，触发访问强化。
+    /**
+     * 检测工具调用是否引用了记忆明细文件，更新访问统计。
      */
     private void detectMemoryAccess(JsonObject rawInput) {
         if (memoryManager == null || rawInput == null) return;
         try {
-            // 兼容多种工具输入格式：ops[].path 或直接 path
-            if (rawInput.has("ops") && rawInput.get("ops").isJsonArray()) {
-                for (JsonElement op : rawInput.getAsJsonArray("ops")) {
-                    if (op.isJsonObject() && op.getAsJsonObject().has("path")) {
-                        String path = op.getAsJsonObject().get("path").getAsString();
-                        if (path.contains("/memories/")) {
-                            memoryManager.onMemoryAccessed(workspacePath, path);
-                        }
-                    }
-                }
-            } else if (rawInput.has("path")) {
-                String path = rawInput.get("path").getAsString();
-                if (path.contains("/memories/")) {
-                    memoryManager.onMemoryAccessed(workspacePath, path);
-                }
-            }
+            List<String> inputStrings = new ArrayList<>();
+            collectToolInputStrings(rawInput, inputStrings);
+            memoryManager.onMemoryToolInput(workspacePath, inputStrings);
         } catch (Exception e) {
             logger.debug("检测记忆访问失败", e);
+        }
+    }
+
+    /**
+     * 收集工具输入中的全部字符串叶子。结构化 Read 工具的 path 和 Bash/exec
+     * 工具的 cmd 都会进入结果；是否引用真实记忆文件由 MemoryManager 按当前
+     * 索引中的绝对路径判断，避免在 ACP client 中解析 shell 语法。
+     */
+    static void collectToolInputStrings(JsonElement element,
+                                        Collection<String> output) {
+        if (element == null || element.isJsonNull() || output == null) return;
+        if (element.isJsonPrimitive()) {
+            JsonPrimitive primitive = element.getAsJsonPrimitive();
+            if (primitive.isString()) output.add(primitive.getAsString());
+            return;
+        }
+        if (element.isJsonArray()) {
+            for (JsonElement child : element.getAsJsonArray()) {
+                collectToolInputStrings(child, output);
+            }
+            return;
+        }
+        if (element.isJsonObject()) {
+            for (Map.Entry<String, JsonElement> entry
+                    : element.getAsJsonObject().entrySet()) {
+                collectToolInputStrings(entry.getValue(), output);
+            }
         }
     }
 

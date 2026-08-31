@@ -58,9 +58,16 @@ public class MemoryPromptTemplate {
         sb.append("## 去重与更新规则\n");
         sb.append("在决定 ADD 还是 UPDATE 之前，必须先检查已有记忆索引：\n");
         sb.append("- 如果新信息与某条已有记忆的主题高度重叠 → 使用 UPDATE（携带该条的 id），将新信息合并进去\n");
-        sb.append("- 如果新信息与已有记忆矛盾 → 使用 UPDATE 覆盖旧内容，而非同时保留两条矛盾记忆\n");
+        sb.append("- 如果新信息与已有记忆矛盾 → 使用 UPDATE 更新 summary，并在 detailAppend 中明确旧结论已被取代，避免新增矛盾记忆\n");
         sb.append("- 只有当信息确实是全新主题时才使用 ADD\n");
         sb.append("- 当已有记忆接近上限（≥25 条）时，提高 ADD 门槛，只保存高价值信息\n\n");
+
+        sb.append("## UPDATE 安全规则\n");
+        sb.append("UPDATE 是部分更新：只返回本次确实需要修改的字段，未返回的字段由系统保留旧值。\n");
+        sb.append("你没有看到已有记忆的完整 detail，因此严禁臆造或重写旧 detail，也不要在 UPDATE 中返回 detail。\n");
+        sb.append("如果本次对话产生了需要补充到明细的新信息，放入 detailAppend；系统会将它追加到旧 detail。\n");
+        sb.append("如果只需更新 summary、title、tags 或 relatedSkills，可以省略 detailAppend。\n");
+        sb.append("如果新结论取代旧结论，应在 detailAppend 中明确写出被取代的旧结论和当前有效结论。\n\n");
 
         sb.append("## 提取规则\n");
         sb.append("请按以下分类提取记忆，只提取跨 session 有价值的信息：\n\n");
@@ -103,7 +110,7 @@ public class MemoryPromptTemplate {
         sb.append("    \"action\": \"ADD\",\n");
         sb.append("    \"type\": \"feedback\",\n");
         sb.append("    \"title\": \"简短标题（10 字以内）\",\n");
-        sb.append("    \"summary\": \"仅标注主题和类型的关键词式概要，不含具体结论或做法（20 字以内）\",\n");
+        sb.append("    \"summary\": \"可直接用于未来决策的一句话核心结论：包含适用场景、应采取的做法，以及最关键的禁止项或例外；不能只复述标题，建议 40~120 字且必须单行输出\",\n");
         sb.append("    \"detail\": \"What: 具体内容，充分记录关键细节和涉及的组件，不要过度压缩。Why: 为什么重要。Apply: 未来如何应用。feedback/user 类型 150~400 字；project/reference 类型按需写够，不设上限，但避免冗余重复。\",\n");
         sb.append("    \"tags\": [\"标签1\", \"标签2\"],\n");
         sb.append("    \"relatedSkills\": [\"skill-name\"]\n");
@@ -111,10 +118,9 @@ public class MemoryPromptTemplate {
         sb.append("  {\n");
         sb.append("    \"action\": \"UPDATE\",\n");
         sb.append("    \"id\": \"memory_abc123\",\n");
-        sb.append("    \"type\": \"project\",\n");
         sb.append("    \"title\": \"更新后的标题\",\n");
-        sb.append("    \"summary\": \"更新后的概要\",\n");
-        sb.append("    \"detail\": \"合并新旧信息后的完整内容\",\n");
+        sb.append("    \"summary\": \"结合已有概要和本次新信息得到的单行决策结论\",\n");
+        sb.append("    \"detailAppend\": \"仅填写本次需要追加的新事实、限制、证据或取代说明；无需补充时省略\",\n");
         sb.append("    \"tags\": [\"标签1\"],\n");
         sb.append("    \"relatedSkills\": [\"skill-name\"]\n");
         sb.append("  },\n");
@@ -126,10 +132,12 @@ public class MemoryPromptTemplate {
         sb.append("```\n");
         sb.append("规则：\n");
         sb.append("- ADD：新增记忆。不需要 id 字段。\n");
-        sb.append("- UPDATE：更新已有记忆。必须携带已有记忆的 id，并提供完整的更新后内容（非增量）。\n");
+        sb.append("- UPDATE：部分更新已有记忆。必须携带已有记忆的 id；禁止返回 detail，新增明细使用 detailAppend。\n");
+        sb.append("- UPDATE 中字段缺失表示保留旧值；显式空数组表示清空 tags 或 relatedSkills。\n");
         sb.append("- DELETE：删除已有记忆。只需 id 字段。\n");
         sb.append("- NOOP：无需操作。可省略不写。\n");
         sb.append("- 如果没有值得保存的记忆，返回空数组 []。\n");
+        sb.append("- summary 必须脱离 detail 也能表达未来决策所需的核心结论；背景、推导、证据和完整边界保留在 detail。\n");
         sb.append("- 只输出 JSON 数组，不要输出其他内容。\n");
         sb.append("- JSON 字符串值中严禁使用中文引号（\u201c \u201d \u2018 \u2019），如需引用请用「」代替。\n");
 

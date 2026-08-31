@@ -102,6 +102,20 @@ public final class TeamCommandHandler {
         return handleMember(rpcRequestId, args, manager::memoryDream);
     }
 
+    public Map<String, String> handleReadTextFile(String rpcRequestId, String[] args) {
+        try {
+            TeamMemberCommand command = parseSingleArg(args, TeamMemberCommand.class);
+            return manager.readTextFile(rpcRequestId, command).toResultMap();
+        } catch (IllegalArgumentException e) {
+            return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
+                    rpcRequestId, "INVALID_ARGUMENT", e.getMessage(), false).toResultMap();
+        } catch (RuntimeException e) {
+            return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
+                    rpcRequestId, "INTERNAL_ERROR",
+                    e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), false).toResultMap();
+        }
+    }
+
     public Map<String, String> handleTalkToDeliver(String rpcRequestId, String[] args) {
         try {
             TeamTalkToDeliverCommand command = parseSingleArg(
