@@ -164,7 +164,7 @@ public abstract class AbstractAcpClient implements Closeable {
     }
 
     /**
-     * 带重试的 initialize，应对子进程启动慢的场景（Windows 下 .cmd 包装、npx 首次下载等）。
+     * 带重试的 initialize，应对子进程启动慢的场景（例如 Windows 下 .cmd 包装）保持容错。
      */
     private void initializeWithRetry() throws IOException {
         int maxRetries = 5;
@@ -502,14 +502,18 @@ public abstract class AbstractAcpClient implements Closeable {
             }
         }
 
-        // Provider 可在启动前完成一次性 CLI/profile 安装。准备流程必须自行保证幂等和并发安全。
-        agentProvider.prepareLaunch(robotParamRef, pb.environment());
+        // 备用命令是已存在的独立运行路径，不重复准备主 Provider 的托管 runtime。
+        // latest 的 registry 检查和安装由后台维护任务完成，普通 ACP 启动只解析本地版本。
+        if (!useFallbackCommand) {
+            agentProvider.prepareLaunch(robotParamRef, pb.environment());
+        }
 
         // prepareLaunch 可能刚刚安装了可执行文件，因此在准备完成后再解析最终启动命令。
         List<String> cmd = new ArrayList<>();
         cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand()
                 : agentProvider.getCommand(robotParamRef, pb.environment()));
-        cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs() : agentProvider.getArgs()));
+        cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs()
+                : agentProvider.getArgs(robotParamRef, pb.environment())));
 
         // 追加 provider 特定的额外参数（如 --model）
         List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);

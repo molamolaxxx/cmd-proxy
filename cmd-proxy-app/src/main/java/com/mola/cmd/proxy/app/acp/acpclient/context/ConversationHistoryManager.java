@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.acpclient.context;
 
 import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.acpclient.ClientSurface;
 import com.mola.cmd.proxy.app.acp.common.PathUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -94,7 +95,8 @@ public class ConversationHistoryManager {
                                                 Path sessionRootDir) {
         Path root = Objects.requireNonNull(sessionRootDir, "sessionRootDir")
                 .toAbsolutePath().normalize();
-        if (!identity.isTeam()) {
+        if (!identity.isTeam()
+                && identity.getSurface() != ClientSurface.STARWEAVE) {
             String dirName = PathUtils.sanitizePath(identity.getHistoryNamespace());
             if (dirName.isEmpty()) {
                 throw new IllegalArgumentException("historyNamespace 清洗后不能为空");
@@ -104,22 +106,22 @@ public class ConversationHistoryManager {
 
         String namespace = identity.getHistoryNamespace().replace('\\', '/');
         if (namespace.startsWith("/") || namespace.matches("^[a-zA-Z]:.*")) {
-            throw new IllegalArgumentException("TEAM historyNamespace 不能是绝对路径: " + namespace);
+            throw new IllegalArgumentException("分层 historyNamespace 不能是绝对路径: " + namespace);
         }
 
         String[] segments = namespace.split("/", -1);
         if (segments.length < 2) {
-            throw new IllegalArgumentException("TEAM historyNamespace 必须是分层相对路径: " + namespace);
+            throw new IllegalArgumentException("分层 historyNamespace 必须是相对路径: " + namespace);
         }
 
         Path relative = Paths.get("");
         for (String segment : segments) {
             if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
-                throw new IllegalArgumentException("TEAM historyNamespace 包含非法路径段: " + namespace);
+                throw new IllegalArgumentException("分层 historyNamespace 包含非法路径段: " + namespace);
             }
             if (!segment.matches("[a-zA-Z0-9._-]+")) {
                 throw new IllegalArgumentException(
-                        "TEAM historyNamespace 路径段只允许字母、数字、._-: " + segment);
+                        "分层 historyNamespace 路径段只允许字母、数字、._-: " + segment);
             }
             relative = relative.resolve(segment);
         }
@@ -494,8 +496,8 @@ public class ConversationHistoryManager {
         if (sessionId != null) {
             Path sessionDir = sessionBaseDir.resolve(sessionId);
             if (Files.isDirectory(sessionDir)) {
-                try {
-                    Files.list(sessionDir)
+                try (Stream<Path> turnFiles = Files.list(sessionDir)) {
+                    turnFiles
                             .filter(p -> p.getFileName().toString().startsWith("turn_")
                                     && p.getFileName().toString().endsWith(".json"))
                             .sorted()
@@ -534,12 +536,26 @@ public class ConversationHistoryManager {
         Path filesDir = sessionBaseDir.resolve(sessionId).resolve("files");
         if (!Files.isDirectory(filesDir)) return Collections.emptyList();
         List<String> result = new ArrayList<>();
-        try {
-            Files.list(filesDir).forEach(p -> result.add(p.toAbsolutePath().toString()));
+        try (Stream<Path> files = Files.list(filesDir)) {
+            files.forEach(p -> result.add(p.toAbsolutePath().toString()));
         } catch (IOException e) {
             logger.warn("读取文件目录失败: {}", filesDir, e);
         }
         return result;
+    }
+
+    /** Server-owned root for session resource APIs; rejects caller path syntax. */
+    public Path getSessionFilesDirectory(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()
+                || sessionId.contains("/") || sessionId.contains("\\")
+                || ".".equals(sessionId) || "..".equals(sessionId)) {
+            throw new IllegalArgumentException("invalid sessionId");
+        }
+        Path resolved = sessionBaseDir.resolve(sessionId).resolve("files").normalize();
+        if (!resolved.startsWith(sessionBaseDir.toAbsolutePath().normalize())) {
+            throw new IllegalArgumentException("sessionId escapes history root");
+        }
+        return resolved;
     }
 
     /**
@@ -557,8 +573,8 @@ public class ConversationHistoryManager {
         // 恢复 turn 计数器：统计已有的 turn 文件数
         Path sessionDir = sessionBaseDir.resolve(sessionId);
         if (Files.isDirectory(sessionDir)) {
-            try {
-                long turnCount = Files.list(sessionDir)
+            try (Stream<Path> turnFiles = Files.list(sessionDir)) {
+                long turnCount = turnFiles
                         .filter(p -> p.getFileName().toString().startsWith("turn_")
                                 && p.getFileName().toString().endsWith(".json"))
                         .count();
@@ -618,18 +634,10 @@ public class ConversationHistoryManager {
             if (!Files.isDirectory(sessionBaseDir)) {
                 return null;
             }
-            try {
-                return Files.list(sessionBaseDir)
+            try (Stream<Path> sessions = Files.list(sessionBaseDir)) {
+                return sessions
                         .filter(Files::isDirectory)
-                        .filter(p -> {
-                            try {
-                                return Files.list(p).anyMatch(f ->
-                                        f.getFileName().toString().startsWith("turn_")
-                                                && f.getFileName().toString().endsWith(".json"));
-                            } catch (IOException e) {
-                                return false;
-                            }
-                        })
+                        .filter(ConversationHistoryManager::containsTurnFile)
                         .max(Comparator.comparingLong(p -> {
                             try {
                                 return Files.getLastModifiedTime(p).toMillis();
@@ -690,14 +698,11 @@ public class ConversationHistoryManager {
      */
     public List<SessionSummary> listRecentSessions(int limit) {
         if (!Files.isDirectory(sessionBaseDir)) return Collections.emptyList();
-        try {
+        try (Stream<Path> sessions = Files.list(sessionBaseDir)) {
             java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm");
-            List<Path> dirs = Files.list(sessionBaseDir)
+            List<Path> dirs = sessions
                     .filter(Files::isDirectory)
-                    .filter(p -> {
-                        try { return Files.list(p).anyMatch(f -> f.getFileName().toString().startsWith("turn_")); }
-                        catch (IOException e) { return false; }
-                    })
+                    .filter(ConversationHistoryManager::containsTurnFile)
                     .sorted((a, b) -> {
                         try { return Long.compare(Files.getLastModifiedTime(b).toMillis(), Files.getLastModifiedTime(a).toMillis()); }
                         catch (IOException e) { return 0; }
@@ -720,8 +725,8 @@ public class ConversationHistoryManager {
     }
 
     private String extractPreview(Path sessionDir) {
-        try {
-            List<Path> turnFiles = Files.list(sessionDir)
+        try (Stream<Path> files = Files.list(sessionDir)) {
+            List<Path> turnFiles = files
                     .filter(p -> p.getFileName().toString().startsWith("turn_") && p.getFileName().toString().endsWith(".json"))
                     .sorted()
                     .collect(java.util.stream.Collectors.toList());
@@ -745,6 +750,17 @@ public class ConversationHistoryManager {
             return firstAssistant != null ? sanitizePreview(firstAssistant, 80) : "(空会话)";
         } catch (Exception e) {
             return "(读取失败)";
+        }
+    }
+
+    private static boolean containsTurnFile(Path sessionDir) {
+        try (Stream<Path> files = Files.list(sessionDir)) {
+            return files.anyMatch(file -> {
+                String name = file.getFileName().toString();
+                return name.startsWith("turn_") && name.endsWith(".json");
+            });
+        } catch (IOException e) {
+            return false;
         }
     }
 

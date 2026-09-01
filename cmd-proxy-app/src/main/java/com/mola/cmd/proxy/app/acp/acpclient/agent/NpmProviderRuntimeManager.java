@@ -4,7 +4,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.common.PathResolver;
 import com.mola.cmd.proxy.app.utils.CmdProxyHome;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -16,11 +19,16 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -31,10 +39,12 @@ import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Collection;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -47,6 +57,9 @@ import java.util.regex.Pattern;
  */
 public final class NpmProviderRuntimeManager {
 
+    private static final Logger logger =
+            LoggerFactory.getLogger(NpmProviderRuntimeManager.class);
+
     public static final String ENV_EXECUTABLE = "CMD_PROXY_PROVIDER_EXECUTABLE";
     public static final String ENV_VERSION = "CMD_PROXY_PROVIDER_RUNTIME_VERSION";
     public static final String DEFAULT_REGISTRY = "https://registry.npmjs.org/";
@@ -54,7 +67,9 @@ public final class NpmProviderRuntimeManager {
     private static final Pattern EXACT_VERSION = Pattern.compile(
             "[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\\+[0-9A-Za-z.-]+)?");
     private static final long INSTALL_TIMEOUT_MINUTES = 15L;
+    private static final int MOVE_RETRY_COUNT = 8;
     private static final int MAX_CATALOG_VERSIONS = 100;
+    private static final long AUTO_LATEST_INTERVAL_HOURS = 6L;
     private static final NpmProviderRuntimeManager INSTANCE =
             new NpmProviderRuntimeManager();
 
@@ -67,6 +82,15 @@ public final class NpmProviderRuntimeManager {
         thread.setDaemon(true);
         return thread;
     });
+    private final ScheduledExecutorService autoLatestExecutor =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "provider-auto-latest-updater");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private volatile Map<AgentProviderType, List<Map<String, String>>> autoLatestTargets =
+            Collections.emptyMap();
+    private volatile boolean autoLatestStarted;
 
     private NpmProviderRuntimeManager() {
         register(new Distribution(AgentProviderType.OPENCODE,
@@ -86,6 +110,47 @@ public final class NpmProviderRuntimeManager {
 
     public boolean supports(AgentProviderType type) {
         return distributions.containsKey(type);
+    }
+
+    public boolean supportsManagedInstall(AgentProviderType type) {
+        return supports(type);
+    }
+
+    /**
+     * Replaces the set of configured providers that follow npm's mutable latest tag.
+     * Registry access and installation happen only on the dedicated background executor;
+     * this method never blocks ACP startup.
+     */
+    public synchronized void configureAutoLatest(Collection<AcpRobotParam> robots) {
+        Map<AgentProviderType, List<Map<String, String>>> targets = new EnumMap<>(
+                AgentProviderType.class);
+        if (robots != null) {
+            for (AcpRobotParam robot : robots) {
+                if (!followsAutoLatest(robot)) {
+                    continue;
+                }
+                AgentProviderType type = AgentProviderType.fromString(
+                        robot.getAgentProvider());
+                if (!supports(type)) continue;
+                targets.computeIfAbsent(type, ignored -> new ArrayList<>())
+                        .add(installerEnvironment(robot));
+            }
+        }
+        Map<AgentProviderType, List<Map<String, String>>> immutable =
+                new EnumMap<>(AgentProviderType.class);
+        for (Map.Entry<AgentProviderType, List<Map<String, String>>> entry
+                : targets.entrySet()) {
+            immutable.put(entry.getKey(), Collections.unmodifiableList(entry.getValue()));
+        }
+        autoLatestTargets = Collections.unmodifiableMap(immutable);
+        if (!autoLatestStarted) {
+            autoLatestStarted = true;
+            autoLatestExecutor.scheduleWithFixedDelay(this::updateConfiguredLatestSafely,
+                    AUTO_LATEST_INTERVAL_HOURS, AUTO_LATEST_INTERVAL_HOURS, TimeUnit.HOURS);
+        }
+        autoLatestExecutor.execute(this::updateConfiguredLatestSafely);
+        logger.info("Provider 自动 latest 后台任务已配置, providers={}",
+                autoLatestTargets.keySet());
     }
 
     public void prepareLaunch(AgentProviderType type, AcpRobotParam robot,
@@ -141,7 +206,9 @@ public final class NpmProviderRuntimeManager {
 
     public RuntimeStatus status(AgentProviderType type) {
         Distribution distribution = requireDistribution(type);
-        return new RuntimeStatus(type, distribution.packageName, installedVersions(type));
+        RuntimeInstall defaultInstall = readDefaultInstall(distribution);
+        return new RuntimeStatus(type, distribution.packageName, installedVersions(type),
+                defaultInstall == null ? null : defaultInstall.version);
     }
 
     public InstallJob startInstall(AgentProviderType type, String exactVersion,
@@ -180,21 +247,98 @@ public final class NpmProviderRuntimeManager {
         Distribution distribution = requireDistribution(type);
         String version = trimToNull(requestedVersion);
         if (version == null) {
-            version = readDefaultVersion(distribution);
-            if (version == null) {
-                version = fetchReleases(type).getDistTags().get("latest");
-                if (version == null) {
-                    throw new IOException("npm registry did not publish a latest version for "
-                            + distribution.packageName);
-                }
+            RuntimeInstall installed = readDefaultInstall(distribution);
+            if (installed == null) {
+                throw new IOException("automatic latest runtime is not ready for "
+                        + distribution.packageName
+                        + "; wait for the background provider updater or install a version in ConfigUI");
             }
+            return installed;
         }
         requireExactVersion(version);
         RuntimeInstall installed = ensureExactInstalled(distribution, version, environment);
-        if (trimToNull(requestedVersion) == null) {
-            writeDefaultVersion(distribution, version);
-        }
         return installed;
+    }
+
+    private void updateConfiguredLatestSafely() {
+        Map<AgentProviderType, List<Map<String, String>>> snapshot = autoLatestTargets;
+        for (Map.Entry<AgentProviderType, List<Map<String, String>>> entry
+                : snapshot.entrySet()) {
+            try {
+                updateLatest(entry.getKey(), entry.getValue());
+            } catch (Exception e) {
+                logger.warn("Provider 自动 latest 更新失败, provider={}", entry.getKey(), e);
+            }
+        }
+    }
+
+    private void updateLatest(AgentProviderType type,
+                              List<Map<String, String>> environments) throws IOException {
+        Distribution distribution = requireDistribution(type);
+        String latest = fetchReleases(type).getDistTags().get("latest");
+        if (latest == null || latest.trim().isEmpty()) {
+            throw new IOException("npm registry did not publish a latest version for "
+                    + distribution.packageName);
+        }
+        requireExactVersion(latest);
+        RuntimeInstall current = readDefaultInstall(distribution);
+        if (current != null && latest.equals(current.version)) {
+            logger.debug("Provider latest 已是当前默认版本, provider={}, version={}",
+                    type, latest);
+            return;
+        }
+
+        IOException lastError = null;
+        List<Map<String, String>> candidates = environments == null
+                ? Collections.emptyList() : environments;
+        if (candidates.isEmpty()) {
+            candidates = Collections.singletonList(installerEnvironment(null));
+        }
+        for (Map<String, String> environment : candidates) {
+            try {
+                RuntimeInstall installed = ensureExactInstalled(
+                        distribution, latest, prepareInstallerEnvironment(environment));
+                verifyInstalled(distribution, installed.home, latest);
+                writeDefaultVersion(distribution, latest);
+                logger.info("Provider 自动 latest 已准备完成, provider={}, previous={}, latest={}; 下次 ACP 启动生效",
+                        type, current == null ? null : current.version, latest);
+                return;
+            } catch (IOException e) {
+                lastError = e;
+            }
+        }
+        throw lastError == null ? new IOException("no installer environment available")
+                : lastError;
+    }
+
+    private Map<String, String> installerEnvironment(AcpRobotParam robot) {
+        Map<String, String> environment = new LinkedHashMap<>(System.getenv());
+        if (robot != null && robot.isProxyEnabled()) {
+            String proxy = trimToNull(robot.getHttpProxy());
+            if (proxy != null) {
+                String url = proxy.contains("://") ? proxy : "http://" + proxy;
+                environment.put("HTTP_PROXY", url);
+                environment.put("http_proxy", url);
+                environment.put("HTTPS_PROXY", url);
+                environment.put("https_proxy", url);
+            }
+            String noProxy = trimToNull(robot.getNoProxy());
+            if (noProxy != null) {
+                environment.put("NO_PROXY", noProxy);
+                environment.put("no_proxy", noProxy);
+            }
+        }
+        return environment;
+    }
+
+    private Map<String, String> prepareInstallerEnvironment(
+            Map<String, String> source) {
+        Map<String, String> environment = source == null
+                ? new LinkedHashMap<>() : new LinkedHashMap<>(source);
+        String home = System.getProperty("user.home");
+        environment.put("PATH", PathResolver.enrichPath(home,
+                environment.get("PATH") == null ? "" : environment.get("PATH")));
+        return environment;
     }
 
     private RuntimeInstall ensureExactInstalled(Distribution distribution, String version,
@@ -207,24 +351,35 @@ public final class NpmProviderRuntimeManager {
         Object lock = installLocks.computeIfAbsent(distribution.runtimeKey + "@" + version,
                 ignored -> new Object());
         synchronized (lock) {
-            try {
-                if (isInstalled(distribution, target, version)) {
+            Path providerRoot = providerRoot(distribution);
+            Files.createDirectories(providerRoot);
+            Path lockFile = providerRoot.resolve(".install-" + version + ".lock");
+            try (FileChannel lockChannel = FileChannel.open(lockFile,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+                FileLock acquired = lockChannel.tryLock();
+                if (acquired == null) {
+                    throw new IOException("another cmd-proxy process is installing provider "
+                            + distribution.type + "@" + version);
+                }
+                try (FileLock ignored = acquired) {
+                    if (isInstalled(distribution, target, version)) {
+                        return new RuntimeInstall(target, executable(distribution, target), version);
+                    }
+                    Path staging = providerRoot.resolve(
+                            ".install-" + version + "-" + UUID.randomUUID());
+                    try {
+                        Files.createDirectories(staging);
+                        runNpmInstall(distribution, version, staging, environment);
+                        verifyInstalled(distribution, staging, version);
+                        promoteInstalledDirectory(distribution, version, staging, target);
+                    } catch (Exception e) {
+                        deleteTree(staging);
+                        if (e instanceof IOException) throw (IOException) e;
+                        throw new IOException("provider runtime install failed: "
+                                + e.getMessage(), e);
+                    }
                     return new RuntimeInstall(target, executable(distribution, target), version);
                 }
-                Files.createDirectories(providerRoot(distribution));
-                Path staging = providerRoot(distribution).resolve(
-                        ".install-" + version + "-" + UUID.randomUUID());
-                try {
-                    Files.createDirectories(staging);
-                    runNpmInstall(distribution, version, staging, environment);
-                    verifyInstalled(distribution, staging, version);
-                    moveDirectory(staging, target);
-                } catch (Exception e) {
-                    deleteTree(staging);
-                    if (e instanceof IOException) throw (IOException) e;
-                    throw new IOException("provider runtime install failed: " + e.getMessage(), e);
-                }
-                return new RuntimeInstall(target, executable(distribution, target), version);
             } finally {
                 installLocks.remove(distribution.runtimeKey + "@" + version, lock);
             }
@@ -248,9 +403,10 @@ public final class NpmProviderRuntimeManager {
         String registry = firstNonBlank(effective.get("npm_config_registry"),
                 effective.get("NPM_CONFIG_REGISTRY"), DEFAULT_REGISTRY);
         String npm = locateCommand(platformCommand("npm"), effective.get("PATH"));
-        List<String> command = Arrays.asList(npm, "install", "--global", "--prefix",
-                prefix.toString(), "--registry", registry,
-                distribution.packageName + "@" + version);
+        List<String> command = new ArrayList<>();
+        command.add(npm);
+        command.addAll(npmInstallArguments(prefix, registry,
+                distribution.packageName + "@" + version));
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.redirectErrorStream(true);
         copyEnvironment(effective, builder.environment());
@@ -342,6 +498,9 @@ public final class NpmProviderRuntimeManager {
         if (!isWindows() && !Files.isExecutable(executable)) {
             throw new IOException("provider executable is not executable: " + executable);
         }
+        if (distribution.type == AgentProviderType.CODEX_ACP) {
+            verifyCodexPlatformPackage(distribution, home);
+        }
     }
 
     private boolean isInstalled(Distribution distribution, Path home, String version) {
@@ -354,13 +513,66 @@ public final class NpmProviderRuntimeManager {
     }
 
     private Path packageManifest(Distribution distribution, Path home) {
-        Path nodeModules = isWindows() ? home.resolve("node_modules")
+        return packageRoot(nodeModules(home), distribution.packageName).resolve("package.json");
+    }
+
+    private Path nodeModules(Path home) {
+        return isWindows() ? home.resolve("node_modules")
                 : home.resolve("lib").resolve("node_modules");
+    }
+
+    private Path packageRoot(Path nodeModules, String packageName) {
         Path packagePath = nodeModules;
-        for (String segment : distribution.packageName.split("/")) {
+        for (String segment : packageName.split("/")) {
             packagePath = packagePath.resolve(segment);
         }
-        return packagePath.resolve("package.json");
+        return packagePath;
+    }
+
+    private void verifyCodexPlatformPackage(Distribution distribution, Path home)
+            throws IOException {
+        String platformPackage = requiredCodexPlatformPackage();
+        Path rootModules = nodeModules(home);
+        Path adapterRoot = packageRoot(rootModules, distribution.packageName);
+        List<Path> moduleRoots = Arrays.asList(
+                rootModules,
+                adapterRoot.resolve("node_modules"),
+                packageRoot(adapterRoot.resolve("node_modules"), "@openai/codex")
+                        .resolve("node_modules"));
+        for (Path moduleRoot : moduleRoots) {
+            if (Files.isRegularFile(packageRoot(moduleRoot, platformPackage)
+                    .resolve("package.json"))) {
+                return;
+            }
+        }
+        throw new IOException("Codex platform package is missing: " + platformPackage
+                + "; npm optional dependencies were not installed");
+    }
+
+    static String requiredCodexPlatformPackage() throws IOException {
+        String os;
+        if (isWindows()) {
+            os = "win32";
+        } else {
+            String osName = System.getProperty("os.name", "").toLowerCase();
+            if (osName.contains("mac") || osName.contains("darwin")) {
+                os = "darwin";
+            } else if (osName.contains("linux")) {
+                os = "linux";
+            } else {
+                throw new IOException("unsupported Codex operating system: " + osName);
+            }
+        }
+        String architecture = System.getProperty("os.arch", "").toLowerCase();
+        String arch;
+        if (architecture.equals("amd64") || architecture.equals("x86_64")) {
+            arch = "x64";
+        } else if (architecture.equals("aarch64") || architecture.equals("arm64")) {
+            arch = "arm64";
+        } else {
+            throw new IOException("unsupported Codex architecture: " + architecture);
+        }
+        return "@openai/codex-" + os + "-" + arch;
     }
 
     private Path executable(Distribution distribution, Path home) {
@@ -373,13 +585,14 @@ public final class NpmProviderRuntimeManager {
                 .toAbsolutePath().normalize();
     }
 
-    private String readDefaultVersion(Distribution distribution) {
+    private RuntimeInstall readDefaultInstall(Distribution distribution) {
         Path marker = providerRoot(distribution).resolve("default-version.txt");
         if (!Files.isRegularFile(marker)) return null;
         try {
             String version = new String(Files.readAllBytes(marker), StandardCharsets.UTF_8).trim();
-            return isExactVersion(version) && isInstalled(distribution,
-                    providerRoot(distribution).resolve(version), version) ? version : null;
+            Path home = providerRoot(distribution).resolve(version);
+            return isExactVersion(version) && isInstalled(distribution, home, version)
+                    ? new RuntimeInstall(home, executable(distribution, home), version) : null;
         } catch (IOException e) {
             return null;
         }
@@ -401,15 +614,74 @@ public final class NpmProviderRuntimeManager {
         }
     }
 
-    private void moveDirectory(Path source, Path target) throws IOException {
-        if (Files.exists(target)) {
+    private void promoteInstalledDirectory(Distribution distribution, String version,
+                                           Path source, Path target) throws IOException {
+        if (Files.exists(target) && isInstalled(distribution, target, version)) {
             deleteTree(source);
             return;
         }
+        Path displaced = null;
+        if (Files.exists(target)) {
+            displaced = target.resolveSibling(".invalid-" + version + "-" + UUID.randomUUID());
+            moveDirectoryWithRetry(target, displaced);
+        }
         try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(source, target);
+            moveDirectoryWithRetry(source, target);
+        } catch (IOException installError) {
+            if (displaced != null && Files.exists(displaced) && !Files.exists(target)) {
+                try {
+                    moveDirectoryWithRetry(displaced, target);
+                } catch (IOException restoreError) {
+                    installError.addSuppressed(restoreError);
+                }
+            }
+            throw installError;
+        }
+        if (displaced != null) {
+            deleteTree(displaced);
+        }
+    }
+
+    private void moveDirectoryWithRetry(Path source, Path target) throws IOException {
+        IOException lastError = null;
+        for (int attempt = 0; attempt < MOVE_RETRY_COUNT; attempt++) {
+            try {
+                try {
+                    Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(source, target);
+                } catch (AccessDeniedException atomicDenied) {
+                    // Some Windows filesystems/security filters reject an atomic directory
+                    // rename even though a normal rename is permitted.
+                    try {
+                        Files.move(source, target);
+                    } catch (IOException normalMoveError) {
+                        normalMoveError.addSuppressed(atomicDenied);
+                        throw normalMoveError;
+                    }
+                }
+                return;
+            } catch (FileAlreadyExistsException e) {
+                throw e;
+            } catch (FileSystemException e) {
+                lastError = e;
+                if (!isWindows() || attempt + 1 >= MOVE_RETRY_COUNT) {
+                    throw e;
+                }
+                sleepBeforeMoveRetry(attempt);
+            }
+        }
+        throw lastError == null ? new IOException("failed to move provider runtime directory")
+                : lastError;
+    }
+
+    private void sleepBeforeMoveRetry(int attempt) throws IOException {
+        long delayMillis = Math.min(2000L, 100L << Math.min(attempt, 4));
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("provider runtime directory move interrupted", e);
         }
     }
 
@@ -495,11 +767,21 @@ public final class NpmProviderRuntimeManager {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
+    static boolean followsAutoLatest(AcpRobotParam robot) {
+        return robot != null && robot.isEnabled()
+                && trimToNull(robot.getProviderVersion()) == null;
+    }
+
     private static String firstNonBlank(String... values) {
         for (String value : values) {
             if (value != null && !value.trim().isEmpty()) return value.trim();
         }
         return "";
+    }
+
+    static List<String> npmInstallArguments(Path prefix, String registry, String packageSpec) {
+        return Arrays.asList("install", "--global", "--prefix", prefix.toString(),
+                "--registry", registry, "--include=optional", packageSpec);
     }
 
     private static String platformCommand(String command) {
@@ -582,17 +864,20 @@ public final class NpmProviderRuntimeManager {
         private final AgentProviderType provider;
         private final String packageName;
         private final List<String> installedVersions;
+        private final String defaultVersion;
 
         RuntimeStatus(AgentProviderType provider, String packageName,
-                      List<String> installedVersions) {
+                      List<String> installedVersions, String defaultVersion) {
             this.provider = provider;
             this.packageName = packageName;
             this.installedVersions = installedVersions;
+            this.defaultVersion = defaultVersion;
         }
 
         public AgentProviderType getProvider() { return provider; }
         public String getPackageName() { return packageName; }
         public List<String> getInstalledVersions() { return installedVersions; }
+        public String getDefaultVersion() { return defaultVersion; }
     }
 
     public static final class InstallJob {

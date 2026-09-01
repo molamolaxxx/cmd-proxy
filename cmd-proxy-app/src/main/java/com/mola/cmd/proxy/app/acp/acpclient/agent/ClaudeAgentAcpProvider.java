@@ -77,6 +77,18 @@ public class ClaudeAgentAcpProvider implements AgentProvider {
     }
 
     @Override
+    public List<Path> getSkillPaths(String workspacePath, AcpRobotParam robotParam) {
+        List<Path> paths = new ArrayList<>();
+        paths.add(Paths.get(HOME, ".claude", "skills"));
+        paths.add(Paths.get(HOME, ".claude", "commands"));
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            paths.add(Paths.get(workspacePath, ".claude", "skills"));
+            paths.add(Paths.get(workspacePath, ".claude", "commands"));
+        }
+        return paths;
+    }
+
+    @Override
     public Map<String, String> getExtraEnv(AcpRobotParam robotParam) {
         String model = getConfiguredModel(robotParam);
         if (model == null) {

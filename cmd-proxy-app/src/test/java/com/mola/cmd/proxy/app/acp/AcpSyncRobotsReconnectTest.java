@@ -40,7 +40,7 @@ public class AcpSyncRobotsReconnectTest {
         JsonObject discovery = JsonParser.parseString(
                 reconnected.get("teamDiscovery")).getAsJsonObject();
         assertTrue(discovery.get("businessCommandsReady").getAsBoolean());
-        assertEquals(14, discovery.getAsJsonArray("commands").size());
+        assertEquals(15, discovery.getAsJsonArray("commands").size());
     }
 
     @Test

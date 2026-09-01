@@ -60,15 +60,37 @@ public class DeepSeekHarnessAcpProviderTest {
         DeepSeekHarnessAcpProvider provider = new DeepSeekHarnessAcpProvider();
         AcpRobotParam robot = new AcpRobotParam();
         robot.setModel(" deepseek-v4-pro ");
+        robot.setDshAgentPreset(" code ");
 
         assertEquals("deepseek-v4-pro",
                 provider.getInitialSessionConfigOptions(robot).get("model"));
+        assertEquals("code",
+                provider.getInitialSessionConfigOptions(robot).get("agent"));
         assertEquals(AgentProvider.PermissionPolicy.REJECT,
                 provider.getPermissionPolicy(robot));
 
         robot.setPermissionPolicy("ALLOW_ONCE");
         assertEquals(AgentProvider.PermissionPolicy.ALLOW_ONCE,
                 provider.getPermissionPolicy(robot));
+    }
+
+    @Test
+    public void readsInstalledProfileBundlesWithoutChangingTheProfile() throws Exception {
+        Path dshHome = temporaryFolder.newFolder("bundle-list-home").toPath();
+        Path profile = dshHome.resolve("profiles").resolve("acp");
+        Files.createDirectories(profile);
+        String manifest = "{\"dsh\":{\"profile\":{\"bundles\":["
+                + "\"@deepseek-ai/dsh-base\",\"@openma/deepseek-harness-acp\","
+                + "\"@example/plugin\"]}}}";
+        Files.write(profile.resolve("package.json"), manifest.getBytes(StandardCharsets.UTF_8));
+        AcpRobotParam robot = new AcpRobotParam();
+        robot.setDshHome(dshHome.toString());
+
+        assertEquals(java.util.Arrays.asList("@deepseek-ai/dsh-base",
+                        "@openma/deepseek-harness-acp", "@example/plugin"),
+                new DeepSeekHarnessAcpProvider().getInstalledProfileBundles(robot));
+        assertEquals(manifest, new String(Files.readAllBytes(profile.resolve("package.json")),
+                StandardCharsets.UTF_8));
     }
 
     @Test

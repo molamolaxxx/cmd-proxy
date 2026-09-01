@@ -1,5 +1,7 @@
 package com.mola.cmd.proxy.app.acp.schedule.model;
 
+import com.mola.cmd.proxy.app.acp.acpclient.ClientSurface;
+
 import java.util.Objects;
 
 /**
@@ -17,16 +19,21 @@ public final class ScheduleOwnerKey {
 
     private final Scope scope;
     private final String ownerId;
+    private final ClientSurface surface;
+    private final String logicalId;
     private final String robotName;
     private final String teamId;
     private final String teamMemberId;
     private final String persistencePath;
 
-    private ScheduleOwnerKey(Scope scope, String ownerId, String robotName,
+    private ScheduleOwnerKey(Scope scope, String ownerId, ClientSurface surface,
+                             String logicalId, String robotName,
                              String teamId, String teamMemberId,
                              String persistencePath) {
         this.scope = Objects.requireNonNull(scope, "scope");
         this.ownerId = requireText(ownerId, "ownerId");
+        this.surface = surface;
+        this.logicalId = trimToNull(logicalId);
         this.robotName = trimToNull(robotName);
         this.teamId = trimToNull(teamId);
         this.teamMemberId = trimToNull(teamMemberId);
@@ -37,6 +44,9 @@ public final class ScheduleOwnerKey {
         } else if (this.teamId != null || this.teamMemberId != null) {
             throw new IllegalArgumentException(
                     "MAIN schedule owner cannot carry Team identity");
+        } else if ((this.surface == null) != (this.logicalId == null)) {
+            throw new IllegalArgumentException(
+                    "MAIN surface and logicalId must be supplied together");
         }
     }
 
@@ -48,7 +58,23 @@ public final class ScheduleOwnerKey {
                     "MAIN robotName is not persistence-safe");
         }
         return new ScheduleOwnerKey(
-                Scope.MAIN, name, name, null, null, name);
+                Scope.MAIN, name, null, null, name, null, null, name);
+    }
+
+    /** Surface-aware MAIN owner. Legacy MolaChat callers keep using {@link #main(String)}. */
+    public static ScheduleOwnerKey main(String ownerId, ClientSurface surface,
+                                        String logicalId, String robotName) {
+        if (surface == null || surface == ClientSurface.TEAM) {
+            throw new IllegalArgumentException("invalid MAIN schedule surface");
+        }
+        String safeOwner = requireSafeId(ownerId, "ownerId");
+        String safeLogical = requireSafeId(logicalId, "logicalId");
+        String name = requireSafePathSegment(robotName, "robotName");
+        String surfaceId = surface.name().toLowerCase(java.util.Locale.ROOT);
+        return new ScheduleOwnerKey(Scope.MAIN, safeOwner, surface,
+                safeLogical, name, null, null,
+                "main/" + surfaceId + "/" + safeOwner + "/"
+                        + safeLogical + "/" + name);
     }
 
     public static ScheduleOwnerKey team(String ownerChatterId, String teamId,
@@ -57,7 +83,7 @@ public final class ScheduleOwnerKey {
         String safeMember = requireSafeId(teamMemberId, "teamMemberId");
         return new ScheduleOwnerKey(
                 Scope.TEAM, requireText(ownerChatterId, "ownerChatterId"),
-                robotName, safeTeam, safeMember,
+                ClientSurface.TEAM, null, robotName, safeTeam, safeMember,
                 "team/" + safeTeam + "/" + safeMember);
     }
 
@@ -66,6 +92,16 @@ public final class ScheduleOwnerKey {
         String[] parts = normalized.split("/");
         if (parts.length == 3 && "team".equals(parts[0])) {
             return team("restored", parts[1], parts[2], null);
+        }
+        if (parts.length == 5 && "main".equals(parts[0])) {
+            ClientSurface surface;
+            try {
+                surface = ClientSurface.valueOf(
+                        parts[1].toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("unknown MAIN schedule surface", e);
+            }
+            return main(parts[2], surface, parts[3], parts[4]);
         }
         if (parts.length == 1) {
             return main(parts[0]);
@@ -83,6 +119,14 @@ public final class ScheduleOwnerKey {
 
     public String getRobotName() {
         return robotName;
+    }
+
+    public ClientSurface getSurface() {
+        return surface;
+    }
+
+    public String getLogicalId() {
+        return logicalId;
     }
 
     public String getTeamId() {
@@ -139,6 +183,15 @@ public final class ScheduleOwnerKey {
         if (!text.matches("[a-zA-Z0-9._-]+")
                 || ".".equals(text) || "..".equals(text)) {
             throw new IllegalArgumentException(field + " is not safe");
+        }
+        return text;
+    }
+
+    private static String requireSafePathSegment(String value, String field) {
+        String text = requireText(value, field);
+        if (text.contains("/") || text.contains("\\")
+                || ".".equals(text) || "..".equals(text)) {
+            throw new IllegalArgumentException(field + " is not persistence-safe");
         }
         return text;
     }

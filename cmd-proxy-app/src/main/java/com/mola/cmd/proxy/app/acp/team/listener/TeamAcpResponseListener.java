@@ -130,6 +130,10 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
     @Override
     public void onComplete(String fullResponse) {
         renderer.onComplete();
+    }
+
+    /** Called by AcpClient only after the authoritative BUSY -> READY transition. */
+    public void onClientReady() {
         stateObserver.onState(runtime.getDefinition().getTeamId(),
                 teamMemberId, TeamMemberState.READY, null);
     }

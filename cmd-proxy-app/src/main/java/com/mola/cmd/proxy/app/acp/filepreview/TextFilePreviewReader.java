@@ -51,7 +51,7 @@ public final class TextFilePreviewReader {
         if (maxBytes < 1) return error(requestId, "INVALID_ARGUMENT", "maxBytes must be positive", false);
         try {
             Path workspace = Paths.get(workspacePath).toRealPath();
-            String normalizedRequest = normalizeFileUri(requestedPath.trim());
+            String normalizedRequest = normalizeRequestedPath(requestedPath.trim(), isWindows());
             if (isUnsafeWindowsPath(normalizedRequest)) {
                 return error(requestId, "PATH_NOT_ALLOWED", "unsafe Windows path", false);
             }
@@ -65,9 +65,6 @@ public final class TextFilePreviewReader {
                 realPath = candidate.toRealPath();
             } catch (java.nio.file.NoSuchFileException e) {
                 return error(requestId, "FILE_NOT_FOUND", "file not found", false);
-            }
-            if (!startsWith(realPath, workspace)) {
-                return error(requestId, "PATH_OUTSIDE_WORKSPACE", "file is outside current workspace", false);
             }
             if (isSpecialUnixPath(realPath)) {
                 return error(requestId, "PATH_NOT_ALLOWED", "special system path is not allowed", false);
@@ -179,13 +176,14 @@ public final class TextFilePreviewReader {
         return "text/plain";
     }
 
-    private static String normalizeFileUri(String value) {
+    static String normalizeRequestedPath(String value, boolean windows) {
         if (value.regionMatches(true, 0, "file:///", 0, 8)) {
             String result = value.substring(7);
-            if (isWindows() && result.matches("^/[A-Za-z]:/.*")) result = result.substring(1);
+            if (windows && result.matches("^/[A-Za-z]:[\\\\/].*")) result = result.substring(1);
             return result;
         }
-        if (value.regionMatches(true, 0, "file://", 0, 7)) return value.substring(7);
+        if (value.regionMatches(true, 0, "file://", 0, 7)) value = value.substring(7);
+        if (windows && value.matches("^/[A-Za-z]:[\\\\/].*")) return value.substring(1);
         return value;
     }
 
@@ -204,13 +202,6 @@ public final class TextFilePreviewReader {
         return value.equals("/proc") || value.startsWith("/proc/")
                 || value.equals("/sys") || value.startsWith("/sys/")
                 || value.equals("/dev") || value.startsWith("/dev/");
-    }
-
-    private static boolean startsWith(Path path, Path root) {
-        if (!isWindows()) return path.startsWith(root);
-        String p = path.toString().toLowerCase(Locale.ROOT);
-        String r = root.toString().toLowerCase(Locale.ROOT);
-        return p.equals(r) || p.startsWith(r + java.io.File.separator);
     }
 
     private static boolean isWindows() { return java.io.File.separatorChar == '\\'; }

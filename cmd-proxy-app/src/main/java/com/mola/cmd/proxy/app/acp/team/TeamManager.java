@@ -917,6 +917,83 @@ public final class TeamManager implements AutoCloseable {
         }
     }
 
+    /** Returns the selected Team member session as UI-safe structured messages. */
+    public TeamCommandResult getSessionHistory(String requestId, TeamMemberCommand command) {
+        try {
+            MemberRoute route = requireMemberRoute(command, false);
+            ensureGrantActive(route.team);
+            AcpClient client = requireExistingClient(route);
+            String sessionId = command.getSessionId();
+            if (sessionId == null || sessionId.trim().isEmpty()) {
+                sessionId = client.getSessionId();
+            }
+            List<Map<String, Object>> messages = new ArrayList<>();
+            for (com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage message
+                    : client.getHistoryManager().getFullHistory(sessionId)) {
+                Map<String, Object> value = new LinkedHashMap<>();
+                value.put("role", message.getRole().name());
+                if (message.getRole()
+                        == com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.TOOL) {
+                    value.put("toolCallId", message.getToolCallId());
+                    value.put("toolName", message.getToolName());
+                    value.put("status", message.getStatus());
+                    value.put("rawInput", message.getRawInput());
+                    value.put("rawOutput", message.getRawOutput());
+                } else {
+                    String content = message.getContent();
+                    TeamHistoryTalkTo talkTo = TeamHistoryTalkTo.parse(content);
+                    if (talkTo != null) {
+                        value.put("kind", "TEAM_TALK_TO");
+                        value.put("senderTeamMemberId", talkTo.senderTeamMemberId);
+                        value.put("content", talkTo.content);
+                    } else {
+                        value.put("content", content);
+                    }
+                }
+                messages.add(value);
+            }
+            Map<String, Object> data = memberData(route.runtime, route.member, client);
+            data.put("sessionId", sessionId);
+            data.put("messages", messages);
+            return TeamCommandResult.success(requestId, "OK",
+                    "Team session history loaded", route.team.getVersion(), data);
+        } catch (MemberRouteException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        }
+    }
+
+    /** UI projection for persisted internal Team prompts; never expose harness text as chat. */
+    static final class TeamHistoryTalkTo {
+        private static final String MARKER =
+                "📨 [Fast Team 路由消息] 发送者 memberId: ";
+        private static final String CONTENT_START =
+                "以下消息由当前 Fast Team 的严格队内路由投递，发送者身份已经过验证：\n\n";
+        private static final String CONTENT_END = "\n\n─── 回复方式 ───";
+        final String senderTeamMemberId;
+        final String content;
+
+        private TeamHistoryTalkTo(String senderTeamMemberId, String content) {
+            this.senderTeamMemberId = senderTeamMemberId;
+            this.content = content;
+        }
+
+        static TeamHistoryTalkTo parse(String value) {
+            if (value == null) return null;
+            int marker = value.indexOf(MARKER);
+            int body = value.indexOf(CONTENT_START);
+            if (marker < 0 || body < 0) return null;
+            int senderStart = marker + MARKER.length();
+            int senderEnd = value.indexOf('\n', senderStart);
+            int contentStart = body + CONTENT_START.length();
+            int contentEnd = value.indexOf(CONTENT_END, contentStart);
+            if (senderEnd <= senderStart || contentEnd < contentStart) return null;
+            String sender = value.substring(senderStart, senderEnd).trim();
+            if (sender.isEmpty()) return null;
+            return new TeamHistoryTalkTo(sender,
+                    value.substring(contentStart, contentEnd));
+        }
+    }
+
     public TeamCommandResult getStatus(String requestId, TeamMemberCommand command) {
         try {
             MemberRoute route = requireMemberRoute(command, false);
@@ -966,6 +1043,220 @@ public final class TeamManager implements AutoCloseable {
             return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
                     requestId, e.code.name(), e.getMessage(), false);
         }
+    }
+
+    /** Lists only files already owned by the selected member's current session. */
+    public TeamCommandResult listSessionResources(String requestId,
+                                                  TeamMemberCommand command) {
+        try {
+            MemberRoute route = requireMemberRoute(command, false);
+            ensureGrantActive(route.team);
+            AcpClient client = requireCurrentResourceClient(route, command);
+            List<Map<String, Object>> resources = new ArrayList<>();
+            for (java.nio.file.Path path : safeResourcePaths(client, client.getSessionId())) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("resourceId", resourceId(route, client, path));
+                item.put("fileName", path.getFileName().toString());
+                try { item.put("size", java.nio.file.Files.size(path)); }
+                catch (java.io.IOException ignored) { item.put("size", 0L); }
+                item.put("contentType", resourceContentType(path));
+                resources.add(item);
+            }
+            Map<String, Object> data = memberData(route.runtime, route.member, client);
+            data.put("resources", resources);
+            return TeamCommandResult.success(requestId, "OK",
+                    "Team session resources listed", route.team.getVersion(), data);
+        } catch (MemberRouteException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        }
+    }
+
+    public TeamCommandResult previewSessionResource(String requestId,
+                                                     TeamMemberCommand command,
+                                                     String requestedResourceId) {
+        try {
+            MemberRoute route = requireMemberRoute(command, false);
+            ensureGrantActive(route.team);
+            AcpClient client = requireCurrentResourceClient(route, command);
+            java.nio.file.Path path = resolveResource(
+                    route, client, requestedResourceId);
+            byte[] bytes = readResource(path, 2 * 1024 * 1024);
+            String contentType = resourceContentType(path);
+            Map<String, Object> resource = new LinkedHashMap<>();
+            resource.put("resourceId", requestedResourceId);
+            resource.put("fileName", path.getFileName().toString());
+            resource.put("contentType", contentType);
+            if (isSafeRasterImage(contentType)) {
+                resource.put("kind", "image");
+                resource.put("contentBase64", java.util.Base64.getEncoder()
+                        .encodeToString(bytes));
+            } else if (isTextResource(bytes, contentType)) {
+                resource.put("kind", "text");
+                resource.put("content", new String(bytes,
+                        java.nio.charset.StandardCharsets.UTF_8));
+            } else {
+                resource.put("kind", "binary");
+            }
+            try { resource.put("truncated", java.nio.file.Files.size(path) > bytes.length); }
+            catch (java.io.IOException ignored) { resource.put("truncated", false); }
+            Map<String, Object> data = memberData(route.runtime, route.member, client);
+            data.put("resource", resource);
+            return TeamCommandResult.success(requestId, "OK",
+                    "Team session resource previewed", route.team.getVersion(), data);
+        } catch (MemberRouteException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        }
+    }
+
+    public TeamResourcePayload downloadSessionResource(TeamMemberCommand command,
+                                                       String requestedResourceId) {
+        try {
+            MemberRoute route = requireMemberRoute(command, false);
+            ensureGrantActive(route.team);
+            AcpClient client = requireCurrentResourceClient(route, command);
+            java.nio.file.Path path = resolveResource(route, client, requestedResourceId);
+            return new TeamResourcePayload(path.getFileName().toString(),
+                    resourceContentType(path), readResource(path, 20 * 1024 * 1024));
+        } catch (MemberRouteException e) {
+            throw new IllegalArgumentException(e.getMessage(), e);
+        }
+    }
+
+    private AcpClient requireCurrentResourceClient(MemberRoute route,
+                                                   TeamMemberCommand command)
+            throws MemberRouteException {
+        AcpClient client = requireExistingClient(route);
+        String sessionId = command.getSessionId();
+        if (sessionId == null || !sessionId.equals(client.getSessionId())) {
+            throw new IllegalArgumentException("Team member session has changed");
+        }
+        return client;
+    }
+
+    private List<java.nio.file.Path> safeResourcePaths(AcpClient client,
+                                                       String sessionId) {
+        java.nio.file.Path root = client.getHistoryManager()
+                .getSessionFilesDirectory(sessionId);
+        List<java.nio.file.Path> result = new ArrayList<>();
+        if (java.nio.file.Files.isDirectory(root,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                java.nio.file.Path realRoot = root.toRealPath(
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                try (java.util.stream.Stream<java.nio.file.Path> children =
+                             java.nio.file.Files.list(realRoot)) {
+                    children.limit(201).forEach(path -> {
+                        try {
+                            if (java.nio.file.Files.isSymbolicLink(path)
+                                    || !java.nio.file.Files.isRegularFile(path,
+                                    java.nio.file.LinkOption.NOFOLLOW_LINKS)) return;
+                            java.nio.file.Path real = path.toRealPath(
+                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                            if (real.getParent().equals(realRoot)) result.add(real);
+                        } catch (java.io.IOException ignored) { }
+                    });
+                }
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(
+                        "failed to enumerate Team session resources", e);
+            }
+        }
+        try {
+            java.nio.file.Path workspace = java.nio.file.Paths.get(client.getWorkspacePath())
+                    .toAbsolutePath().normalize().toRealPath(
+                            java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            for (String value : client.getHistoryManager().getFileAbsolutePaths()) {
+                java.nio.file.Path candidate = java.nio.file.Paths.get(value)
+                        .toAbsolutePath().normalize();
+                if (java.nio.file.Files.isSymbolicLink(candidate)
+                        || !java.nio.file.Files.isRegularFile(candidate,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
+                java.nio.file.Path real = candidate.toRealPath(
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (real.startsWith(workspace) && !result.contains(real)) result.add(real);
+            }
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("failed to validate Team workspace resources", e);
+        }
+        if (result.size() > 200) throw new IllegalStateException(
+                "too many Team session resources");
+        result.sort(java.util.Comparator.comparing(path -> path.getFileName().toString()));
+        return result;
+    }
+
+    private java.nio.file.Path resolveResource(MemberRoute route, AcpClient client,
+                                                String requestedResourceId) {
+        if (requestedResourceId == null
+                || !requestedResourceId.matches("tr-[0-9a-f]{32}")) {
+            throw new IllegalArgumentException("invalid Team resourceId");
+        }
+        for (java.nio.file.Path path : safeResourcePaths(client, client.getSessionId())) {
+            if (requestedResourceId.equals(resourceId(route, client, path))) return path;
+        }
+        throw new IllegalArgumentException(
+                "resource not found in current Team member session");
+    }
+
+    private static String resourceId(MemberRoute route, AcpClient client,
+                                     java.nio.file.Path path) {
+        String value = route.team.getTeamId() + "\n" + route.member.getTeamMemberId()
+                + "\n" + client.getSessionId() + "\n" + path;
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte item : digest) hex.append(String.format("%02x", item & 0xff));
+            return "tr-" + hex.substring(0, 32);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private static byte[] readResource(java.nio.file.Path path, int maxBytes) {
+        try {
+            long size = java.nio.file.Files.size(path);
+            if (size > maxBytes && maxBytes == 20 * 1024 * 1024) {
+                throw new IllegalArgumentException("resource exceeds download limit");
+            }
+            int length = (int) Math.min(size, maxBytes);
+            byte[] bytes = new byte[length];
+            try (java.io.InputStream input = java.nio.file.Files.newInputStream(path)) {
+                int offset = 0;
+                while (offset < bytes.length) {
+                    int count = input.read(bytes, offset, bytes.length - offset);
+                    if (count < 0) break;
+                    offset += count;
+                }
+                return offset == bytes.length ? bytes
+                        : java.util.Arrays.copyOf(bytes, offset);
+            }
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("failed to read Team session resource", e);
+        }
+    }
+
+    private static String resourceContentType(java.nio.file.Path path) {
+        try {
+            String value = java.nio.file.Files.probeContentType(path);
+            return value == null ? "application/octet-stream" : value;
+        } catch (java.io.IOException ignored) {
+            return "application/octet-stream";
+        }
+    }
+
+    private static boolean isSafeRasterImage(String contentType) {
+        return "image/png".equals(contentType) || "image/jpeg".equals(contentType)
+                || "image/gif".equals(contentType) || "image/webp".equals(contentType);
+    }
+
+    private static boolean isTextResource(byte[] bytes, String contentType) {
+        if (contentType.startsWith("text/") || contentType.contains("json")
+                || contentType.contains("xml") || contentType.contains("javascript")) {
+            return true;
+        }
+        int sample = Math.min(bytes.length, 4096);
+        for (int i = 0; i < sample; i++) if (bytes[i] == 0) return false;
+        return true;
     }
 
     public TeamCommandResult deliverTalkTo(TeamTalkToDeliverCommand command) {

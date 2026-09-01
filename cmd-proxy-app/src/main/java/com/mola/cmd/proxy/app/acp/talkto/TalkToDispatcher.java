@@ -260,7 +260,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         }
 
         // 本地投递
-        return deliverLocal(request, senderName, authPrincipalContext);
+        return deliverLocal(request, senderName, senderChatterId, senderGroupId,
+                authPrincipalContext);
     }
 
     public void registerExternalGateway(ExternalTalkToGateway gateway) {
@@ -308,6 +309,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      * 本地消息投递（原有逻辑）。
      */
     private String deliverLocal(TalkToRequest request, String senderName,
+                                String senderChatterId,
+                                String senderGroupId,
                                 AuthPrincipalContext authPrincipalContext) {
         String target = request.getTarget();
         String content = request.getContent();
@@ -320,7 +323,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         }
 
         // 2. 防循环：短时间重复检测
-        String dedupKey = senderName + "→" + target + ":" + content.hashCode();
+        String dedupKey = (senderGroupId == null ? senderName : senderGroupId)
+                + "→" + target + ":" + content.hashCode();
         Long lastSent = recentMessages.get(dedupKey);
         long now = System.currentTimeMillis();
         if (lastSent != null && (now - lastSent) < DEDUP_WINDOW_MS) {
@@ -334,7 +338,22 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         }
 
         // 4. 查找目标 groupId
-        String targetGroupId = robotToGroupId.get(target);
+        String targetGroupId;
+        AcpClient senderClient = senderGroupId == null
+                ? null : clientRegistry.getClient(senderGroupId);
+        if (senderClient != null && senderClient.getClientIdentity() != null) {
+            targetGroupId = resolveLocalTargetGroupId(robotToGroupId,
+                    senderClient.getClientIdentity(), senderChatterId, target);
+            if (targetGroupId == null) {
+                return "[talkTo 结果]\n发送失败：robot '" + target
+                        + "' 未在当前 Chatter ID（" + senderChatterId
+                        + "）下启动。本地 talkTo 不允许跨 Chatter ID；如需跨用户通信，"
+                        + "请配置远程通讯并明确指定目标 Chatter ID。";
+            }
+        } else {
+            // 兼容没有发送方 client 上下文的旧入口；正常 MAIN 调用必须走上面的精确 owner 路由。
+            targetGroupId = robotToGroupId.get(target);
+        }
         if (targetGroupId == null) {
             return "[talkTo 结果]\n发送失败：robot '" + target + "' 未启动（无对应的 client）。";
         }
@@ -362,8 +381,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
             return "[talkTo 结果]\n已成功将消息发送给 " + target + "。对方会处理你的请求，你可以继续当前工作。";
         } else {
             // 放入 inbox
+            // MAIN 的忙碌队列也必须绑定精确 client，不能退回 robotName 后跨 Chatter 串队列。
             LinkedBlockingQueue<TalkToMessage> inbox = inboxes.computeIfAbsent(
-                    target, k -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
+                    targetGroupId, k -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
 
             if (inbox.offer(message)) {
                 int queueSize = inbox.size();
@@ -377,6 +397,21 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                         + "你可以稍后再试，或使用 dispatch_subagent 创建独立子进程执行。";
             }
         }
+    }
+
+    static String localRouteKey(
+            com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity senderIdentity,
+            String senderChatterId, String targetRobotName) {
+        String owner = senderIdentity.getOwnerId();
+        if (owner == null || owner.trim().isEmpty()) owner = senderChatterId;
+        return senderIdentity.getSurface().name() + ":" + owner + ":" + targetRobotName;
+    }
+
+    static String resolveLocalTargetGroupId(
+            Map<String, String> routes,
+            com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity senderIdentity,
+            String senderChatterId, String targetRobotName) {
+        return routes.get(localRouteKey(senderIdentity, senderChatterId, targetRobotName));
     }
 
     // ==================== 跨 Chatter 投递 ====================

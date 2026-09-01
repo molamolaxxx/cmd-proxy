@@ -1062,7 +1062,8 @@ public class AcpClient extends AbstractAcpClient {
 
             // session/update
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
-                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache);
+                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache,
+                        compactionSignal);
             } else {
                 double usage = agentProvider.extractContextUsage(msg);
                 if (usage >= 0) {
@@ -1153,7 +1154,8 @@ public class AcpClient extends AbstractAcpClient {
      */
     private void processSessionUpdate(JsonObject msg, StringBuilder fullResponse,
                                       DispatchBufferFilter bufferFilter, AcpResponseListener listener,
-                                      Map<String, String> toolTitleCache) {
+                                      Map<String, String> toolTitleCache,
+                                      AgentProvider.CompactionSignal compactionSignal) {
         JsonObject updateParams = msg.getAsJsonObject("params");
         if (updateParams == null) return;
         JsonObject update = updateParams.getAsJsonObject("update");
@@ -1188,7 +1190,12 @@ public class AcpClient extends AbstractAcpClient {
             updateLog.remove("rawOutput");
             updateLog.remove("_meta");
             logger.info("工具调用: {}", updateLog);
-            if ("completed".equals(status)) {
+            // Context compaction is a provider lifecycle event, not a business tool
+            // result. Keep it out of persisted tool history as well as the generic UI
+            // card so memory extraction and session projections see only the dedicated
+            // compaction event.
+            if (compactionSignal == AgentProvider.CompactionSignal.NONE
+                    && "completed".equals(status)) {
                 JsonElement rawInputEl = update.get("rawInput");
                 JsonElement rawOutputEl = update.get("rawOutput");
                 JsonObject rawInput = (rawInputEl != null && rawInputEl.isJsonObject())
@@ -1201,7 +1208,10 @@ public class AcpClient extends AbstractAcpClient {
             // cmd-proxy action tools already publish their existing specialized cards through
             // onSubAgentEvent/onScheduleEvent/onTalkToEvent. Suppress the provider's generic
             // MCP card to avoid duplicate UI while preserving generic cards for external MCPs.
-            if (!isCmdProxyActionToolCall(title, update)) {
+            // codex-acp 1.7+ represents context compaction as a synthetic tool call.
+            // Its lifecycle is rendered through the dedicated compaction card, so do
+            // not leak the provider's generic "Compact conversation" tool card.
+            if (shouldPublishGenericToolCard(compactionSignal, title, update)) {
                 listener.onToolCall(toolCallId, title, status, update);
             }
         } else if ("usage_update".equals(updateType)) {
@@ -1233,6 +1243,12 @@ public class AcpClient extends AbstractAcpClient {
                 || normalized.contains("talk-to");
     }
 
+    static boolean shouldPublishGenericToolCard(AgentProvider.CompactionSignal compactionSignal,
+                                                String title, JsonObject update) {
+        return compactionSignal == AgentProvider.CompactionSignal.NONE
+                && !isCmdProxyActionToolCall(title, update);
+    }
+
     /**
      * 消费 provider 专用的上下文压缩事件，并在完成时安排下一次 prompt 的完整 Harness 重注入。
      */
@@ -1251,13 +1267,8 @@ public class AcpClient extends AbstractAcpClient {
                         agentProvider.getName(), sessionId);
                 break;
             case COMPLETED:
-                compactionInProgress = false;
-                acpHarnessReinjectionPending.set(true);
-                if (listener != null) {
-                    listener.onCompactionEvent("COMPACTION_COMPLETED", agentProvider.getName());
-                }
-                logger.info("Agent 已完成上下文压缩；下一次 prompt 将完整重注入 ACP harness, provider={}, sessionId={}",
-                        agentProvider.getName(), sessionId);
+                markCompactionCompleted(listener,
+                        "Agent 已完成上下文压缩；下一次 prompt 将完整重注入 ACP harness");
                 break;
             case FAILED:
                 compactionInProgress = false;
@@ -1268,13 +1279,8 @@ public class AcpClient extends AbstractAcpClient {
                 // Claude adapter 的 compact_boundary 被转换为 usage_update。普通 usage_update
                 // 不触发重注入，只有已看到 Compaction STARTED 才代表压缩完成。
                 if (compactionInProgress) {
-                    compactionInProgress = false;
-                    acpHarnessReinjectionPending.set(true);
-                    if (listener != null) {
-                        listener.onCompactionEvent("COMPACTION_COMPLETED", agentProvider.getName());
-                    }
-                    logger.info("Agent 压缩后的上下文用量已刷新；下一次 prompt 将完整重注入 ACP harness, provider={}, sessionId={}",
-                            agentProvider.getName(), sessionId);
+                    markCompactionCompleted(listener,
+                            "Agent 压缩后的上下文用量已刷新；下一次 prompt 将完整重注入 ACP harness");
                 }
                 break;
             case NONE:
@@ -1282,6 +1288,25 @@ public class AcpClient extends AbstractAcpClient {
                 break;
         }
         return signal;
+    }
+
+    /**
+     * New Codex adapters may emit both a structured contextCompaction item and the
+     * historical agent-message marker. Keep the next-turn reinjection and the
+     * cmd-proxy-specific completion card idempotent across both representations.
+     */
+    private void markCompactionCompleted(AcpResponseListener listener, String message) {
+        compactionInProgress = false;
+        if (!acpHarnessReinjectionPending.compareAndSet(false, true)) {
+            logger.debug("忽略重复的上下文压缩完成信号, provider={}, sessionId={}",
+                    agentProvider.getName(), sessionId);
+            return;
+        }
+        if (listener != null) {
+            listener.onCompactionEvent("COMPACTION_COMPLETED", agentProvider.getName());
+        }
+        logger.info("{}, provider={}, sessionId={}",
+                message, agentProvider.getName(), sessionId);
     }
 
     /**
@@ -1313,10 +1338,12 @@ public class AcpClient extends AbstractAcpClient {
                 continue;
             }
 
-            observeCompactionSignal(msg, listener);
+            AgentProvider.CompactionSignal compactionSignal =
+                    observeCompactionSignal(msg, listener);
 
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
-                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache);
+                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache,
+                        compactionSignal);
             } else if (msg.has("method") && "session/request_permission".equals(msg.get("method").getAsString())) {
                 autoAllowPermission(msg);
             }
@@ -1898,6 +1925,9 @@ public class AcpClient extends AbstractAcpClient {
      * 通过去掉 acpId 部分得到 chatterId。
      */
     private String extractChatterId() {
+        if (clientIdentity != null && clientIdentity.isStarweave()) {
+            return clientIdentity.getOwnerId();
+        }
         if (groupId == null || groupId.isEmpty()) return "";
         // acpId 格式: "acp-" + robotName.replace(" ", "_")
         String acpId = "";

@@ -1,13 +1,18 @@
 package com.mola.cmd.proxy.app
 
 import com.alibaba.fastjson.JSON
+import com.alibaba.fastjson.JSONArray
 import com.alibaba.fastjson.JSONObject
 import com.alibaba.fastjson.serializer.SerializerFeature
 import com.mola.cmd.proxy.app.acp.AcpProxy
 import com.mola.cmd.proxy.app.acp.AcpRobotParam
 import com.mola.cmd.proxy.app.acp.action.CmdProxyControlServer
+import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry
 import com.mola.cmd.proxy.app.acp.configui.ConfigUiServer
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity
+import com.mola.cmd.proxy.app.acp.starweave.AcpRuntimePlan
+import com.mola.cmd.proxy.app.acp.team.TeamSourceEligibility
 import com.mola.cmd.proxy.app.mcp.McpProxy
 import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import com.mola.cmd.proxy.app.utils.LogUtil
@@ -143,12 +148,11 @@ private fun startAcp() {
     // 启动 ConfigUI 服务（无论是否有 robots 配置都启动，方便用户配置）
     startConfigUiServer(config)
 
-    // 如果尚未配置 robots 或 chatterIds，仅启动 ConfigUI 等待用户配置
+    // 没有 robot 时仅保留 ConfigUI。chatterIds 为空仍需启动本地 ACP 核心，
+    // 这样 Starweave 可以按需开启环境本地会话。
     val robotsArray = config.getJSONArray("robots")
-    val chatterIdsArray = config.getJSONArray("chatterIds")
-    if (robotsArray == null || robotsArray.isEmpty()
-        || chatterIdsArray == null || chatterIdsArray.isEmpty()) {
-        log.info("robots 或 chatterIds 为空，等待用户通过 ConfigUI 页面完成配置后刷新服务")
+    if (robotsArray == null || robotsArray.isEmpty()) {
+        log.info("robots 为空，等待用户通过 ConfigUI 页面完成配置后刷新服务")
         return
     }
 
@@ -211,6 +215,7 @@ private fun persistConfigUiPort(file: File, config: JSONObject, actualPort: Int)
 private fun registerInstance(config: JSONObject) {
     val chatterIds = config.getJSONArray("chatterIds")
         ?.toJavaList(String::class.java) ?: emptyList()
+    StarweaveIdentity.validateMolaChatChatterIds(chatterIds)
     val robotNames = config.getJSONArray("robots")
         ?.toJavaList(AcpRobotParam::class.java)
         ?.filter { it.isEnabled }
@@ -224,11 +229,12 @@ private fun registerInstance(config: JSONObject) {
  */
 private fun startAcpServices(config: JSONObject) {
     val robotsArray = config.getJSONArray("robots") ?: return
-    val chatterIdsArray = config.getJSONArray("chatterIds") ?: return
-    if (robotsArray.isEmpty() || chatterIdsArray.isEmpty()) return
+    val allRobots = robotsArray.toJavaList(AcpRobotParam::class.java)
+    NpmProviderRuntimeManager.getInstance().configureAutoLatest(allRobots)
+    val chatterIdsArray = config.getJSONArray("chatterIds") ?: JSONArray()
+    if (robotsArray.isEmpty()) return
 
     val chatterIdsJsonStr = chatterIdsArray.toJSONString()
-    val allRobots = robotsArray.toJavaList(AcpRobotParam::class.java)
     val enabledRobots = allRobots.filter { it.isEnabled }
     require(enabledRobots.none { it.isOnlySubAgent && it.isOnlyTeamMember }) {
         "onlySubAgent and onlyTeamMember cannot both be true"
@@ -237,12 +243,22 @@ private fun startAcpServices(config: JSONObject) {
     val runtimeRobots = enabledRobots.filter { !it.isOnlyTeamMember }
     val mainRobots = runtimeRobots.filter { !it.isOnlySubAgent }
     // 所有启用且非 onlySubAgent 的 robot 都可作为 Fast Team 来源。
-    val teamSourceRobots = enabledRobots.filter { !it.isOnlySubAgent }
+    val teamSourceRobots = enabledRobots.filter { TeamSourceEligibility.isEligible(it) }
     val robotsJsonStr = JSON.toJSONString(mainRobots)
     val chatterIds = chatterIdsArray.toJavaList(String::class.java)
     val channels = config.getJSONArray("channels")
         ?.toJavaList(com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig::class.java)
         ?: emptyList()
+
+    val runtimePlan = AcpRuntimePlan.build(chatterIds, allRobots, channels)
+    if (!runtimePlan.shouldStartCoreRuntime()) {
+        log.info("没有可运行的 MolaChat、Starweave 或信道目标，跳过 ACP 核心启动")
+        return
+    }
+    log.info("ACP 运行计划: molaChatTargets={}, starweaveEligibleRobots={}, enabledChannels={}",
+        runtimePlan.molaChatTargetCount,
+        runtimePlan.starweaveEligibleRobots,
+        runtimePlan.enabledChannelCount)
 
     if (enabledRobots.isEmpty()) {
         log.info("所有 robot 均已禁用，跳过 ACP 服务启动")
@@ -392,6 +408,7 @@ private fun reloadRobot(robotName: String) {
         }
 
         val allRobots = robotsArray.toJavaList(AcpRobotParam::class.java)
+        NpmProviderRuntimeManager.getInstance().configureAutoLatest(allRobots)
         val robot = allRobots.firstOrNull { it.name == robotName }
             ?: throw IllegalArgumentException("robot '$robotName' 在配置中不存在")
 

@@ -30,10 +30,10 @@ public class CodexAcpProvider implements AgentProvider {
     private static final Gson GSON = new Gson();
     private static final NpmProviderRuntimeManager RUNTIME_MANAGER =
             NpmProviderRuntimeManager.getInstance();
+
     @Override
     public String getCommand() {
-        return System.getProperty("os.name").toLowerCase().contains("win")
-                ? "codex-acp.cmd" : "codex-acp";
+        return "codex-acp";
     }
 
     @Override
@@ -54,7 +54,17 @@ public class CodexAcpProvider implements AgentProvider {
 
     @Override
     public boolean hasFallbackCommand() {
-        return false;
+        return true;
+    }
+
+    @Override
+    public String getFallbackCommand() {
+        return "codex-acp";
+    }
+
+    @Override
+    public String[] getFallbackArgs() {
+        return new String[0];
     }
 
     @Override
@@ -89,8 +99,24 @@ public class CodexAcpProvider implements AgentProvider {
     }
 
     @Override
+    public List<Path> getSkillPaths(String workspacePath, AcpRobotParam robotParam) {
+        List<Path> paths = new ArrayList<>();
+        paths.add(resolveCodexHome(robotParam).resolve("skills"));
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            paths.add(Paths.get(workspacePath, ".agents", "skills"));
+        }
+        return paths;
+    }
+
+    @Override
     public boolean isAgentMessageControlArtifact(String text) {
-        return text != null && "*Conversation interrupted*".equals(text.trim());
+        if (text == null) {
+            return false;
+        }
+        String normalized = text.trim();
+        return "*Conversation interrupted*".equals(normalized)
+                || "*Context compacted to fit the model's context window.*".equals(normalized)
+                || "Context compacted.".equals(normalized);
     }
 
     @Override
@@ -100,6 +126,21 @@ public class CodexAcpProvider implements AgentProvider {
         }
 
         JsonObject update = msg.getAsJsonObject("params").getAsJsonObject("update");
+        if (isStructuredContextCompactionUpdate(update)) {
+            String status = getString(update, "status")
+                    .toLowerCase(java.util.Locale.ROOT);
+            if ("in_progress".equals(status) || "pending".equals(status)) {
+                return CompactionSignal.STARTED;
+            }
+            if ("completed".equals(status)) {
+                return CompactionSignal.COMPLETED;
+            }
+            if ("failed".equals(status) || "cancelled".equals(status)) {
+                return CompactionSignal.FAILED;
+            }
+            return CompactionSignal.NONE;
+        }
+
         if (!"agent_message_chunk".equals(getString(update, "sessionUpdate"))) {
             return CompactionSignal.NONE;
         }
@@ -111,6 +152,24 @@ public class CodexAcpProvider implements AgentProvider {
             return CompactionSignal.COMPLETED;
         }
         return CompactionSignal.NONE;
+    }
+
+    /**
+     * codex-acp 1.7+ exposes context compaction as a synthetic tool call. Use its
+     * machine-readable metadata instead of the display title, which may be renamed
+     * or localized independently of the lifecycle contract.
+     */
+    private boolean isStructuredContextCompactionUpdate(JsonObject update) {
+        String updateType = getString(update, "sessionUpdate");
+        if (!"tool_call".equals(updateType) && !"tool_call_update".equals(updateType)) {
+            return false;
+        }
+        if (update == null || !update.has("_meta") || !update.get("_meta").isJsonObject()) {
+            return false;
+        }
+        JsonObject meta = update.getAsJsonObject("_meta");
+        return meta.has("contextCompaction")
+                && meta.get("contextCompaction").isJsonObject();
     }
 
     private boolean isSessionUpdate(JsonObject msg) {

@@ -62,6 +62,8 @@ public class ScheduleTaskManager {
             com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("schedules");
     private static final String TASKS_FILE = "tasks.json";
     private static final String GROUP_SESSIONS_FILE = "groups.json";
+    // Legacy MAIN is depth 1, Team depth 3, surface-aware MAIN depth 5.
+    private static final int MAX_SCHEDULE_FILE_DEPTH = 6;
 
     /** 相对时间表达式：+30s, +30m, +2h, +1d */
     private static final Pattern RELATIVE_TIME_PATTERN = Pattern.compile("^\\+(\\d+)([smhd])$");
@@ -467,7 +469,8 @@ public class ScheduleTaskManager {
         Path baseDir = schedulesBaseDir;
         if (!Files.exists(baseDir)) return;
 
-        try (java.util.stream.Stream<Path> paths = Files.walk(baseDir, 4)) {
+        try (java.util.stream.Stream<Path> paths = Files.walk(
+                baseDir, MAX_SCHEDULE_FILE_DEPTH)) {
             paths.filter(Files::isRegularFile)
                     .filter(path -> TASKS_FILE.equals(path.getFileName().toString()))
                     .forEach(tasksFile -> loadTasksFile(baseDir, tasksFile));
@@ -479,7 +482,8 @@ public class ScheduleTaskManager {
 
     private void loadAllGroupSessions() {
         if (!Files.exists(schedulesBaseDir)) return;
-        try (java.util.stream.Stream<Path> paths = Files.walk(schedulesBaseDir, 4)) {
+        try (java.util.stream.Stream<Path> paths = Files.walk(
+                schedulesBaseDir, MAX_SCHEDULE_FILE_DEPTH)) {
             paths.filter(Files::isRegularFile)
                     .filter(path -> GROUP_SESSIONS_FILE.equals(
                             path.getFileName().toString()))

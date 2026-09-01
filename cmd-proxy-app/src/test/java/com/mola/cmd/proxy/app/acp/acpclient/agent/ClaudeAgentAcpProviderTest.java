@@ -15,10 +15,14 @@ public class ClaudeAgentAcpProviderTest {
 
         List<Path> paths = provider.getMcpConfigPaths("/tmp/claude-workspace");
 
-        assertEquals(2, paths.size());
+        assertEquals(4, paths.size());
         assertEquals(".claude.json", paths.get(0).getFileName().toString());
         assertEquals(".mcp.json", paths.get(1).getFileName().toString());
         assertEquals("/tmp/claude-workspace",
                 paths.get(1).getParent().toString().replace('\\', '/'));
+        // 统一共享配置追加在末尾（优先级最低）
+        assertEquals("mcp.json", paths.get(2).getFileName().toString());
+        assertEquals("/tmp/claude-workspace/.cmd-proxy/mcp.json",
+                paths.get(3).toString().replace('\\', '/'));
     }
 }

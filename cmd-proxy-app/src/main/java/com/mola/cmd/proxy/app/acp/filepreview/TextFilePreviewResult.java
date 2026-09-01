@@ -47,4 +47,8 @@ public final class TextFilePreviewResult {
 
     public boolean isAccepted() { return accepted; }
     public String getCode() { return code; }
+    public String getRequestId() { return requestId; }
+    public String getMessage() { return message; }
+    public boolean isRetryable() { return retryable; }
+    public Map<String, Object> getData() { return data; }
 }

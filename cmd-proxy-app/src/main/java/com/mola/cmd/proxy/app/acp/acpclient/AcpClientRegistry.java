@@ -25,6 +25,13 @@ public class AcpClientRegistry {
     private final ConcurrentHashMap<String, AcpClient> clients = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> sessionLocks = new ConcurrentHashMap<>();
     private final MainAcpPromptCoordinator promptCoordinator = new MainAcpPromptCoordinator();
+    private final ClientFactory clientFactory;
+
+    interface ClientFactory {
+        AcpClient create(String workspacePath, String groupId, AcpRobotParam robotParam);
+        AcpClient create(String workspacePath, AcpClientIdentity identity,
+                         AcpRobotParam robotParam);
+    }
 
     @FunctionalInterface
     public interface ClientInitializer {
@@ -32,6 +39,23 @@ public class AcpClientRegistry {
     }
 
     private AcpClientRegistry() {
+        this(new ClientFactory() {
+            @Override
+            public AcpClient create(String workspacePath, String groupId,
+                                    AcpRobotParam robotParam) {
+                return new AcpClient(workspacePath, groupId, robotParam);
+            }
+
+            @Override
+            public AcpClient create(String workspacePath, AcpClientIdentity identity,
+                                    AcpRobotParam robotParam) {
+                return new AcpClient(workspacePath, identity, robotParam);
+            }
+        });
+    }
+
+    AcpClientRegistry(ClientFactory clientFactory) {
+        this.clientFactory = java.util.Objects.requireNonNull(clientFactory, "clientFactory");
     }
 
     public static AcpClientRegistry getInstance() {
@@ -61,22 +85,15 @@ public class AcpClientRegistry {
     }
 
     /** Creates, fully wires, and only then starts a client. */
-    public void createSession(String groupId, String workspacePath,
-                              AcpRobotParam robotParam,
-                              ClientInitializer initializer) throws Exception {
+    public AcpClient createSession(String groupId, String workspacePath,
+                                   AcpRobotParam robotParam,
+                                   ClientInitializer initializer) throws Exception {
         synchronized (sessionLock(groupId)) {
-            promptCoordinator.clear(groupId);
-            // 如果已存在，先关闭旧 client
-            AcpClient old = clients.remove(groupId);
+            AcpClient old = clients.get(groupId);
             boolean isClearContext = false;
             if (old != null) {
-                logger.info("groupId={} 已有 client，先关闭旧实例", groupId);
+                logger.info("groupId={} 已有 client，准备替换旧实例", groupId);
                 isClearContext = true;
-                try {
-                    old.close();
-                } catch (IOException e) {
-                    logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
-                }
                 if (workspacePath == null || workspacePath.trim().isEmpty()) {
                     workspacePath = old.getWorkspacePath();
                 }
@@ -85,7 +102,7 @@ public class AcpClientRegistry {
                 }
             }
 
-            AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
+            AcpClient client = clientFactory.create(workspacePath, groupId, robotParam);
             wirePromptLifecycle(groupId, client);
             if (isClearContext) {
                 client.setForceNewSession(true);
@@ -93,8 +110,46 @@ public class AcpClientRegistry {
             try {
                 if (initializer != null) initializer.initialize(client);
                 client.start();
+                promptCoordinator.clear(groupId);
                 clients.put(groupId, client);
+                closeReplaced(groupId, old);
                 logger.info("groupId={} 会话创建成功, sessionId={}", groupId, client.getSessionId());
+                return client;
+            } catch (Exception e) {
+                try { client.close(); } catch (IOException closeError) {
+                    logger.warn("关闭启动失败的 AcpClient 失败, groupId={}", groupId, closeError);
+                }
+                throw e;
+            }
+        }
+    }
+
+    /** Creates a client with an explicit surface-aware identity. */
+    public AcpClient createSession(AcpClientIdentity identity, String workspacePath,
+                                   AcpRobotParam robotParam, boolean forceNewSession,
+                                   ClientInitializer initializer) throws Exception {
+        String groupId = identity.getLogicalId();
+        synchronized (sessionLock(groupId)) {
+            AcpClient old = clients.get(groupId);
+            if (old != null) {
+                if (workspacePath == null || workspacePath.trim().isEmpty()) {
+                    workspacePath = old.getWorkspacePath();
+                }
+                if (robotParam == null) robotParam = old.getRobotParam();
+            }
+
+            AcpClient client = clientFactory.create(workspacePath, identity, robotParam);
+            wirePromptLifecycle(groupId, client);
+            client.setForceNewSession(forceNewSession || old != null);
+            try {
+                if (initializer != null) initializer.initialize(client);
+                client.start();
+                promptCoordinator.clear(groupId);
+                clients.put(groupId, client);
+                closeReplaced(groupId, old);
+                logger.info("groupId={} 显式身份会话创建成功, surface={}, sessionId={}",
+                        groupId, identity.getSurface(), client.getSessionId());
+                return client;
             } catch (Exception e) {
                 try { client.close(); } catch (IOException closeError) {
                     logger.warn("关闭启动失败的 AcpClient 失败, groupId={}", groupId, closeError);
@@ -117,13 +172,8 @@ public class AcpClientRegistry {
             }
             String workspacePath = current.getWorkspacePath();
             AcpRobotParam robotParam = current.getRobotParam();
-            promptCoordinator.clear(groupId);
-            clients.remove(groupId, current);
-            try { current.close(); } catch (IOException e) {
-                logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
-            }
-
-            AcpClient replacement = new AcpClient(workspacePath, groupId, robotParam);
+            AcpClientIdentity identity = current.getClientIdentity();
+            AcpClient replacement = clientFactory.create(workspacePath, identity, robotParam);
             wirePromptLifecycle(groupId, replacement);
             if (targetRestoreSessionId == null) {
                 replacement.setForceNewSession(true);
@@ -133,7 +183,13 @@ public class AcpClientRegistry {
             try {
                 if (initializer != null) initializer.initialize(replacement);
                 replacement.start();
+                if (clients.get(groupId) != current) {
+                    try { replacement.close(); } catch (IOException ignored) { }
+                    return null;
+                }
+                promptCoordinator.clear(groupId);
                 clients.put(groupId, replacement);
+                closeReplaced(groupId, current);
                 logger.info("groupId={} 会话替换成功, sessionId={}",
                         groupId, replacement.getSessionId());
                 return replacement;
@@ -251,6 +307,15 @@ public class AcpClientRegistry {
         return clients.get(groupId);
     }
 
+    private void closeReplaced(String groupId, AcpClient old) {
+        if (old == null) return;
+        try {
+            old.close();
+        } catch (IOException e) {
+            logger.warn("关闭已替换的 AcpClient 失败, groupId={}", groupId, e);
+        }
+    }
+
     /**
      * 关闭并移除指定 groupId 的 client。
      */
@@ -284,25 +349,27 @@ public class AcpClientRegistry {
     public void restoreSession(String groupId, String targetSessionId,
                                ClientInitializer initializer) throws Exception {
         synchronized (sessionLock(groupId)) {
-            promptCoordinator.clear(groupId);
-            AcpClient old = clients.remove(groupId);
+            AcpClient old = clients.get(groupId);
             String workspacePath = null;
             AcpRobotParam robotParam = null;
+            AcpClientIdentity identity = null;
             if (old != null) {
                 workspacePath = old.getWorkspacePath();
                 robotParam = old.getRobotParam();
-                try { old.close(); } catch (IOException e) {
-                    logger.warn("关闭旧 AcpClient 失败, groupId={}", groupId, e);
-                }
+                identity = old.getClientIdentity();
             }
 
-            AcpClient client = new AcpClient(workspacePath, groupId, robotParam);
+            AcpClient client = identity == null
+                    ? clientFactory.create(workspacePath, groupId, robotParam)
+                    : clientFactory.create(workspacePath, identity, robotParam);
             wirePromptLifecycle(groupId, client);
             client.setTargetRestoreSessionId(targetSessionId);
             try {
                 if (initializer != null) initializer.initialize(client);
                 client.start();
+                promptCoordinator.clear(groupId);
                 clients.put(groupId, client);
+                closeReplaced(groupId, old);
                 logger.info("groupId={} 会话恢复成功, sessionId={}",
                         groupId, client.getSessionId());
             } catch (Exception e) {

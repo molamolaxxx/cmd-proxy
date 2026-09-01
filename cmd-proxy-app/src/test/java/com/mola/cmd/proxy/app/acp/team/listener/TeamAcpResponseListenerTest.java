@@ -76,7 +76,7 @@ public class TeamAcpResponseListenerTest {
     }
 
     @Test
-    public void completionAndErrorNotifyAuthoritativeMemberStateObserver() {
+    public void authoritativeReadyWaitsForClientLifecycleTransition() {
         TeamMemberDefinition first = member("member-1", 0);
         TeamRuntime runtime = new TeamRuntime(TeamDefinition.creating(
                 "team-1", "owner-1", "Team", "team-acp-instance", "request-1",
@@ -87,6 +87,9 @@ public class TeamAcpResponseListenerTest {
         }, (teamId, memberId, state, error) -> states.add(state));
 
         listener.onComplete("done");
+        assertTrue(states.isEmpty());
+
+        listener.onClientReady();
         listener.onError(new IllegalStateException("failed"));
 
         assertEquals(Arrays.asList(

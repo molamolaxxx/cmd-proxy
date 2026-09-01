@@ -58,6 +58,16 @@ public class OpenCodeAgentProvider implements AgentProvider {
     }
 
     @Override
+    public List<Path> getSkillPaths(String workspacePath, AcpRobotParam robotParam) {
+        List<Path> paths = new ArrayList<>();
+        paths.add(Paths.get(HOME, ".config", "opencode", "skills"));
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            paths.add(Paths.get(workspacePath, ".opencode", "skills"));
+        }
+        return paths;
+    }
+
+    @Override
     public String getName() {
         return "opencode";
     }

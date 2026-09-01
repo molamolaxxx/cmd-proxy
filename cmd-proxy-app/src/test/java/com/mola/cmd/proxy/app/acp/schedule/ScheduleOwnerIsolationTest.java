@@ -5,6 +5,9 @@ import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
+import com.mola.cmd.proxy.app.acp.acpclient.ClientSurface;
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -92,6 +95,56 @@ public class ScheduleOwnerIsolationTest {
         manager.cleanupTeam("team-1");
         assertFalse(Files.exists(root.resolve("team/team-1")));
         assertTrue(Files.exists(root.resolve("Robot One/tasks.json")));
+    }
+
+    @Test
+    public void starweaveMainOwnerPersistsExactSurfaceAndLogicalSession()
+            throws Exception {
+        Path root = temporaryFolder.newFolder("starweave-schedule").toPath();
+        ScheduleOwnerKey owner = ScheduleOwnerKey.main(
+                "starweave-instance-a", ClientSurface.STARWEAVE,
+                "acp-Robotstarweave-instance-a", "Robot One");
+
+        assertEquals(ClientSurface.STARWEAVE, owner.getSurface());
+        assertEquals("acp-Robotstarweave-instance-a", owner.getLogicalId());
+        assertEquals("main/starweave/starweave-instance-a/"
+                + "acp-Robotstarweave-instance-a/Robot One",
+                owner.getPersistencePath());
+        assertEquals(owner, ScheduleOwnerKey.fromPersistencePath(
+                owner.getPersistencePath()));
+
+        ScheduleTaskManager manager = new ScheduleTaskManager(root);
+        manager.createTask(owner, "local", "prompt",
+                new ScheduleConfig("once", "+1h"));
+        assertTrue(Files.exists(root.resolve(owner.getPersistencePath())
+                .resolve("tasks.json")));
+
+        ScheduleTaskManager restored = new ScheduleTaskManager(root);
+        restored.start();
+        try {
+            assertEquals(1, restored.listTasks(owner).size());
+            ScheduleOwnerKey restoredOwner = restored.listTasks(owner).get(0).getOwner();
+            assertEquals(ClientSurface.STARWEAVE, restoredOwner.getSurface());
+            assertEquals(owner.getLogicalId(), restoredOwner.getLogicalId());
+        } finally {
+            restored.stop();
+        }
+    }
+
+    @Test
+    public void unicodeStarweaveDisplayNameProducesSafeScheduleOwner() {
+        AcpClientIdentity identity = StarweaveIdentity.identity(
+                "env-a", "Sales专家");
+
+        ScheduleOwnerKey owner = ScheduleOwnerKey.main(
+                identity.getOwnerId(), identity.getSurface(),
+                identity.getLogicalId(), identity.getSourceRobotName());
+
+        assertEquals("Sales专家", owner.getRobotName());
+        assertTrue(owner.getLogicalId().matches("[a-zA-Z0-9._-]+"));
+        assertTrue(owner.getPersistencePath().contains("/Sales专家"));
+        assertEquals(owner, ScheduleOwnerKey.fromPersistencePath(
+                owner.getPersistencePath()));
     }
 
     @Test

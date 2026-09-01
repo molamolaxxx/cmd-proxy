@@ -40,6 +40,7 @@ build/
 ### Runtime / local ###
 logs/
 .directory
+.cmd-proxy/
 
 ### Agent skills (build/ is otherwise a NetBeans pattern) ###
 !.agents/skills/cmd-proxy-docker-image/scripts/build/

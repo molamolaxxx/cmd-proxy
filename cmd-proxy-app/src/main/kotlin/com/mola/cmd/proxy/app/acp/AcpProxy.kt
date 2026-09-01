@@ -8,6 +8,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientFeatureInitializer
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry
+import com.mola.cmd.proxy.app.acp.acpclient.MainSessionApplicationService
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter
 import com.mola.cmd.proxy.app.acp.common.PathUtils
 import com.mola.cmd.proxy.app.acp.memory.MemoryManager
@@ -32,9 +33,11 @@ import com.mola.cmd.proxy.app.acp.team.TeamCommandHandler
 import com.mola.cmd.proxy.app.acp.team.TeamManager
 import com.mola.cmd.proxy.app.acp.team.TeamStore
 import com.mola.cmd.proxy.app.acp.team.MapTeamSourceRobotResolver
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity
 import com.mola.cmd.proxy.app.acp.team.TeamStartupCoordinator
 import com.mola.cmd.proxy.app.acp.team.TeamSharedSourceIds
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry
+import com.mola.cmd.proxy.app.acp.team.TeamSourceEligibility
 import com.mola.cmd.proxy.app.acp.team.event.RpcTeamEventSink
 import com.mola.cmd.proxy.app.acp.team.listener.TeamAcpResponseListener
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor
@@ -43,6 +46,9 @@ import com.mola.cmd.proxy.app.acp.talkto.ContactRemarkResolver
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportDescriptor
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportProtocol
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToContextInjector
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionManager
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamApiBridge
 import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
@@ -63,6 +69,9 @@ object AcpProxy {
     private val log: Logger = LoggerFactory.getLogger(AcpProxy::class.java)
 
     private val registry: AcpClientRegistry = AcpClientRegistry.getInstance()
+
+    /** Ordinary MAIN lifecycle boundary shared by MolaChat RPC and Starweave REST. */
+    private val mainSessionService = MainSessionApplicationService(registry)
 
     /** 普通、Team 与 sub-agent 共用的 manager/存储锁注册表。 */
     private val memoryManagers = MemoryManagerRegistry()
@@ -96,6 +105,9 @@ object AcpProxy {
 
     /** 普通与 Team client 共用的完整能力挂点编排器。 */
     private lateinit var featureInitializer: AcpClientFeatureInitializer
+
+    /** Starweave 环境本地 MAIN 会话；不注册 MolaChat RPC group/callback。 */
+    private var starweaveSessionManager: StarweaveSessionManager? = null
 
     /** Team 权威 runtime；本阶段只恢复定义与负责统一关闭。 */
     private var teamManager: TeamManager? = null
@@ -159,13 +171,25 @@ object AcpProxy {
                 globalRobotRegistry[robot.name] = robot
             }
         }
+        // Starweave-only deployments have no chatterId-derived group map. Keep
+        // the same enabled robot catalog available to sub Agent and TalkTo setup.
+        configuredRobots.filter {
+            it.isEnabled && !it.isOnlyTeamMember && it.name.isNotBlank()
+        }.forEach { globalRobotRegistry.putIfAbsent(it.name, it) }
         globalGroupRobotRegistry.putAll(teamSourceGroupRobotMap)
+        registerStarweaveTeamSources(configuredRobots)
         registerSharedTeamSources(teamSourceGroupRobotMap.values)
 
         // 构建 robotName → groupId 反向索引（取第一个）
         for ((groupId, robot) in groupRobotMap) {
             if (robot != null && robot.name.isNotBlank()) {
                 robotToGroupIdMap.putIfAbsent(robot.name, groupId)
+                robotToGroupIdMap.putIfAbsent("MOLACHAT:${robot.name}", groupId)
+                activeChatterIds.firstOrNull { chatterId ->
+                    mainGroupId(chatterId, robot.name) == groupId
+                }?.let { chatterId ->
+                    robotToGroupIdMap["MOLACHAT:$chatterId:${robot.name}"] = groupId
+                }
             }
         }
 
@@ -174,7 +198,36 @@ object AcpProxy {
             globalRobotRegistry, registry, robotToGroupIdMap
         )
         featureInitializer = createFeatureInitializer()
+        starweaveSessionManager = StarweaveSessionManager(
+            CmdProxyHome.instanceId(), registry,
+            { robotName -> configuredRobotRegistry[robotName] },
+            { groupId, client, robot ->
+                featureInitializer.initialize(
+                    AcpClientFeatureInitializer.Context.main(groupId), client, robot)
+                // Enables local same-surface routing when no MolaChat MAIN slot
+                // has already claimed this robot name. Full multi-surface routing
+                // remains tracked separately by SW-604.
+                robotToGroupIdMap.putIfAbsent(robot.name, groupId)
+                robotToGroupIdMap["STARWEAVE:${robot.name}"] = groupId
+                robotToGroupIdMap[
+                    "STARWEAVE:${StarweaveIdentity.ownerId(CmdProxyHome.instanceId())}:${robot.name}"
+                ] = groupId
+                globalGroupRobotRegistry[groupId] = robot
+            }
+        )
+        StarweaveSessionApiBridge.install(starweaveSessionManager!!)
         initializeTeamTransport()
+        val starweaveRecovery = starweaveSessionManager!!.recoverActiveSessions()
+        log.info(
+            "Starweave ACTIVE 会话恢复完成, attempted={}, recovered={}, failed={}",
+            starweaveRecovery.getIntValue("attempted"),
+            starweaveRecovery.getIntValue("recoveredCount"),
+            starweaveRecovery.getIntValue("failedCount")
+        )
+        if (starweaveRecovery.getIntValue("failedCount") > 0) {
+            log.warn("部分 Starweave 会话恢复失败，保留 CLOSED 状态供页面重试: {}",
+                starweaveRecovery.getJSONArray("failed"))
+        }
         acpSyncRobotsSnapshot = AcpSyncRobotsSnapshot(
             robotsJson, chatterIdsJson, teamTransportDescriptor)
 
@@ -218,7 +271,7 @@ object AcpProxy {
                         return@submit
                     }
 
-                    registry.createSession(groupId, workDir, robot) { client ->
+                    mainSessionService.create(groupId, workDir, robot) { client ->
                         featureInitializer.initialize(
                             AcpClientFeatureInitializer.Context.main(groupId), client, robot)
                     }
@@ -259,7 +312,8 @@ object AcpProxy {
         startAutoNewSession()
 
         // 会话注册完成后，调用 acpSyncRobots 通知服务端同步 robot 信息
-        if (!robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank()) {
+        if (activeChatterIds.isNotEmpty()
+            && !robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank()) {
             try {
                 publishAcpSyncRobots()
                 log.info("acpSyncRobots 回调已发送")
@@ -267,13 +321,18 @@ object AcpProxy {
                 log.error("acpSyncRobots 回调发送失败", e)
             }
         }
-        acpSyncRobotsHeartbeat = AcpSyncRobotsHeartbeat(
-            acpSyncRobotsSnapshot,
-            { snapshot -> publishAcpSyncRobots(snapshot) },
-            20L,
-            TimeUnit.SECONDS
-        ).also { it.start() }
-        log.info("acpSyncRobots heartbeat 已启动, intervalSeconds=20")
+        if (activeChatterIds.isNotEmpty()) {
+            acpSyncRobotsHeartbeat = AcpSyncRobotsHeartbeat(
+                acpSyncRobotsSnapshot,
+                { snapshot -> publishAcpSyncRobots(snapshot) },
+                20L,
+                TimeUnit.SECONDS
+            ).also { it.start() }
+            log.info("acpSyncRobots heartbeat 已启动, intervalSeconds=20")
+        } else {
+            acpSyncRobotsHeartbeat = null
+            log.info("未配置 MolaChat chatterId，跳过 acpSyncRobots callback 与 heartbeat")
+        }
 
         log.info("AcpProxy 命令注册完成")
     }
@@ -299,9 +358,25 @@ object AcpProxy {
             CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
             remoteTeamMemberSourceDescriptors())
         val sourceResolver = MapTeamSourceRobotResolver(globalGroupRobotRegistry)
-        val eventSink = RpcTeamEventSink()
+        val rpcEventSink = RpcTeamEventSink()
         val teamRegistry = TeamClientRegistry()
         val managerHolder = AtomicReference<TeamManager>()
+        val eventSink = object : com.mola.cmd.proxy.app.acp.team.event.TeamEventSink {
+            override fun publish(event: com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope) {
+                tryPublish(event)
+            }
+
+            override fun tryPublish(
+                event: com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope
+            ): Boolean {
+                return if (StarweaveTeamApiBridge.publishIfOwned(event)) true
+                else rpcEventSink.tryPublish(event)
+            }
+
+            override fun close() {
+                rpcEventSink.close()
+            }
+        }
         val startupCoordinator = TeamStartupCoordinator(
             sourceResolver,
             { runtime, member, source, options, onClientCreated ->
@@ -319,11 +394,16 @@ object AcpProxy {
                 val client = AcpClient(robot.workDir, identity, robot)
                 onClientCreated.accept(client)
                 try {
-                    client.globalListener = TeamAcpResponseListener(
+                    val teamListener = TeamAcpResponseListener(
                         runtime, member, eventSink
                     ) { teamId, memberId, state, error ->
                         managerHolder.get()?.onMemberState(teamId, memberId, state, error)
                     }
+                    client.globalListener = teamListener
+                    // Listener completion is not a lifecycle boundary: action/follow-up
+                    // rounds such as talk_to may complete without the same callback path.
+                    // Publish READY only after AcpClient itself wins BUSY -> READY.
+                    client.setAfterTurnReady(teamListener::onClientReady)
                     client.setForceNewSession(options.isForceNewSession)
                     if (options.targetRestoreSessionId != null) {
                         client.setTargetRestoreSessionId(options.targetRestoreSessionId)
@@ -372,6 +452,9 @@ object AcpProxy {
             true
         }
         managerHolder.set(manager)
+        StarweaveTeamApiBridge.install(
+            manager, CmdProxyHome.instanceId(),
+            java.util.function.Supplier { starweaveTeamMemberSourceDescriptors() })
         TeamSharingStatusRegistry.setSupplier { teamSharingStatuses() }
         // 恢复流程会异步启动成员，initializer 必须在恢复前就能解析到权威 manager。
         teamManager = manager
@@ -503,6 +586,14 @@ object AcpProxy {
                     ?: teamUnavailableResult(param.cmdId)
             }
             CmdReceiver.register(
+                TeamTransportProtocol.READ_TEXT_FILE_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Read one text file from a Team member workspace"
+            ) { param ->
+                teamCommandHandler?.handleReadTextFile(param.cmdId, param.cmdArgs)
+                    ?: teamUnavailableResult(param.cmdId)
+            }
+            CmdReceiver.register(
                 TeamTransportProtocol.TALK_TO_DELIVER_COMMAND,
                 teamTransportDescriptor.transportGroup,
                 "Deliver one routed mixed-Team talkTo message to a local member"
@@ -542,6 +633,30 @@ object AcpProxy {
      * 确保新启用的 robot 也能接受 MolaChat 的命令。
      */
     private fun registerGroupCommands(groupIds: List<String>) {
+        CmdReceiver.register("readTextFile", groupIds,
+            "读取当前ACP workspace内的受限文本文件") { params ->
+            try {
+                val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
+                val groupId = param.getString("groupId")
+                val client = if (groupId.isNullOrBlank()) null else registry.getClient(groupId)
+                if (client == null) {
+                    com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
+                        params.cmdId, "SESSION_NOT_FOUND", "ACP client not found", false
+                    ).toResultMap()
+                } else {
+                    com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewReader.read(
+                        params.cmdId, client.workspacePath, param.getString("path"),
+                        param.getInteger("maxBytes"), param.getString("charset")
+                    ).toResultMap()
+                }
+            } catch (e: Exception) {
+                log.warn("readTextFile 失败, requestId={}", params.cmdId, e)
+                com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult.error(
+                    params.cmdId, "INVALID_ARGUMENT", "invalid readTextFile request", false
+                ).toResultMap()
+            }
+        }
+
         // 注册 crossTalkToDeliver 命令处理器（接收 MolaChat 转发的跨 chatter 消息）
         CmdReceiver.register("crossTalkToDeliver", groupIds, "接收跨chatter的talkTo消息") { params ->
             val resultMap = mutableMapOf<String, String>()
@@ -615,7 +730,7 @@ object AcpProxy {
                     resultMap["code"] = "REJECTED_STATE"
                     return@register resultMap
                 }
-                resultMap.putAll(promptCommandResult(registry.cancelPromptWithResult(groupId)))
+                resultMap.putAll(promptCommandResult(mainSessionService.cancel(groupId)))
             } catch (e: Exception) {
                 log.error("acpCancelPrompt 失败", e)
                 resultMap["result"] = "取消失败: ${e.message}"
@@ -684,7 +799,7 @@ object AcpProxy {
                         map as Map<String, String>
                     }?.toMutableList()
                 } else null
-                resultMap.putAll(registry.sendMessageWithResult(
+                resultMap.putAll(mainSessionService.send(
                     groupId, message, files,
                     param.getString("busyPolicy")).let(::promptCommandResult))
             } catch (e: Exception) {
@@ -705,9 +820,9 @@ object AcpProxy {
                     resultMap["result"] = "groupId不能为空"
                     return@register resultMap
                 }
-                val client = registry.getClient(groupId)
-                if (client != null) {
-                    resultMap["result"] = client.state.name
+                val status = mainSessionService.status(groupId)
+                if (status != null) {
+                    resultMap["result"] = status.name
                 }
             } catch (e: Exception) {
                 log.error("acpGetStatus 失败", e)
@@ -721,10 +836,8 @@ object AcpProxy {
             try {
                 val param: JSONObject = JSON.parse(params.cmdArgs[0]) as JSONObject
                 val groupId = param.getString("groupId")
-                val client = registry.getClient(groupId)
-                if (client != null) {
-                    resultMap["result"] = client.contextUsagePercentage.toString()
-                }
+                resultMap["result"] = mainSessionService
+                    .contextUsagePercentage(groupId).toString()
             } catch (e: Exception) {
                 log.error("acpGetContextUsage 失败", e)
                 resultMap["result"] = "-1"
@@ -742,13 +855,12 @@ object AcpProxy {
                     return@register resultMap
                 }
                 val limit = param.getIntValue("limit").let { if (it <= 0) 7 else it }
-                val client = registry.getClient(groupId)
-                if (client == null) {
+                val currentSessionId = mainSessionService.currentSessionId(groupId)
+                if (currentSessionId == null) {
                     resultMap["result"] = "会话不存在"
                     return@register resultMap
                 }
-                val currentSessionId = client.sessionId
-                val sessions = client.historyManager.listRecentSessions(limit)
+                val sessions = mainSessionService.listSessions(groupId, limit)
                 val arr = com.alibaba.fastjson.JSONArray()
                 for (s in sessions) {
                     if (arr.size >= limit) break
@@ -793,7 +905,7 @@ object AcpProxy {
                     return@register resultMap
                 }
 
-                registry.restoreSession(groupId, sessionId) { restored ->
+                mainSessionService.restore(groupId, sessionId) { restored ->
                     featureInitializer.initialize(
                         AcpClientFeatureInitializer.Context.main(groupId),
                         restored, restored.robotParam)
@@ -1239,7 +1351,17 @@ object AcpProxy {
                 robot?.name
             )
         } else {
-            ScheduleOwnerKey.main(robot?.name ?: context.featureOwnerKey)
+            if (client.clientIdentity.isStarweave) {
+                ScheduleOwnerKey.main(
+                    client.clientIdentity.ownerId,
+                    client.clientIdentity.surface,
+                    client.clientIdentity.logicalId,
+                    robot?.name ?: context.featureOwnerKey
+                )
+            } else {
+                // Preserve the legacy MolaChat schedules/{robotName} namespace.
+                ScheduleOwnerKey.main(robot?.name ?: context.featureOwnerKey)
+            }
         }
         client.setScheduleSupport(scheduleTaskManager, injector, owner)
         log.info("定时任务支持初始化完成, owner={}, scheduleEnabled={}",
@@ -1323,8 +1445,9 @@ object AcpProxy {
             } else {
                 val robotName = owner.robotName
                     ?: throw IllegalStateException("MAIN schedule owner 缺少 robotName")
-                val targetGroupId = groupRobotMap.entries
-                    .firstOrNull { it.value?.name == robotName }?.key
+                val targetGroupId = owner.logicalId
+                    ?: groupRobotMap.entries
+                        .firstOrNull { it.value?.name == robotName }?.key
 
                 if (targetGroupId == null) {
                     log.error("定时任务执行失败：找不到 robot '{}' 对应的 groupId", robotName)
@@ -1341,12 +1464,10 @@ object AcpProxy {
                     val boundSessionId = scheduleTaskManager
                         .findGroupSession(owner, groupName)
                     if (boundSessionId == null) {
-                        val replacement = registry.replaceSessionIfCurrent(
+                        val replacement = mainSessionService.replaceIfCurrent(
                             targetGroupId, client, null
                         ) { replacement ->
-                            featureInitializer.initialize(
-                                AcpClientFeatureInitializer.Context.main(targetGroupId),
-                                replacement, replacement.robotParam)
+                            initializeMainReplacement(targetGroupId, replacement)
                         }
                             ?: return@setScopedExecutionCallback false
                         if (!groupName.isNullOrBlank()) {
@@ -1365,12 +1486,10 @@ object AcpProxy {
                                 authPrincipal, channelDelivery))
                     } else {
                         try {
-                            val replacement = registry.replaceSessionIfCurrent(
+                            val replacement = mainSessionService.replaceIfCurrent(
                                 targetGroupId, client, boundSessionId
                             ) { replacement ->
-                                featureInitializer.initialize(
-                                    AcpClientFeatureInitializer.Context.main(targetGroupId),
-                                    replacement, replacement.robotParam)
+                                initializeMainReplacement(targetGroupId, replacement)
                             }
                                 ?: throw IllegalStateException(
                                     "恢复分组会话后 client 不存在")
@@ -1400,12 +1519,21 @@ object AcpProxy {
         groupId: String,
         expected: AcpClient,
         targetRestoreSessionId: String?
-    ): AcpClient? = registry.replaceSessionIfCurrent(
+    ): AcpClient? = mainSessionService.replaceIfCurrent(
         groupId, expected, targetRestoreSessionId
     ) { replacement ->
-        featureInitializer.initialize(
-            AcpClientFeatureInitializer.Context.main(groupId),
-            replacement, replacement.robotParam)
+        initializeMainReplacement(groupId, replacement)
+    }
+
+    private fun initializeMainReplacement(groupId: String, client: AcpClient) {
+        if (client.clientIdentity.isStarweave) {
+            StarweaveSessionApiBridge.initializeReplacement(
+                groupId, client, client.robotParam)
+        } else {
+            featureInitializer.initialize(
+                AcpClientFeatureInitializer.Context.main(groupId),
+                client, client.robotParam)
+        }
     }
 
     private fun startAutoNewSession() {
@@ -1434,12 +1562,10 @@ object AcpProxy {
                             return@forEach
                         }
                         val idleMillis = TimeUnit.MINUTES.toMillis(config.idleMinutes.toLong())
-                        val replacement = registry.replaceIdleSessionIfCurrent(
+                        val replacement = mainSessionService.replaceIdleIfCurrent(
                             groupId, observed, now, idleMillis
                         ) { newClient ->
-                            featureInitializer.initialize(
-                                AcpClientFeatureInitializer.Context.main(groupId),
-                                newClient, newClient.robotParam)
+                            initializeMainReplacement(groupId, newClient)
                         }
                         if (replacement != null) {
                             mainRotated++
@@ -1466,6 +1592,21 @@ object AcpProxy {
         reason: String
     ) {
         if (newSessionId.isNullOrBlank()) return
+        val current = registry.getClient(groupId)
+        if (current?.clientIdentity?.isStarweave == true) {
+            try {
+                StarweaveSessionApiBridge.onSessionReplaced(
+                    groupId, oldSessionId, newSessionId, reason)
+                log.info(
+                    "已发布 Starweave 会话切换, groupId={}, oldSessionId={}, newSessionId={}, reason={}",
+                    groupId, oldSessionId, newSessionId, reason)
+            } catch (e: Exception) {
+                log.warn(
+                    "发布 Starweave 会话切换失败, groupId={}, newSessionId={}, reason={}",
+                    groupId, newSessionId, reason, e)
+            }
+            return
+        }
         val result = linkedMapOf<String, String?>(
             "schemaVersion" to "1",
             "instanceId" to CmdProxyHome.instanceId(),
@@ -1541,10 +1682,14 @@ object AcpProxy {
         }
 
         // 关闭所有 AcpClient
+        starweaveSessionManager?.let { StarweaveSessionApiBridge.clear(it) }
+        starweaveSessionManager = null
         registry.closeAllForShutdown()
 
         // Team client 使用独立 registry，不能混入普通 registry 的 closeAll。
-        teamManager?.closeForShutdown()
+        val closingTeamManager = teamManager
+        closingTeamManager?.closeForShutdown()
+        closingTeamManager?.let { StarweaveTeamApiBridge.clear(it) }
         teamManager = null
         teamCommandHandler = null
         TeamSharingStatusRegistry.clear()
@@ -1607,7 +1752,7 @@ object AcpProxy {
     fun teamSharingStatuses(): List<Map<String, Any>> {
         val definitions = teamManager?.snapshotDefinitions() ?: emptyList()
         return globalGroupRobotRegistry.values
-            .filter { it.isEnabled && !it.isOnlySubAgent }
+            .filter { TeamSourceEligibility.isEligible(it) }
             .distinctBy { it.name }.sortedBy { it.name }
             .flatMap { robot ->
                 val sourceRobotId = "acp-" + robot.name.replace(" ", "_")
@@ -1712,7 +1857,7 @@ object AcpProxy {
 
         // 1. 找到该 robot 的所有旧 groupId，逐一关闭
         val oldGroupIds = registry.getGroupIdsByRobot(robotName)
-        val remainsTeamSource = robot.isEnabled && !robot.isOnlySubAgent
+        val remainsTeamSource = TeamSourceEligibility.isEligible(robot)
         for (groupId in oldGroupIds) {
             registry.closeByGroupId(groupId)
             // 新 client 必须按最新记忆执行方式重建 manager；旧 Team 引用由
@@ -1726,6 +1871,12 @@ object AcpProxy {
         }
         globalGroupRobotRegistry.entries.removeIf { it.value.name == robotName }
         robotToGroupIdMap.remove(robotName)
+        robotToGroupIdMap.remove("MOLACHAT:$robotName")
+        robotToGroupIdMap.remove("STARWEAVE:$robotName")
+        robotToGroupIdMap.keys.removeIf { key ->
+            key.startsWith("MOLACHAT:") && key.endsWith(":$robotName") ||
+                key.startsWith("STARWEAVE:") && key.endsWith(":$robotName")
+        }
         memoryManagers.remove("subagent:$robotName")
 
         // 2. 更新全局 robot 注册表
@@ -1741,8 +1892,9 @@ object AcpProxy {
         val sourceGroupIds = chatterIds.map { chatterId ->
             listOf(chatterId, acpId).sorted().joinToString("")
         }
-        if (robot.isEnabled && !robot.isOnlySubAgent) {
+        if (TeamSourceEligibility.isEligible(robot)) {
             sourceGroupIds.forEach { groupId -> globalGroupRobotRegistry[groupId] = robot }
+            registerStarweaveTeamSources(listOf(robot))
             registerSharedTeamSources(listOf(robot))
         } else {
             teamManager?.disableSourceRobot(acpId)
@@ -1755,7 +1907,7 @@ object AcpProxy {
 
             for (groupId in newGroupIds) {
                 try {
-                    registry.createSession(groupId, robot.workDir, robot) { created ->
+                    mainSessionService.create(groupId, robot.workDir, robot) { created ->
                         featureInitializer.initialize(
                             AcpClientFeatureInitializer.Context.main(groupId), created, robot)
                     }
@@ -1763,6 +1915,12 @@ object AcpProxy {
 
                     // 更新 robotToGroupIdMap（取第一个新 groupId）
                     robotToGroupIdMap.putIfAbsent(robotName, groupId)
+                    robotToGroupIdMap.putIfAbsent("MOLACHAT:$robotName", groupId)
+                    chatterIds.firstOrNull { chatterId ->
+                        mainGroupId(chatterId, robotName) == groupId
+                    }?.let { chatterId ->
+                        robotToGroupIdMap["MOLACHAT:$chatterId:$robotName"] = groupId
+                    }
 
                     log.info("robot '{}' 新 client 已创建, groupId={}", robotName, groupId)
                 } catch (e: Exception) {
@@ -1796,13 +1954,22 @@ object AcpProxy {
                 CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
                 remoteTeamMemberSourceDescriptors())
             acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
-            publishAcpSyncRobots()
-            log.info("acpSyncRobots 回调已发送 (robot级重载后)")
+            if (activeChatterIds.isNotEmpty()) {
+                publishAcpSyncRobots()
+                log.info("acpSyncRobots 回调已发送 (robot级重载后)")
+            } else {
+                log.info("未配置 MolaChat chatterId，robot 级重载跳过 acpSyncRobots callback")
+            }
         } catch (e: Exception) {
             log.error("acpSyncRobots 回调发送失败 (robot级重载)", e)
         }
 
         log.info("robot 级热重载完成: robot={}", robotName)
+    }
+
+    private fun mainGroupId(chatterId: String, robotName: String): String {
+        val acpId = "acp-" + robotName.replace(" ", "_").replace("\u3000", "_")
+        return listOf(chatterId, acpId).sorted().joinToString("")
     }
 
     /**
@@ -1825,7 +1992,7 @@ object AcpProxy {
     private fun teamMemberSourceDescriptors(): List<TeamMemberSourceDescriptor> {
         val result = mutableListOf<TeamMemberSourceDescriptor>()
         val robotsByName = globalGroupRobotRegistry.values
-            .filter { it.isEnabled && !it.isOnlySubAgent }
+            .filter { TeamSourceEligibility.isEligible(it) }
             .associateBy { it.name }
         for (chatterId in activeChatterIds.sorted()) {
             for (robot in robotsByName.values.sortedBy { it.name }) {
@@ -1847,9 +2014,37 @@ object AcpProxy {
         return result
     }
 
+    /** Starweave reuses the same Fast Team source contract without requiring MAIN sessions. */
+    private fun starweaveTeamMemberSourceDescriptors(): List<TeamMemberSourceDescriptor> {
+        val ownerId = StarweaveIdentity.ownerId(CmdProxyHome.instanceId())
+        return configuredRobotRegistry.values
+            .filter { TeamSourceEligibility.isEligible(it) }
+            .distinctBy { it.name }
+            .sortedBy { it.name }
+            .map { robot ->
+                val identity = StarweaveIdentity.identity(
+                    CmdProxyHome.instanceId(), robot.name)
+                TeamMemberSourceDescriptor(
+                    ownerId, identity.logicalId, StarweaveIdentity.acpId(robot.name),
+                    robot.name, robot.name, robot.avatar,
+                    ContactRemarkResolver.resolve(null, robot), robot.isOnlyTeamMember
+                )
+            }
+    }
+
+    private fun registerStarweaveTeamSources(robots: Collection<AcpRobotParam>) {
+        robots.filter { TeamSourceEligibility.isEligible(it) }
+            .distinctBy { it.name }
+            .forEach { robot ->
+                val groupId = StarweaveIdentity.identity(
+                    CmdProxyHome.instanceId(), robot.name).logicalId
+                globalGroupRobotRegistry[groupId] = robot
+            }
+    }
+
     private fun registerSharedTeamSources(robots: Collection<AcpRobotParam>) {
         val instanceId = CmdProxyHome.instanceId()
-        robots.filter { it.isEnabled && !it.isOnlySubAgent }
+        robots.filter { TeamSourceEligibility.isEligible(it) }
             .distinctBy { it.name }
             .forEach { robot ->
                 val sourceRobotId = "acp-" + robot.name.replace(" ", "_")
@@ -1866,7 +2061,7 @@ object AcpProxy {
         val instanceId = CmdProxyHome.instanceId()
         val result = mutableListOf<RemoteTeamMemberSourceDescriptor>()
         globalGroupRobotRegistry.values
-            .filter { it.isEnabled && !it.isOnlySubAgent }
+            .filter { TeamSourceEligibility.isEligible(it) }
             .distinctBy { it.name }
             .sortedBy { it.name }
             .forEach { robot ->

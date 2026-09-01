@@ -7,11 +7,21 @@ import static org.junit.Assert.*;
 public class AcpClientIdentityTest {
 
     @Test
+    public void structuredAgentAddressKeepsSurfaceAndOwnerExplicit() {
+        AgentAddress address = new AgentAddress("instance-1", ClientSurface.STARWEAVE,
+                "starweave-instance-1", "Robot One");
+        assertEquals("instance-1/STARWEAVE/starweave-instance-1/Robot One",
+                address.canonical());
+        assertEquals("STARWEAVE", address.toJson().getString("surface"));
+    }
+
+    @Test
     public void mainIdentityKeepsLegacyGroupAsLogicalAndTransportIdentity() {
         AcpClientIdentity identity =
                 AcpClientIdentity.main("group-1", "Robot One", "Robot One");
 
         assertEquals(AcpClientIdentity.Scope.MAIN, identity.getScope());
+        assertEquals(ClientSurface.MOLACHAT, identity.getSurface());
         assertEquals("group-1", identity.getLogicalId());
         assertEquals("group-1", identity.getTransportGroup());
         assertEquals("Robot One", identity.getHistoryNamespace());
@@ -31,11 +41,33 @@ public class AcpClientIdentityTest {
                 "Source Robot");
 
         assertTrue(identity.isTeam());
+        assertEquals(ClientSurface.TEAM, identity.getSurface());
         assertEquals("team-acp-member-1", identity.getLogicalId());
         assertEquals("team-acp-instance-1", identity.getTransportGroup());
         assertEquals("team/team-1/member-1", identity.getHistoryNamespace());
         assertEquals("team-1", identity.getTeamId());
         assertEquals("member-1", identity.getTeamMemberId());
+    }
+
+    @Test
+    public void starweaveIdentityIsMainButUsesIndependentSurfaceAndOwner() {
+        AcpClientIdentity identity = AcpClientIdentity.starweave(
+                "local-group", "local-transport", "starweave/robot-1",
+                "starweave-instance-1", "Robot One");
+
+        assertEquals(AcpClientIdentity.Scope.MAIN, identity.getScope());
+        assertEquals(ClientSurface.STARWEAVE, identity.getSurface());
+        assertEquals("starweave-instance-1", identity.getOwnerId());
+        assertEquals("starweave/robot-1", identity.getHistoryNamespace());
+        assertTrue(identity.isStarweave());
+        assertFalse(identity.isTeam());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void starweaveIdentityRequiresOwner() {
+        AcpClientIdentity.starweave(
+                "local-group", "local-transport", "starweave/robot-1",
+                " ", "Robot One");
     }
 
     @Test(expected = IllegalArgumentException.class)

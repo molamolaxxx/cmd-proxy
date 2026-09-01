@@ -53,6 +53,12 @@ public final class ChannelTalkToMessage extends TalkToMessage {
         return channelDisplayName;
     }
 
+    public String getSenderDisplayName() { return senderDisplayName; }
+    public String getSenderId() { return senderId; }
+    public String getChatType() { return chatType; }
+    public String getChatId() { return chatId; }
+    public String getMessageType() { return messageType; }
+
     public ChannelTurnContext getTurnContext() { return turnContext; }
 
     @Override

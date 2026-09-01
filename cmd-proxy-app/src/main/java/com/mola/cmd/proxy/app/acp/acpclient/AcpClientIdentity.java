@@ -19,9 +19,11 @@ public final class AcpClientIdentity {
     }
 
     private final Scope scope;
+    private final ClientSurface surface;
     private final String logicalId;
     private final String transportGroup;
     private final String historyNamespace;
+    private final String ownerId;
     private final String ownerChatterId;
     private final String teamId;
     private final String teamMemberId;
@@ -29,15 +31,22 @@ public final class AcpClientIdentity {
 
     private AcpClientIdentity(Builder builder) {
         this.scope = Objects.requireNonNull(builder.scope, "scope");
+        this.surface = builder.surface == null
+                ? defaultSurface(builder.scope) : builder.surface;
         this.logicalId = requireText(builder.logicalId, "logicalId");
         this.transportGroup = requireText(builder.transportGroup, "transportGroup");
         this.historyNamespace = requireText(builder.historyNamespace, "historyNamespace");
         this.ownerChatterId = trimToNull(builder.ownerChatterId);
+        String explicitOwnerId = trimToNull(builder.ownerId);
+        this.ownerId = explicitOwnerId == null ? ownerChatterId : explicitOwnerId;
         this.teamId = trimToNull(builder.teamId);
         this.teamMemberId = trimToNull(builder.teamMemberId);
         this.sourceRobotName = trimToNull(builder.sourceRobotName);
 
         if (scope == Scope.TEAM) {
+            if (surface != ClientSurface.TEAM) {
+                throw new IllegalArgumentException("TEAM identity 的 surface 必须为 TEAM");
+            }
             if (teamId == null) {
                 throw new IllegalArgumentException("TEAM identity 的 teamId 不能为空");
             }
@@ -46,6 +55,12 @@ public final class AcpClientIdentity {
             }
         } else if (teamId != null || teamMemberId != null) {
             throw new IllegalArgumentException("非 TEAM identity 不允许携带 teamId/teamMemberId");
+        }
+        if (surface == ClientSurface.STARWEAVE) {
+            if (scope != Scope.MAIN) {
+                throw new IllegalArgumentException("STARWEAVE identity 必须是 MAIN scope");
+            }
+            requireText(ownerId, "STARWEAVE ownerId");
         }
     }
 
@@ -61,9 +76,21 @@ public final class AcpClientIdentity {
                                          String teamId, String teamMemberId,
                                          String sourceRobotName) {
         return builder(Scope.TEAM, logicalId, transportGroup, historyNamespace)
+                .surface(ClientSurface.TEAM)
                 .ownerChatterId(ownerChatterId)
                 .teamId(teamId)
                 .teamMemberId(teamMemberId)
+                .sourceRobotName(sourceRobotName)
+                .build();
+    }
+
+    /** Creates a local Starweave MAIN identity without MolaChat transport. */
+    public static AcpClientIdentity starweave(
+            String logicalId, String transportGroup, String historyNamespace,
+            String ownerId, String sourceRobotName) {
+        return builder(Scope.MAIN, logicalId, transportGroup, historyNamespace)
+                .surface(ClientSurface.STARWEAVE)
+                .ownerId(ownerId)
                 .sourceRobotName(sourceRobotName)
                 .build();
     }
@@ -77,6 +104,10 @@ public final class AcpClientIdentity {
         return scope;
     }
 
+    public ClientSurface getSurface() {
+        return surface;
+    }
+
     public String getLogicalId() {
         return logicalId;
     }
@@ -87,6 +118,10 @@ public final class AcpClientIdentity {
 
     public String getHistoryNamespace() {
         return historyNamespace;
+    }
+
+    public String getOwnerId() {
+        return ownerId;
     }
 
     public String getOwnerChatterId() {
@@ -109,6 +144,16 @@ public final class AcpClientIdentity {
         return scope == Scope.TEAM;
     }
 
+    public boolean isStarweave() {
+        return surface == ClientSurface.STARWEAVE;
+    }
+
+    private static ClientSurface defaultSurface(Scope scope) {
+        if (scope == Scope.TEAM) return ClientSurface.TEAM;
+        if (scope == Scope.MAIN) return ClientSurface.MOLACHAT;
+        return ClientSurface.INTERNAL;
+    }
+
     private static String requireText(String value, String field) {
         String result = trimToNull(value);
         if (result == null) {
@@ -125,9 +170,11 @@ public final class AcpClientIdentity {
 
     public static final class Builder {
         private final Scope scope;
+        private ClientSurface surface;
         private final String logicalId;
         private final String transportGroup;
         private final String historyNamespace;
+        private String ownerId;
         private String ownerChatterId;
         private String teamId;
         private String teamMemberId;
@@ -139,6 +186,16 @@ public final class AcpClientIdentity {
             this.logicalId = logicalId;
             this.transportGroup = transportGroup;
             this.historyNamespace = historyNamespace;
+        }
+
+        public Builder surface(ClientSurface surface) {
+            this.surface = surface;
+            return this;
+        }
+
+        public Builder ownerId(String ownerId) {
+            this.ownerId = ownerId;
+            return this;
         }
 
         public Builder ownerChatterId(String ownerChatterId) {

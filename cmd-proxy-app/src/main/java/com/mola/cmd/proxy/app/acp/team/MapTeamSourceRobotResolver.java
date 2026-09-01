@@ -7,7 +7,8 @@ import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCreateSpec;
 import java.util.Map;
 
 /**
- * 使用普通 groupId -> robot 注册表校验 Team 来源，只读取配置，不创建主 client。
+ * 使用 surface-local sourceGroupId -> robot 注册表校验 Team 来源，
+ * 只读取配置，不要求或创建 MAIN client。
  */
 public final class MapTeamSourceRobotResolver implements TeamSourceRobotResolver {
 
@@ -37,7 +38,7 @@ public final class MapTeamSourceRobotResolver implements TeamSourceRobotResolver
                     TeamErrorCode.SOURCE_ROBOT_MISMATCH,
                     "sourceRobotId does not match sourceGroupId");
         }
-        if (!robot.isEnabled() || robot.isOnlySubAgent()) {
+        if (!TeamSourceEligibility.isEligible(robot)) {
             throw new TeamSourceResolutionException(
                     TeamErrorCode.SOURCE_ROBOT_MISMATCH,
                     "source robot is disabled or restricted to sub-agent use");
@@ -65,7 +66,7 @@ public final class MapTeamSourceRobotResolver implements TeamSourceRobotResolver
     public boolean isGrantActive(String sourceGroupId, String ownerChatterId) {
         if (!TeamSharedSourceIds.isSharedGroup(sourceGroupId)) return true;
         AcpRobotParam robot = groupRobotMap.get(sourceGroupId);
-        return robot != null && robot.isEnabled() && !robot.isOnlySubAgent()
+        return TeamSourceEligibility.isEligible(robot)
                 && robot.isTeamSharedWith(ownerChatterId);
     }
 }

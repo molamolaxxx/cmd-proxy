@@ -9,6 +9,10 @@ import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderType;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager;
 import com.mola.cmd.proxy.app.acp.common.PathResolver;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveRequestDeduplicator;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveResourcePayload;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamApiBridge;
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
 import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
@@ -41,6 +45,7 @@ import java.util.function.BiFunction;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 内嵌轻量 HTTP 服务，提供 ACP 配置管理页面。
@@ -63,8 +68,13 @@ public class ConfigUiServer {
     private final BiFunction<String, Boolean, Boolean> channelPrivateChatUpdater;
     private final Supplier<List<Map<String, Object>>> channelBindingTargetSupplier;
     private final BiConsumer<String, String> refreshChannelCallback;
+    private final AgentResourceBrowser agentResourceBrowser = new AgentResourceBrowser();
+    private final StarweaveRequestDeduplicator starweaveRequests =
+            new StarweaveRequestDeduplicator();
     private HttpServer server;
     private ExecutorService executor;
+    private ExecutorService starweaveStreamExecutor;
+    private final Semaphore starweaveStreamSlots = new Semaphore(16);
 
     // 更新状态
     private final AtomicBoolean updating = new AtomicBoolean(false);
@@ -160,8 +170,15 @@ public class ConfigUiServer {
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
         executor = Executors.newFixedThreadPool(4);
+        starweaveStreamExecutor = Executors.newFixedThreadPool(16, runnable -> {
+            Thread thread = new Thread(runnable, "starweave-session-stream");
+            thread.setDaemon(true);
+            return thread;
+        });
         server.setExecutor(executor);
 
+        // ConfigUI 自带静态资源。仅暴露明确登记的资源，避免把 classpath 变成文件服务。
+        server.createContext("/assets/", this::handleStaticAsset);
         // 静态页面
         server.createContext("/", this::handleIndex);
         // 环境列表（不代理，始终由本进程扫描主机级注册表）
@@ -183,6 +200,58 @@ public class ConfigUiServer {
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
         server.createContext("/api/refresh-channel", proxied(this::handleRefreshChannel));
         server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
+        server.createContext("/api/agent-resources/tree",
+                proxied(this::handleAgentResourceTree));
+        server.createContext("/api/agent-resources/content",
+                proxied(this::handleAgentResourceContent));
+        server.createContext("/api/starweave/v1/sessions",
+                proxied(this::handleStarweaveSessions));
+        server.createContext("/api/starweave/v1/sessions/open",
+                proxied(exchange -> handleStarweaveCommand(exchange, "open")));
+        server.createContext("/api/starweave/v1/sessions/messages",
+                proxied(exchange -> handleStarweaveCommand(exchange, "messages")));
+        server.createContext("/api/starweave/v1/sessions/uploads",
+                proxied(this::handleStarweaveUpload));
+        server.createContext("/api/starweave/v1/sessions/resources",
+                proxied(exchange -> handleStarweaveResources(exchange, "list")));
+        server.createContext("/api/starweave/v1/sessions/resources/preview",
+                proxied(exchange -> handleStarweaveResources(exchange, "preview")));
+        server.createContext("/api/starweave/v1/sessions/resources/download",
+                proxied(exchange -> handleStarweaveResources(exchange, "download")));
+        server.createContext("/api/starweave/v1/sessions/cancel",
+                proxied(exchange -> handleStarweaveCommand(exchange, "cancel")));
+        server.createContext("/api/starweave/v1/sessions/new",
+                proxied(exchange -> handleStarweaveCommand(exchange, "new")));
+        server.createContext("/api/starweave/v1/sessions/restore",
+                proxied(exchange -> handleStarweaveCommand(exchange, "restore")));
+        server.createContext("/api/starweave/v1/sessions/delete",
+                proxied(exchange -> handleStarweaveCommand(exchange, "delete")));
+        server.createContext("/api/starweave/v1/sessions/events",
+                proxied(this::handleStarweaveEvents));
+        server.createContext("/api/starweave/v1/sessions/stream",
+                this::handleStarweaveStream);
+        server.createContext("/api/starweave/v1/teams",
+                proxied(exchange -> handleStarweaveTeams(exchange, "list")));
+        server.createContext("/api/starweave/v1/teams/sources",
+                proxied(exchange -> handleStarweaveTeams(exchange, "sources")));
+        server.createContext("/api/starweave/v1/teams/create",
+                proxied(exchange -> handleStarweaveTeams(exchange, "create")));
+        server.createContext("/api/starweave/v1/teams/delete",
+                proxied(exchange -> handleStarweaveTeams(exchange, "delete")));
+        server.createContext("/api/starweave/v1/teams/member",
+                proxied(exchange -> handleStarweaveTeams(exchange, "member")));
+        server.createContext("/api/starweave/v1/teams/uploads",
+                proxied(exchange -> handleStarweaveTeams(exchange, "upload")));
+        server.createContext("/api/starweave/v1/teams/events",
+                proxied(exchange -> handleStarweaveTeams(exchange, "events")));
+        server.createContext("/api/starweave/v1/teams/stream",
+                this::handleStarweaveTeamStream);
+        server.createContext("/api/starweave/v1/teams/resources",
+                proxied(exchange -> handleStarweaveTeamResources(exchange, "list")));
+        server.createContext("/api/starweave/v1/teams/resources/preview",
+                proxied(exchange -> handleStarweaveTeamResources(exchange, "preview")));
+        server.createContext("/api/starweave/v1/teams/resources/download",
+                proxied(exchange -> handleStarweaveTeamResources(exchange, "download")));
         server.createContext("/api/update-jar", proxied(this::handleUpdateJar));
         server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
         server.createContext("/api/provider-runtime/releases",
@@ -263,6 +332,18 @@ public class ConfigUiServer {
             server.stop(0);
             logger.info("ConfigUI 已停止");
         }
+        if (starweaveStreamExecutor != null) {
+            starweaveStreamExecutor.shutdownNow();
+        }
+        if (executor != null) {
+            executor.shutdownNow();
+        }
+    }
+
+    int getBoundPort() {
+        HttpServer current = server;
+        if (current == null) throw new IllegalStateException("ConfigUI is not running");
+        return current.getAddress().getPort();
     }
 
     // ==================== 多环境：环境列表与跨环境代理 ====================
@@ -415,6 +496,37 @@ public class ConfigUiServer {
         }
     }
 
+    private void handleStaticAsset(HttpExchange exchange) throws IOException {
+        String method = exchange.getRequestMethod();
+        if (!"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String requestPath = exchange.getRequestURI().getPath();
+        if (!"/assets/MaterialIcons-Regular.woff2".equals(requestPath)) {
+            sendResponse(exchange, 404, "text/plain", "Asset not found");
+            return;
+        }
+        try (InputStream input = getClass().getResourceAsStream(
+                "/configui/assets/MaterialIcons-Regular.woff2")) {
+            if (input == null) {
+                sendResponse(exchange, 404, "text/plain", "Asset not found");
+                return;
+            }
+            byte[] bytes = readAllBytes(input);
+            exchange.getResponseHeaders().set("Content-Type", "font/woff2");
+            exchange.getResponseHeaders().set("Cache-Control", "public, max-age=31536000, immutable");
+            exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+            if ("HEAD".equalsIgnoreCase(method)) {
+                exchange.sendResponseHeaders(200, -1);
+            } else {
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            }
+            exchange.getResponseBody().close();
+        }
+    }
+
     private void handleConfig(HttpExchange exchange) throws IOException {
         String method = exchange.getRequestMethod().toUpperCase();
         switch (method) {
@@ -513,6 +625,7 @@ public class ConfigUiServer {
             runtime.put("packageName", status.getPackageName());
             runtime.put("selectedVersion", robot.getString("providerVersion"));
             runtime.put("installedVersions", status.getInstalledVersions());
+            runtime.put("defaultVersion", status.getDefaultVersion());
             robot.put("_providerRuntime", runtime);
         }
     }
@@ -556,6 +669,7 @@ public class ConfigUiServer {
             result.put("provider", status.getProvider().name());
             result.put("packageName", status.getPackageName());
             result.put("installedVersions", status.getInstalledVersions());
+            result.put("defaultVersion", status.getDefaultVersion());
             sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
         } catch (IllegalArgumentException e) {
             sendResponse(exchange, 400, "application/json",
@@ -573,8 +687,9 @@ public class ConfigUiServer {
             AgentProviderType type = AgentProviderType.fromString(
                     request == null ? null : request.getString("provider"));
             NpmProviderRuntimeManager manager = NpmProviderRuntimeManager.getInstance();
-            if (!manager.supports(type)) {
-                throw new IllegalArgumentException("provider is not npm-managed: " + type);
+            if (!manager.supportsManagedInstall(type)) {
+                throw new IllegalArgumentException("provider does not use managed installation: "
+                        + type);
             }
             String version = request == null ? null : request.getString("version");
             Map<String, String> environment = new java.util.LinkedHashMap<>(System.getenv());
@@ -637,6 +752,611 @@ public class ConfigUiServer {
         result.put("statuses", channelStatusSupplier.get());
         result.put("errors", channelErrorSupplier.get());
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleStarweaveSessions(HttpExchange exchange) throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject data = new JSONObject(true);
+            data.put("instanceId", CmdProxyHome.instanceId());
+            data.put("sessions", StarweaveSessionApiBridge.list());
+            sendResponse(exchange, 200, "application/json",
+                    JSON.toJSONString(starweaveEnvelope(null, true, "OK", "", data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, null, e);
+        }
+    }
+
+    private void handleStarweaveEvents(HttpExchange exchange) throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            String groupId = param(exchange, "groupId");
+            String sessionId = param(exchange, "sessionId");
+            long afterSeq = parseLong(param(exchange, "after"), 0L);
+            JSONObject data = StarweaveSessionApiBridge.eventBatch(
+                    groupId, sessionId, afterSeq, null);
+            sendResponse(exchange, 200, "application/json",
+                    JSON.toJSONString(starweaveEnvelope(null, true, "OK", "", data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, null, e);
+        }
+    }
+
+    /**
+     * Bounded SSE entry point. The HttpServer worker only validates and hands the
+     * exchange to the dedicated stream pool, so ordinary ConfigUI requests cannot
+     * be starved by long-lived browsers.
+     */
+    private void handleStarweaveStream(HttpExchange exchange) throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        if (!starweaveStreamSlots.tryAcquire()) {
+            sendResponse(exchange, 429, "application/json",
+                    JSON.toJSONString(apiError("STREAM_LIMIT", "会话流连接数已达上限")));
+            return;
+        }
+        try {
+            starweaveStreamExecutor.execute(() -> {
+                try {
+                    String target = uncheckedParam(exchange, "instance");
+                    if (target != null && !target.isEmpty()
+                            && !target.equals(CmdProxyHome.instanceId())) {
+                        forwardStarweaveStream(exchange, target);
+                    } else {
+                        serveStarweaveStream(exchange);
+                    }
+                } catch (Exception e) {
+                    logger.debug("Starweave 会话流已结束: {}", e.getMessage());
+                    try { exchange.close(); } catch (Exception ignored) { }
+                } finally {
+                    starweaveStreamSlots.release();
+                }
+            });
+        } catch (RejectedExecutionException stopped) {
+            starweaveStreamSlots.release();
+            sendResponse(exchange, 503, "application/json",
+                    JSON.toJSONString(apiError("STREAM_STOPPED", "会话流服务正在停止")));
+        }
+    }
+
+    private void serveStarweaveStream(HttpExchange exchange) throws IOException {
+        String groupId = param(exchange, "groupId");
+        String sessionId = param(exchange, "sessionId");
+        String generationText = param(exchange, "generation");
+        if (groupId == null || groupId.trim().isEmpty()
+                || sessionId == null || sessionId.trim().isEmpty()
+                || generationText == null || generationText.trim().isEmpty()) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_REQUEST",
+                            "groupId、sessionId、generation 均不能为空")));
+            return;
+        }
+        long generation = parseLong(generationText, -1L);
+        if (generation < 1L) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_GENERATION", "generation 必须为正整数")));
+            return;
+        }
+        long after = parseLong(param(exchange, "after"), 0L);
+        String lastEventId = exchange.getRequestHeaders().getFirst("Last-Event-ID");
+        if (lastEventId != null && !lastEventId.trim().isEmpty()) {
+            after = Math.max(after, parseLong(lastEventId, after));
+        }
+
+        // Validate ownership/current index before committing streaming headers.
+        StarweaveSessionApiBridge.eventBatch(groupId, sessionId, after, generation);
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+        exchange.getResponseHeaders().set("Cache-Control", "no-cache, no-transform");
+        exchange.getResponseHeaders().set("Connection", "keep-alive");
+        exchange.getResponseHeaders().set("X-Accel-Buffering", "no");
+        exchange.sendResponseHeaders(200, 0);
+
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(25);
+        try (OutputStream output = exchange.getResponseBody()) {
+            writeSseComment(output, "starweave stream ready");
+            while (System.currentTimeMillis() < deadline
+                    && !Thread.currentThread().isInterrupted()) {
+                JSONObject batch = StarweaveSessionApiBridge.awaitEventBatch(
+                        groupId, sessionId, after, generation, 10_000L);
+                if (batch.getBooleanValue("resyncRequired")) {
+                    JSONObject payload = new JSONObject(true);
+                    payload.put("firstAvailableSeq", batch.getLongValue("firstAvailableSeq"));
+                    payload.put("latestSeq", batch.getLongValue("latestSeq"));
+                    writeSse(output, null, "RESYNC_REQUIRED", payload.toJSONString());
+                    break;
+                }
+                com.alibaba.fastjson.JSONArray values = batch.getJSONArray("events");
+                if (values == null || values.isEmpty()) {
+                    writeSseComment(output, "heartbeat");
+                    continue;
+                }
+                for (int i = 0; i < values.size(); i++) {
+                    JSONObject event = values.getJSONObject(i);
+                    after = Math.max(after, event.getLongValue("eventSeq"));
+                    writeSse(output, Long.toString(event.getLongValue("eventSeq")),
+                            "starweave", event.toJSONString());
+                }
+            }
+        }
+    }
+
+    private void forwardStarweaveStream(HttpExchange exchange, String instanceId)
+            throws IOException {
+        InstanceRegistry.InstanceInfo target = null;
+        for (InstanceRegistry.InstanceInfo info : InstanceRegistry.listAll()) {
+            if (instanceId.equals(info.instanceId)) {
+                target = info;
+                break;
+            }
+        }
+        if (target == null || target.configUiPort <= 0) {
+            sendResponse(exchange, 404, "application/json",
+                    JSON.toJSONString(apiError("INSTANCE_NOT_FOUND", "目标环境不存在或未开启配置页")));
+            return;
+        }
+        String query = stripInstanceParam(exchange.getRequestURI().getRawQuery());
+        URL url = new URL("http://127.0.0.1:" + target.configUiPort
+                + exchange.getRequestURI().getPath() + (query.isEmpty() ? "" : "?" + query));
+        java.net.HttpURLConnection connection =
+                (java.net.HttpURLConnection) url.openConnection();
+        try {
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(35_000);
+            connection.setRequestProperty(PROXY_HEADER, "1");
+            String lastEventId = exchange.getRequestHeaders().getFirst("Last-Event-ID");
+            if (lastEventId != null) connection.setRequestProperty("Last-Event-ID", lastEventId);
+            int status = connection.getResponseCode();
+            String contentType = connection.getContentType();
+            exchange.getResponseHeaders().set("Content-Type", contentType == null
+                    ? "text/event-stream; charset=utf-8" : contentType);
+            exchange.getResponseHeaders().set("Cache-Control", "no-cache, no-transform");
+            exchange.getResponseHeaders().set("X-Accel-Buffering", "no");
+            exchange.sendResponseHeaders(status, 0);
+            InputStream input = status >= 400
+                    ? connection.getErrorStream() : connection.getInputStream();
+            if (input == null) return;
+            try (InputStream source = input; OutputStream output = exchange.getResponseBody()) {
+                byte[] buffer = new byte[4096];
+                int length;
+                while ((length = source.read(buffer)) >= 0) {
+                    output.write(buffer, 0, length);
+                    output.flush();
+                }
+            }
+        } finally {
+            connection.disconnect();
+            exchange.close();
+        }
+    }
+
+    private static void writeSse(OutputStream output, String id, String event,
+                                 String data) throws IOException {
+        StringBuilder frame = new StringBuilder();
+        if (id != null) frame.append("id: ").append(id).append('\n');
+        if (event != null) frame.append("event: ").append(event).append('\n');
+        for (String line : data.split("\\r?\\n", -1)) {
+            frame.append("data: ").append(line).append('\n');
+        }
+        frame.append('\n');
+        output.write(frame.toString().getBytes(StandardCharsets.UTF_8));
+        output.flush();
+    }
+
+    private static void writeSseComment(OutputStream output, String comment)
+            throws IOException {
+        output.write((": " + comment + "\n\n").getBytes(StandardCharsets.UTF_8));
+        output.flush();
+    }
+
+    private String uncheckedParam(HttpExchange exchange, String key) {
+        try {
+            return param(exchange, key);
+        } catch (IOException impossible) {
+            return null;
+        }
+    }
+
+    private void handleStarweaveCommand(HttpExchange exchange, String action)
+            throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        JSONObject request = null;
+        String requestId = null;
+        try {
+            request = JSON.parseObject(readBody(exchange, 2L * 1024L * 1024L));
+            if (request == null) request = new JSONObject(true);
+            requestId = request.getString("requestId");
+            final JSONObject commandRequest = request;
+            JSONObject data = starweaveRequests.execute(requestId,
+                    action + ":" + request.toJSONString(),
+                    () -> executeStarweaveCommand(action, commandRequest));
+            sendResponse(exchange, 200, "application/json",
+                    JSON.toJSONString(starweaveCommandEnvelope(requestId, data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, requestId, e);
+        }
+    }
+
+    private void handleStarweaveUpload(HttpExchange exchange) throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String requestId = null;
+        try {
+            JSONObject request = JSON.parseObject(readBody(exchange,
+                    28L * 1024L * 1024L));
+            if (request == null) throw new IllegalArgumentException("request body is required");
+            requestId = request.getString("requestId");
+            JSONObject data = StarweaveSessionApiBridge.upload(
+                    request.getString("groupId"), request.getString("sessionId"),
+                    request.getLongValue("generation"), request.getString("fileName"),
+                    request.getString("contentBase64"));
+            sendResponse(exchange, 200, "application/json",
+                    JSON.toJSONString(starweaveEnvelope(
+                            requestId, true, "OK", "", data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, requestId, e);
+        }
+    }
+
+    private void handleStarweaveResources(HttpExchange exchange, String action)
+            throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            String groupId = param(exchange, "groupId");
+            String sessionId = param(exchange, "sessionId");
+            long generation = parseLong(param(exchange, "generation"), -1L);
+            String resourceId = param(exchange, "resourceId");
+            if ("download".equals(action)) {
+                StarweaveResourcePayload resource = StarweaveSessionApiBridge.downloadResource(
+                        groupId, sessionId, generation, resourceId);
+                exchange.getResponseHeaders().set("Content-Type", resource.getContentType());
+                exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+                String encoded = java.net.URLEncoder.encode(
+                        resource.getFileName(), "UTF-8").replace("+", "%20");
+                exchange.getResponseHeaders().set("Content-Disposition",
+                        "attachment; filename*=UTF-8''" + encoded);
+                byte[] bytes = resource.getBytes();
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream output = exchange.getResponseBody()) { output.write(bytes); }
+                return;
+            }
+            JSONObject data = new JSONObject(true);
+            if ("preview".equals(action)) {
+                data.put("resource", StarweaveSessionApiBridge.previewResource(
+                        groupId, sessionId, generation, resourceId));
+            } else {
+                data.put("resources", StarweaveSessionApiBridge.resources(
+                        groupId, sessionId, generation));
+            }
+            sendResponse(exchange, 200, "application/json",
+                    JSON.toJSONString(starweaveEnvelope(null, true, "OK", "", data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, null, e);
+        }
+    }
+
+    private void handleStarweaveTeams(HttpExchange exchange, String action)
+            throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        boolean mutation = "create".equals(action) || "delete".equals(action)
+                || "member".equals(action) || "upload".equals(action);
+        String expectedMethod = mutation ? "POST" : "GET";
+        if (!expectedMethod.equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject data;
+            if ("events".equals(action)) {
+                data = new JSONObject(true);
+                data.put("events", StarweaveTeamApiBridge.events(
+                        parseLong(param(exchange, "after"), 0L),
+                        param(exchange, "teamId"), param(exchange, "teamMemberId")));
+            } else if ("list".equals(action)) {
+                data = StarweaveTeamApiBridge.list();
+            } else if ("sources".equals(action)) {
+                data = StarweaveTeamApiBridge.sources();
+            } else {
+                JSONObject request = JSON.parseObject(readBody(exchange,
+                        "upload".equals(action) ? 28L * 1024L * 1024L : 256L * 1024L));
+                data = "create".equals(action)
+                        ? StarweaveTeamApiBridge.create(request)
+                        : "upload".equals(action)
+                        ? StarweaveTeamApiBridge.upload(request)
+                        : "member".equals(action)
+                        ? StarweaveTeamApiBridge.member(request)
+                        : StarweaveTeamApiBridge.delete(request);
+            }
+            boolean accepted = !data.containsKey("accepted")
+                    || data.getBooleanValue("accepted");
+            sendResponse(exchange, accepted ? 200 : 422, "application/json",
+                    JSON.toJSONString(starweaveEnvelope(null, accepted,
+                            data.getString("code"), data.getString("message"), data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, null, e);
+        }
+    }
+
+    /** Team sessions use the same immediate, bounded SSE delivery as normal sessions. */
+    private void handleStarweaveTeamStream(HttpExchange exchange) throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        if (!starweaveStreamSlots.tryAcquire()) {
+            sendResponse(exchange, 429, "application/json",
+                    JSON.toJSONString(apiError("STREAM_LIMIT", "会话流连接数已达上限")));
+            return;
+        }
+        try {
+            starweaveStreamExecutor.execute(() -> {
+                try {
+                    String target = uncheckedParam(exchange, "instance");
+                    if (target != null && !target.isEmpty()
+                            && !target.equals(CmdProxyHome.instanceId())) {
+                        forwardStarweaveStream(exchange, target);
+                    } else {
+                        serveStarweaveTeamStream(exchange);
+                    }
+                } catch (Exception e) {
+                    logger.debug("Starweave 团队会话流已结束: {}", e.getMessage());
+                    try { exchange.close(); } catch (Exception ignored) { }
+                } finally {
+                    starweaveStreamSlots.release();
+                }
+            });
+        } catch (RejectedExecutionException stopped) {
+            starweaveStreamSlots.release();
+            sendResponse(exchange, 503, "application/json",
+                    JSON.toJSONString(apiError("STREAM_STOPPED", "会话流服务正在停止")));
+        }
+    }
+
+    private void serveStarweaveTeamStream(HttpExchange exchange) throws IOException {
+        String teamId = param(exchange, "teamId");
+        String teamMemberId = param(exchange, "teamMemberId");
+        if (teamId == null || teamId.trim().isEmpty()
+                || teamMemberId == null || teamMemberId.trim().isEmpty()) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_REQUEST",
+                            "teamId、teamMemberId 均不能为空")));
+            return;
+        }
+        long after = parseLong(param(exchange, "after"), 0L);
+        String lastEventId = exchange.getRequestHeaders().getFirst("Last-Event-ID");
+        if (lastEventId != null && !lastEventId.trim().isEmpty()) {
+            after = Math.max(after, parseLong(lastEventId, after));
+        }
+
+        // Validate Team ownership before committing streaming headers.
+        StarweaveTeamApiBridge.events(after, teamId, teamMemberId);
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+        exchange.getResponseHeaders().set("Cache-Control", "no-cache, no-transform");
+        exchange.getResponseHeaders().set("Connection", "keep-alive");
+        exchange.getResponseHeaders().set("X-Accel-Buffering", "no");
+        exchange.sendResponseHeaders(200, 0);
+
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(25);
+        try (OutputStream output = exchange.getResponseBody()) {
+            writeSseComment(output, "starweave team stream ready");
+            while (System.currentTimeMillis() < deadline
+                    && !Thread.currentThread().isInterrupted()) {
+                com.alibaba.fastjson.JSONArray values = StarweaveTeamApiBridge.awaitEvents(
+                        after, teamId, teamMemberId, 10_000L);
+                if (values.isEmpty()) {
+                    writeSseComment(output, "heartbeat");
+                    continue;
+                }
+                for (int i = 0; i < values.size(); i++) {
+                    JSONObject event = values.getJSONObject(i);
+                    after = Math.max(after, event.getLongValue("eventSeq"));
+                    writeSse(output, Long.toString(event.getLongValue("eventSeq")),
+                            "starweave-team", event.toJSONString());
+                }
+            }
+        }
+    }
+
+    private void handleStarweaveTeamResources(HttpExchange exchange, String action)
+            throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            JSONObject request = new JSONObject(true);
+            request.put("requestId", UUID.randomUUID().toString());
+            request.put("teamId", param(exchange, "teamId"));
+            request.put("teamMemberId", param(exchange, "teamMemberId"));
+            request.put("acpClientId", param(exchange, "acpClientId"));
+            request.put("sessionId", param(exchange, "sessionId"));
+            request.put("resourceId", param(exchange, "resourceId"));
+            if ("download".equals(action)) {
+                com.mola.cmd.proxy.app.acp.team.TeamResourcePayload resource =
+                        StarweaveTeamApiBridge.downloadResource(request);
+                exchange.getResponseHeaders().set("Content-Type", resource.getContentType());
+                exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+                String encoded = java.net.URLEncoder.encode(
+                        resource.getFileName(), "UTF-8").replace("+", "%20");
+                exchange.getResponseHeaders().set("Content-Disposition",
+                        "attachment; filename*=UTF-8''" + encoded);
+                byte[] bytes = resource.getBytes();
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream output = exchange.getResponseBody()) { output.write(bytes); }
+                return;
+            }
+            JSONObject data = StarweaveTeamApiBridge.resources(
+                    request, "preview".equals(action));
+            boolean accepted = data.getBooleanValue("accepted");
+            sendResponse(exchange, accepted ? 200 : 422, "application/json",
+                    JSON.toJSONString(starweaveEnvelope(null, accepted,
+                            data.getString("code"), data.getString("message"), data)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, null, e);
+        }
+    }
+
+    private JSONObject executeStarweaveCommand(String action, JSONObject request)
+            throws Exception {
+            JSONObject data;
+            switch (action) {
+                case "open":
+                    data = StarweaveSessionApiBridge.open(request.getString("robotName"));
+                    break;
+                case "messages":
+                    com.alibaba.fastjson.JSONArray uploadValues =
+                            request.getJSONArray("uploadIds");
+                    data = StarweaveSessionApiBridge.send(
+                            request.getString("groupId"), request.getString("message"),
+                            request.getString("expectedSessionId"),
+                            request.getLongValue("expectedGeneration"),
+                            request.getString("busyPolicy"), uploadValues == null
+                                    ? java.util.Collections.emptyList()
+                                    : uploadValues.toJavaList(String.class));
+                    break;
+                case "cancel":
+                    data = StarweaveSessionApiBridge.cancel(
+                            request.getString("groupId"),
+                            request.getString("expectedSessionId"),
+                            request.getLongValue("expectedGeneration"));
+                    break;
+                case "new":
+                    data = StarweaveSessionApiBridge.newSession(
+                            request.getString("groupId"),
+                            request.getString("expectedSessionId"),
+                            request.getLongValue("expectedGeneration"));
+                    break;
+                case "restore":
+                    data = StarweaveSessionApiBridge.restore(
+                            request.getString("groupId"),
+                            request.getString("targetSessionId"),
+                            request.getString("expectedSessionId"),
+                            request.getLongValue("expectedGeneration"));
+                    break;
+                case "delete":
+                    data = StarweaveSessionApiBridge.delete(
+                            request.getString("groupId"),
+                            request.getString("expectedSessionId"),
+                            request.getLongValue("expectedGeneration"));
+                    break;
+                default:
+                    throw new IllegalArgumentException("unsupported action: " + action);
+            }
+            return data;
+    }
+
+    private boolean allowStarweaveOrigin(HttpExchange exchange) throws IOException {
+        String fetchSite = exchange.getRequestHeaders().getFirst("Sec-Fetch-Site");
+        if ("cross-site".equalsIgnoreCase(fetchSite)) {
+            sendResponse(exchange, 403, "application/json",
+                    JSON.toJSONString(apiError("ORIGIN_REJECTED", "不允许跨站访问会话接口")));
+            return false;
+        }
+        String origin = exchange.getRequestHeaders().getFirst("Origin");
+        if (origin == null || origin.trim().isEmpty()) return true;
+        String host = exchange.getRequestHeaders().getFirst("Host");
+        try {
+            java.net.URI uri = java.net.URI.create(origin);
+            String originAuthority = uri.getRawAuthority();
+            if (("http".equalsIgnoreCase(uri.getScheme())
+                    || "https".equalsIgnoreCase(uri.getScheme()))
+                    && originAuthority != null && host != null
+                    && originAuthority.equalsIgnoreCase(host.trim())) return true;
+        } catch (RuntimeException ignored) { }
+        sendResponse(exchange, 403, "application/json",
+                JSON.toJSONString(apiError("ORIGIN_REJECTED", "会话接口仅接受同源请求")));
+        return false;
+    }
+
+    private JSONObject starweaveEnvelope(String requestId, boolean accepted,
+                                         String code, String message,
+                                         Object data) {
+        JSONObject result = new JSONObject(true);
+        result.put("schemaVersion", 1);
+        result.put("requestId", requestId == null || requestId.trim().isEmpty()
+                ? UUID.randomUUID().toString() : requestId);
+        result.put("accepted", accepted);
+        result.put("code", code);
+        result.put("message", message == null ? "" : message);
+        result.put("data", data);
+        return result;
+    }
+
+    JSONObject starweaveCommandEnvelope(String requestId, JSONObject data) {
+        boolean accepted = !data.containsKey("accepted")
+                || data.getBooleanValue("accepted");
+        String code = data.getString("code");
+        String message = data.getString("message");
+        return starweaveEnvelope(requestId, accepted,
+                code == null ? (accepted ? "OK" : "REJECTED_STATE") : code,
+                message == null ? "" : message, data);
+    }
+
+    private void sendStarweaveError(HttpExchange exchange, String requestId,
+                                    Exception error) throws IOException {
+        String message = error.getMessage() == null
+                ? error.getClass().getSimpleName() : error.getMessage();
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        String code;
+        if (message.startsWith("SESSION_STALE")) code = "SESSION_STALE";
+        else if (lower.startsWith("robot not found")) code = "ROBOT_NOT_FOUND";
+        else if (lower.startsWith("robot is disabled")) code = "ROBOT_DISABLED";
+        else if (lower.contains("cannot create a main session")) code = "ROBOT_NOT_MAIN_CAPABLE";
+        else if (lower.startsWith("session not found")) code = "SESSION_NOT_FOUND";
+        else if (lower.contains("not ready")) code = "STATE_NOT_READY";
+        else if (lower.contains("busy session")) code = "ALREADY_BUSY";
+        else if (lower.contains("restore") && lower.contains("not support"))
+            code = "PROVIDER_RESTORE_UNSUPPORTED";
+        else if (lower.contains("upload not found") || lower.contains("upload has expired"))
+            code = "UPLOAD_NOT_FOUND";
+        else if (lower.contains("file size") || lower.contains("file too large"))
+            code = "FILE_TOO_LARGE";
+        else if (lower.contains("resource not found") || lower.contains("outside workspace"))
+            code = "PATH_OUTSIDE_WORKSPACE";
+        else if (lower.contains("service is not running")) code = "SERVICE_UNAVAILABLE";
+        else if (error instanceof IllegalArgumentException) code = "INVALID_REQUEST";
+        else code = "INTERNAL_ERROR";
+        int status = "SESSION_STALE".equals(code) || "STATE_NOT_READY".equals(code)
+                || "ALREADY_BUSY".equals(code) ? 409
+                : "ROBOT_NOT_FOUND".equals(code) || "SESSION_NOT_FOUND".equals(code)
+                || "UPLOAD_NOT_FOUND".equals(code) ? 404
+                : "FILE_TOO_LARGE".equals(code) ? 413
+                : "SERVICE_UNAVAILABLE".equals(code) ? 503
+                : "INTERNAL_ERROR".equals(code) ? 500 : 400;
+        sendResponse(exchange, status, "application/json",
+                JSON.toJSONString(starweaveEnvelope(
+                        requestId, false, code, message, null)));
+    }
+
+    private static long parseLong(String value, long defaultValue) {
+        if (value == null || value.trim().isEmpty()) return defaultValue;
+        try { return Long.parseLong(value.trim()); }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid long value: " + value);
+        }
     }
 
     private void handleTeamSharingStatus(HttpExchange exchange) throws IOException {
@@ -725,6 +1445,7 @@ public class ConfigUiServer {
         }
         JSONObject result = new JSONObject();
         result.put("instanceId", CmdProxyHome.instanceId());
+        result.put("sessions", StarweaveSessionApiBridge.list());
         try {
             List<Map<String, Object>> teams = channelBindingTargetSupplier.get();
             result.put("teams", teams == null ? java.util.Collections.emptyList() : teams);
@@ -850,6 +1571,68 @@ public class ConfigUiServer {
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
+    private void handleAgentResourceTree(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            AcpRobotParam robot = findConfiguredRobot(param(exchange, "robot"));
+            JSONObject result = agentResourceBrowser.tree(robot, param(exchange, "kind"));
+            sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_RESOURCE_REQUEST", e.getMessage())));
+        } catch (Exception e) {
+            logger.warn("读取智能体资源树失败", e);
+            sendResponse(exchange, 500, "application/json",
+                    JSON.toJSONString(apiError("RESOURCE_TREE_FAILED", e.getMessage())));
+        }
+    }
+
+    private void handleAgentResourceContent(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            AcpRobotParam robot = findConfiguredRobot(param(exchange, "robot"));
+            JSONObject result = agentResourceBrowser.content(robot,
+                    param(exchange, "kind"), param(exchange, "resource"));
+            int status = result.getBooleanValue("ok") ? 200 : 422;
+            sendResponse(exchange, status, "application/json", JSON.toJSONString(result));
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_RESOURCE_REQUEST", e.getMessage())));
+        } catch (Exception e) {
+            logger.warn("读取智能体资源内容失败", e);
+            sendResponse(exchange, 500, "application/json",
+                    JSON.toJSONString(apiError("RESOURCE_READ_FAILED", e.getMessage())));
+        }
+    }
+
+    private AcpRobotParam findConfiguredRobot(String robotName) throws IOException {
+        if (robotName == null || robotName.trim().isEmpty()) {
+            throw new IllegalArgumentException("robot is required");
+        }
+        Path configPath = Paths.get(CONFIG_PATH);
+        if (!Files.isRegularFile(configPath)) {
+            throw new IllegalArgumentException("agent configuration does not exist");
+        }
+        JSONObject config = JSON.parseObject(new String(
+                Files.readAllBytes(configPath), StandardCharsets.UTF_8));
+        com.alibaba.fastjson.JSONArray robots = config.getJSONArray("robots");
+        if (robots != null) {
+            for (int i = 0; i < robots.size(); i++) {
+                JSONObject item = robots.getJSONObject(i);
+                if (item != null && robotName.equals(item.getString("name"))) {
+                    return item.toJavaObject(AcpRobotParam.class);
+                }
+            }
+        }
+        throw new IllegalArgumentException("agent not found: " + robotName);
+    }
+
     private List<JSONObject> directoryEntries(File[] directories) {
         List<JSONObject> result = new ArrayList<>();
         if (directories == null) {
@@ -878,6 +1661,27 @@ public class ConfigUiServer {
     private String readBody(HttpExchange exchange) throws IOException {
         try (InputStream is = exchange.getRequestBody()) {
             return new String(readAllBytes(is), StandardCharsets.UTF_8);
+        }
+    }
+
+    private String readBody(HttpExchange exchange, long maxBytes) throws IOException {
+        String contentLength = exchange.getRequestHeaders().getFirst("Content-Length");
+        if (contentLength != null && parseLong(contentLength, -1L) > maxBytes) {
+            throw new IllegalArgumentException("request body is too large");
+        }
+        try (InputStream input = exchange.getRequestBody();
+             ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+            byte[] chunk = new byte[8192];
+            long total = 0L;
+            int length;
+            while ((length = input.read(chunk)) >= 0) {
+                total += length;
+                if (total > maxBytes) {
+                    throw new IllegalArgumentException("request body is too large");
+                }
+                buffer.write(chunk, 0, length);
+            }
+            return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 

@@ -76,6 +76,14 @@ public interface AgentProvider {
     String[] getArgs();
 
     /**
+     * Resolve arguments for the current Robot after launch preparation.
+     * Providers whose version is encoded in the command line can override this method.
+     */
+    default String[] getArgs(AcpRobotParam robotParam, Map<String, String> environment) {
+        return getArgs();
+    }
+
+    /**
      * 是否提供备用启动命令。主命令启动或初始化失败时，客户端会自动尝试备用命令。
      */
     default boolean hasFallbackCommand() {
@@ -169,6 +177,19 @@ public interface AgentProvider {
      */
     default String getSkillsRelativePath() {
         return ".kiro/skills";
+    }
+
+    /**
+     * 返回该 Provider 会识别的 Skill 根目录，按用户级、工作区级顺序排列。
+     * ConfigUI 的 Skill 查看器与运行时使用同一份 Provider 路径约定，避免在
+     * 页面层复制不同 Agent 的目录规则。
+     */
+    default List<Path> getSkillPaths(String workspacePath, AcpRobotParam robotParam) {
+        List<Path> paths = new ArrayList<>();
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            paths.add(Paths.get(workspacePath, getSkillsRelativePath()));
+        }
+        return paths;
     }
 
     /**

@@ -55,6 +55,16 @@ public class KiroCliAgentProvider implements AgentProvider {
     }
 
     @Override
+    public List<Path> getSkillPaths(String workspacePath, AcpRobotParam robotParam) {
+        List<Path> paths = new ArrayList<>();
+        paths.add(Paths.get(HOME, ".kiro", "skills"));
+        if (workspacePath != null && !workspacePath.trim().isEmpty()) {
+            paths.add(Paths.get(workspacePath, ".kiro", "skills"));
+        }
+        return paths;
+    }
+
+    @Override
     public String getName() {
         return "kiro-cli";
     }

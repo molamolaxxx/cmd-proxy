@@ -113,6 +113,35 @@ public final class ChannelTalkToBridge {
                     localAttachments);
             TalkToDispatcher.InboundDeliveryResult result = deliverInbound(
                     config, target, client, message);
+            if (result.getStatus() != TalkToDispatcher.InboundDeliveryResult.Status.REJECTED
+                    && client.getClientIdentity().isStarweave()) {
+                try {
+                    com.alibaba.fastjson.JSONObject metadata =
+                            new com.alibaba.fastjson.JSONObject(true);
+                    metadata.put("channelId", message.getChannelDisplayName());
+                    metadata.put("senderDisplayName", message.getSenderDisplayName());
+                    metadata.put("senderId", message.getSenderId());
+                    metadata.put("chatType", message.getChatType());
+                    metadata.put("chatId", message.getChatId());
+                    metadata.put("messageType", message.getMessageType());
+                    com.alibaba.fastjson.JSONArray attachments =
+                            new com.alibaba.fastjson.JSONArray();
+                    for (String path : message.getLocalAttachments()) {
+                        com.alibaba.fastjson.JSONObject attachment =
+                                new com.alibaba.fastjson.JSONObject(true);
+                        attachment.put("fileName", java.nio.file.Paths.get(path)
+                                .getFileName().toString());
+                        attachments.add(attachment);
+                    }
+                    metadata.put("attachments", attachments);
+                    com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge
+                            .publishInbound(target.getRoutingKey(), client.getSessionId(),
+                                    message.getContent(), "CHANNEL", metadata);
+                } catch (RuntimeException projectionError) {
+                    logger.warn("Starweave channel event projection failed: groupId={}",
+                            target.getRoutingKey(), projectionError);
+                }
+            }
             if (result.getStatus() == TalkToDispatcher.InboundDeliveryResult.Status.REJECTED) {
                 replyFailureAsync(replyTarget, "当前处理队列已满，请稍后重试。");
             }
