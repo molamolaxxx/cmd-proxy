@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.team;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
@@ -80,6 +81,41 @@ public class TeamMemberCommandTest {
         assertTrue(fixture.current.get().cancelled);
         assertTrue(json(sessions).getAsJsonArray("sessions").isEmpty());
         assertEquals("true", cancel.get("accepted"));
+        fixture.manager.close();
+    }
+
+    @Test
+    public void historyRestoresBusinessCardsAndSuppressesTheirGenericTools()
+            throws Exception {
+        Fixture fixture = fixture();
+        JsonObject talkTo = new JsonObject();
+        talkTo.addProperty("targetTeamMemberId", "member-2");
+        talkTo.addProperty("content", "hello");
+        talkTo.addProperty("delivery", "DELIVERED");
+        fixture.current.get().getHistoryManager().addEventMessage(
+                "TALK_TO_SEND", talkTo);
+        JsonObject input = new JsonObject();
+        input.addProperty("target", "member-2");
+        input.addProperty("content", "hello");
+        fixture.current.get().getHistoryManager().addToolMessage(
+                "tool-talk", "mcp__cmd-proxy-runtime__talk_to",
+                "completed", input, new JsonObject());
+        JsonObject compaction = new JsonObject();
+        compaction.addProperty("provider", "codex");
+        fixture.current.get().getHistoryManager().addEventMessage(
+                "COMPACTION_EVENT", compaction);
+
+        Map<String, String> result = fixture.handler.handleGetSessionHistory(
+                "rpc-history", one(basePayload()));
+
+        JsonArray messages = json(result).getAsJsonArray("messages");
+        assertEquals(2, messages.size());
+        assertEquals("TALK_TO_SEND", messages.get(0).getAsJsonObject()
+                .get("eventType").getAsString());
+        assertEquals("COMPACTION_EVENT", messages.get(1).getAsJsonObject()
+                .get("eventType").getAsString());
+        assertEquals("TEAM_EVENT", messages.get(1).getAsJsonObject()
+                .get("kind").getAsString());
         fixture.manager.close();
     }
 

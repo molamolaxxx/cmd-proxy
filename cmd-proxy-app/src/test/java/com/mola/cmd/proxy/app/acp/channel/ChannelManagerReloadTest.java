@@ -105,6 +105,21 @@ public class ChannelManagerReloadTest {
         manager.close();
     }
 
+    @Test
+    public void automaticTeamBindingDoesNotRequireFixedMember() {
+        RecordingFactory factory = new RecordingFactory();
+        ChannelConfig automatic = config("channel-a", "bot-a");
+        automatic.getBinding().setTeamMemberSelection(ChannelBinding.MEMBER_SELECTION_AFFINITY);
+        automatic.getBinding().setTeamMemberId(null);
+        ChannelManager manager = manager(factory, automatic);
+
+        manager.start();
+
+        assertEquals(ChannelStatus.CONNECTED, manager.getStatuses().get("channel-a"));
+        assertFalse(manager.getErrors().containsKey("channel-a"));
+        manager.close();
+    }
+
     private static ChannelManager manager(RecordingFactory factory, ChannelConfig... configs) {
         TalkToDispatcher dispatcher = new TalkToDispatcher(Collections.emptyMap(),
                 AcpClientRegistry.getInstance(), Collections.emptyMap());

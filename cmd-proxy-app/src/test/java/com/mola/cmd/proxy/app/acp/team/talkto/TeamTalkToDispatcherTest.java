@@ -4,6 +4,7 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
@@ -50,7 +51,8 @@ public class TeamTalkToDispatcherTest {
         TeamRuntime runtime = new TeamRuntime(creating.transitionWithMembers(
                 TeamState.READY, Collections.singletonList(local), null, 101L));
         TeamClientRegistry registry = new TeamClientRegistry();
-        registry.register("team-1", "member-1", client("member-1"));
+        TestClient localClient = client("member-1");
+        registry.register("team-1", "member-1", localClient);
         List<TeamEventEnvelope> events = new ArrayList<>();
         TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
                 runtime, registry, events::add);
@@ -67,6 +69,8 @@ public class TeamTalkToDispatcherTest {
         TeamEventEnvelope route = lastEvent(events, TeamEventType.TALK_TO_ROUTE_REQUEST);
         assertNotNull(route);
         assertEquals("member-remote", data(route).get("targetTeamMemberId"));
+        assertEquals("Remote", data(route).get("targetDisplayName"));
+        assertEquals("Display member-1", data(route).get("senderDisplayName"));
         assertEquals("ROUTE_REQUESTED", data(route).get("delivery"));
         Map<String, Object> card = data(events.get(2));
         assertEquals("TEAM_TALK_TO", card.get("cardType"));
@@ -75,6 +79,8 @@ public class TeamTalkToDispatcherTest {
         assertEquals("ROUTE_REQUESTED", card.get("delivery"));
         assertTrue(card.get("content").toString().contains("remote hello"));
         assertTrue(card.get("content").toString().contains("Remote"));
+        assertEquals(TeamEventType.TALK_TO_SEND.name(),
+                onlyEvent(localClient).getEventType());
     }
 
     @Test
@@ -195,7 +201,9 @@ public class TeamTalkToDispatcherTest {
                 types(fixture.events));
         Map<?, ?> send = data(fixture.events.get(0));
         assertEquals("member-1", send.get("senderTeamMemberId"));
+        assertEquals("Display member-1", send.get("senderDisplayName"));
         assertEquals("member-2", send.get("targetTeamMemberId"));
+        assertEquals("Display member-2", send.get("targetDisplayName"));
         assertEquals("DELIVERED", send.get("delivery"));
         Map<String, Object> senderCard = data(fixture.events.get(1));
         assertEquals("TEAM_TALK_TO", senderCard.get("cardType"));
@@ -205,6 +213,10 @@ public class TeamTalkToDispatcherTest {
                 "data-team-member-id=\"member-2\""));
         assertTrue(senderCard.get("content").toString().contains(
                 "路由 target：`member-2`"));
+        assertTrue(senderCard.get("content").toString().contains(
+                "发送 Team 消息给 Display member-2"));
+        assertFalse(senderCard.get("content").toString().contains(
+                "发送 Team 消息给 member-2"));
         assertFalse(senderCard.get("content").toString().contains(
                 "team-acp-member-2"));
         assertFalse(senderCard.get("content").toString().contains(
@@ -212,6 +224,10 @@ public class TeamTalkToDispatcherTest {
         Map<String, Object> receiverCard = data(fixture.events.get(3));
         assertEquals("member-1", receiverCard.get("cardTargetTeamMemberId"));
         assertEquals("RECEIVE", receiverCard.get("direction"));
+        assertEquals(TeamEventType.TALK_TO_SEND.name(),
+                onlyEvent(fixture.sender).getEventType());
+        assertEquals(TeamEventType.TALK_TO_RECEIVE.name(),
+                onlyEvent(fixture.target).getEventType());
     }
 
     @Test
@@ -444,7 +460,7 @@ public class TeamTalkToDispatcherTest {
                 Collections.synchronizedList(new ArrayList<>());
         TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
                 runtime, registry, events::add, clock::get, ttl, dedup);
-        return new Fixture(runtime, registry, dispatcher, target, events);
+        return new Fixture(runtime, registry, dispatcher, sender, target, events);
     }
 
     private static Fixture mixedInboundFixture(boolean busy) {
@@ -467,7 +483,8 @@ public class TeamTalkToDispatcherTest {
         List<TeamEventEnvelope> events = new ArrayList<>();
         TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
                 runtime, registry, events::add);
-        return new Fixture(runtime, registry, dispatcher, targetClient, events);
+        return new Fixture(runtime, registry, dispatcher,
+                targetClient, targetClient, events);
     }
 
     private static void setMemberState(TeamRuntime runtime, String memberId,
@@ -514,6 +531,13 @@ public class TeamTalkToDispatcherTest {
         return null;
     }
 
+    private static ContextMessage onlyEvent(TestClient client) {
+        List<ContextMessage> messages = client.getHistoryManager().getCurrentTurn();
+        assertEquals(1, messages.size());
+        assertEquals(ContextMessage.Role.EVENT, messages.get(0).getRole());
+        return messages.get(0);
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> data(TeamEventEnvelope event) {
         return (Map<String, Object>) event.getData();
@@ -549,15 +573,18 @@ public class TeamTalkToDispatcherTest {
         private final TeamRuntime runtime;
         private final TeamClientRegistry registry;
         private final TeamTalkToDispatcher dispatcher;
+        private final TestClient sender;
         private final TestClient target;
         private final List<TeamEventEnvelope> events;
 
         private Fixture(TeamRuntime runtime, TeamClientRegistry registry,
-                        TeamTalkToDispatcher dispatcher, TestClient target,
+                        TeamTalkToDispatcher dispatcher, TestClient sender,
+                        TestClient target,
                         List<TeamEventEnvelope> events) {
             this.runtime = runtime;
             this.registry = registry;
             this.dispatcher = dispatcher;
+            this.sender = sender;
             this.target = target;
             this.events = events;
         }

@@ -53,6 +53,14 @@ public class CodexAcpProvider implements AgentProvider {
     }
 
     @Override
+    public RuntimeLease prepareRuntimeLaunch(AcpRobotParam robotParam,
+                                             Map<String, String> environment)
+            throws java.io.IOException {
+        return RUNTIME_MANAGER.prepareRuntimeLaunch(
+                AgentProviderType.CODEX_ACP, robotParam, environment);
+    }
+
+    @Override
     public boolean hasFallbackCommand() {
         return true;
     }

@@ -222,6 +222,34 @@ public class ChannelTalkToGatewayTest {
     }
 
     @Test
+    public void scheduledAffinityConversationUsesActualResolvedMemberOwner() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        ChannelConfig config = config(null, "different-default");
+        config.getBinding().setType(ChannelBinding.TYPE_TEAM_MEMBER);
+        config.getBinding().setGroupId(null);
+        config.getBinding().setTeamId("team-1");
+        config.getBinding().setTeamMemberSelection(ChannelBinding.MEMBER_SELECTION_AFFINITY);
+        Map<String, ChannelConfig> configs = Collections.singletonMap("wecom-main", config);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter), configs);
+        String actualOwner = "team:team-1:member-2";
+        ChannelDeliveryContext delivery = new ChannelDeliveryContext(
+                "wecom-main", "group", "chat-42", "user-42", "Mola", actualOwner);
+
+        assertNull(gateway.restoreChannelTurn(delivery, "team:team-1:member-1"));
+        ChannelTurnContext restored = gateway.restoreChannelTurn(delivery, actualOwner);
+        assertNotNull(restored);
+        assertEquals(actualOwner, restored.getOwnerKey());
+        gateway.deliver(new TalkToRequest(restored.getReplyTarget(), "群提醒", 0),
+                "member-2", actualOwner);
+
+        assertEquals("chat-42", adapter.lastChatId);
+        assertTrue(gateway.contactsForGroup(actualOwner).isEmpty());
+        config.getBinding().setTeamId("team-2");
+        assertNull(gateway.restoreChannelTurn(delivery, actualOwner));
+    }
+
+    @Test
     public void concurrentRepliesAreSerializedWithPreciseReplyFirst() throws Exception {
         BlockingAdapter adapter = new BlockingAdapter();
         ChannelTalkToGateway gateway = new ChannelTalkToGateway(

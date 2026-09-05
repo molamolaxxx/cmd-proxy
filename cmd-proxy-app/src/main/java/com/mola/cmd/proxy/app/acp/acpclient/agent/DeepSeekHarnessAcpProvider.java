@@ -89,6 +89,27 @@ public class DeepSeekHarnessAcpProvider implements AgentProvider {
             throws java.io.IOException {
         NPM_RUNTIME_MANAGER.prepareLaunch(
                 AgentProviderType.DEEPSEEK_HARNESS_ACP, robotParam, environment);
+        prepareDshRuntime(robotParam, environment);
+    }
+
+    @Override
+    public RuntimeLease prepareRuntimeLaunch(AcpRobotParam robotParam,
+                                             Map<String, String> environment)
+            throws java.io.IOException {
+        RuntimeLease lease = NPM_RUNTIME_MANAGER.prepareRuntimeLaunch(
+                AgentProviderType.DEEPSEEK_HARNESS_ACP, robotParam, environment);
+        try {
+            prepareDshRuntime(robotParam, environment);
+            return lease;
+        } catch (java.io.IOException | RuntimeException e) {
+            lease.close();
+            throw e;
+        }
+    }
+
+    private void prepareDshRuntime(AcpRobotParam robotParam,
+                                   Map<String, String> environment)
+            throws java.io.IOException {
         String resolvedVersion = environment.get(NpmProviderRuntimeManager.ENV_VERSION);
         Path runtimeHome = NPM_RUNTIME_MANAGER.runtimeHome(
                 AgentProviderType.DEEPSEEK_HARNESS_ACP, resolvedVersion);

@@ -49,6 +49,7 @@ import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToContextInjector
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionManager
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamApiBridge
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamGateway
 import com.mola.cmd.proxy.app.utils.CmdProxyHome
 import com.mola.cmd.proxy.client.provider.CmdReceiver
 import com.mola.cmd.proxy.client.resp.CmdResponseContent
@@ -178,7 +179,7 @@ object AcpProxy {
         }.forEach { globalRobotRegistry.putIfAbsent(it.name, it) }
         globalGroupRobotRegistry.putAll(teamSourceGroupRobotMap)
         registerStarweaveTeamSources(configuredRobots)
-        registerSharedTeamSources(teamSourceGroupRobotMap.values)
+        registerSharedTeamSources(configuredRobots)
 
         // 构建 robotName → groupId 反向索引（取第一个）
         for ((groupId, robot) in groupRobotMap) {
@@ -355,7 +356,7 @@ object AcpProxy {
     /** 注册实例级稳定 transport，并仅在权威状态恢复成功后开放业务命令。 */
     private fun initializeTeamTransport() {
         teamTransportDescriptor = TeamTransportDescriptor.forInstance(
-            CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+            CmdProxyHome.instanceId(), coordinatorTeamMemberSourceDescriptors(),
             remoteTeamMemberSourceDescriptors())
         val sourceResolver = MapTeamSourceRobotResolver(globalGroupRobotRegistry)
         val rpcEventSink = RpcTeamEventSink()
@@ -369,8 +370,12 @@ object AcpProxy {
             override fun tryPublish(
                 event: com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope
             ): Boolean {
-                return if (StarweaveTeamApiBridge.publishIfOwned(event)) true
-                else rpcEventSink.tryPublish(event)
+                val publishedLocally = StarweaveTeamApiBridge.publishIfOwned(event)
+                return if (publishedLocally) {
+                    if (StarweaveTeamApiBridge.requiresCoordinator(event)) {
+                        rpcEventSink.tryPublish(event)
+                    } else true
+                } else rpcEventSink.tryPublish(event)
             }
 
             override fun close() {
@@ -395,10 +400,11 @@ object AcpProxy {
                 onClientCreated.accept(client)
                 try {
                     val teamListener = TeamAcpResponseListener(
-                        runtime, member, eventSink
-                    ) { teamId, memberId, state, error ->
-                        managerHolder.get()?.onMemberState(teamId, memberId, state, error)
-                    }
+                        runtime, member, eventSink,
+                        { teamId, memberId, state, error ->
+                            managerHolder.get()?.onMemberState(teamId, memberId, state, error)
+                        }, client.historyManager
+                    )
                     client.globalListener = teamListener
                     // Listener completion is not a lifecycle boundary: action/follow-up
                     // rounds such as talk_to may complete without the same callback path.
@@ -454,7 +460,9 @@ object AcpProxy {
         managerHolder.set(manager)
         StarweaveTeamApiBridge.install(
             manager, CmdProxyHome.instanceId(),
-            java.util.function.Supplier { starweaveTeamMemberSourceDescriptors() })
+            java.util.function.Supplier { starweaveTeamMemberSourceDescriptors() },
+            StarweaveTeamGateway(CmdProxyHome.instanceId(),
+                teamTransportDescriptor.transportGroup))
         TeamSharingStatusRegistry.setSupplier { teamSharingStatuses() }
         // 恢复流程会异步启动成员，initializer 必须在恢复前就能解析到权威 manager。
         teamManager = manager
@@ -473,7 +481,7 @@ object AcpProxy {
         if (recovered) {
             teamTransportDescriptor =
                 TeamTransportDescriptor.readyForBusiness(
-                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+                    CmdProxyHome.instanceId(), coordinatorTeamMemberSourceDescriptors(),
                     remoteTeamMemberSourceDescriptors())
             teamCommandHandler =
                 TeamCommandHandler(manager, teamTransportDescriptor.transportGroup)
@@ -554,6 +562,14 @@ object AcpProxy {
                     ?: teamUnavailableResult(param.cmdId)
             }
             CmdReceiver.register(
+                TeamTransportProtocol.GET_SESSION_HISTORY_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Get current session history for one Team member"
+            ) { param ->
+                teamCommandHandler?.handleGetSessionHistory(param.cmdId, param.cmdArgs)
+                    ?: teamUnavailableResult(param.cmdId)
+            }
+            CmdReceiver.register(
                 TeamTransportProtocol.RESTORE_SESSION_COMMAND,
                 teamTransportDescriptor.transportGroup,
                 "Restore one Team member session"
@@ -600,6 +616,27 @@ object AcpProxy {
             ) { param ->
                 teamCommandHandler?.handleTalkToDeliver(param.cmdId, param.cmdArgs)
                     ?: teamUnavailableResult(param.cmdId)
+            }
+            CmdReceiver.register(
+                StarweaveTeamGateway.RESULT_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Complete one authenticated Starweave Team coordinator request"
+            ) { param ->
+                StarweaveTeamApiBridge.acceptGatewayResult(param.cmdId, param.cmdArgs)
+            }
+            CmdReceiver.register(
+                StarweaveTeamGateway.EVENT_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Project one owner-validated coordinated Starweave Team event"
+            ) { param ->
+                StarweaveTeamApiBridge.acceptGatewayEvent(param.cmdId, param.cmdArgs)
+            }
+            CmdReceiver.register(
+                StarweaveTeamGateway.READY_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Activate the authenticated Starweave Team coordinator bridge"
+            ) { param ->
+                StarweaveTeamApiBridge.acceptGatewayReady(param.cmdId, param.cmdArgs)
             }
         }
         log.info("Fast Team transport 已注册, instanceId={}, transportGroup={}, commands={}",
@@ -1160,6 +1197,9 @@ object AcpProxy {
                         update
                     )
                 }
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.EVENT -> {
+                    // Team ConfigUI projection only; never replay through ordinary ACP callbacks.
+                }
             }
         }
 
@@ -1660,7 +1700,7 @@ object AcpProxy {
         if (::teamTransportDescriptor.isInitialized) {
             teamTransportDescriptor =
                 TeamTransportDescriptor.forInstance(
-                    CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+                    CmdProxyHome.instanceId(), coordinatorTeamMemberSourceDescriptors(),
                     remoteTeamMemberSourceDescriptors())
             if (::acpSyncRobotsSnapshot.isInitialized) {
                 acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
@@ -1951,7 +1991,7 @@ object AcpProxy {
             val chatterIdsJson = JSON.toJSONString(chatterIds)
             acpSyncRobotsSnapshot.updateOrdinary(robotsJson, chatterIdsJson)
             teamTransportDescriptor = TeamTransportDescriptor.readyForBusiness(
-                CmdProxyHome.instanceId(), teamMemberSourceDescriptors(),
+                CmdProxyHome.instanceId(), coordinatorTeamMemberSourceDescriptors(),
                 remoteTeamMemberSourceDescriptors())
             acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
             if (activeChatterIds.isNotEmpty()) {
@@ -2013,6 +2053,11 @@ object AcpProxy {
         }
         return result
     }
+
+    /** Sources advertised to MolaChat include both MolaChat and Starweave owners. */
+    private fun coordinatorTeamMemberSourceDescriptors(): List<TeamMemberSourceDescriptor> =
+        (teamMemberSourceDescriptors() + starweaveTeamMemberSourceDescriptors())
+            .distinctBy { it.ownerChatterId + "\n" + it.sourceGroupId }
 
     /** Starweave reuses the same Fast Team source contract without requiring MAIN sessions. */
     private fun starweaveTeamMemberSourceDescriptors(): List<TeamMemberSourceDescriptor> {

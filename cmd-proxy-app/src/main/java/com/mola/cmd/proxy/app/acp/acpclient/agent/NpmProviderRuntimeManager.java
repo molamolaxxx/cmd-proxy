@@ -29,6 +29,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -36,17 +37,22 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.ArrayDeque;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Collection;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
+import java.util.stream.Collectors;
 
 /**
  * Versioned runtime store for providers distributed through npm.
@@ -70,9 +76,15 @@ public final class NpmProviderRuntimeManager {
     private static final int MOVE_RETRY_COUNT = 8;
     private static final int MAX_CATALOG_VERSIONS = 100;
     private static final long AUTO_LATEST_INTERVAL_HOURS = 6L;
+    private static final long UNUSED_VERSION_GRACE_MILLIS =
+            TimeUnit.HOURS.toMillis(24L);
+    private static final String RUNTIME_LEASE_DIRECTORY = ".runtime-use";
     private static final NpmProviderRuntimeManager INSTANCE =
             new NpmProviderRuntimeManager();
 
+    private final Path providersRoot;
+    private final long unusedVersionGraceMillis;
+    private final Object runtimeMutationMonitor = new Object();
     private final Map<AgentProviderType, Distribution> distributions =
             new EnumMap<>(AgentProviderType.class);
     private final ConcurrentHashMap<String, Object> installLocks = new ConcurrentHashMap<>();
@@ -88,11 +100,30 @@ public final class NpmProviderRuntimeManager {
                 thread.setDaemon(true);
                 return thread;
             });
+    private final ExecutorService cleanupExecutor =
+            Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "provider-runtime-cleaner");
+                thread.setDaemon(true);
+                return thread;
+            });
     private volatile Map<AgentProviderType, List<Map<String, String>>> autoLatestTargets =
             Collections.emptyMap();
+    private volatile Map<AgentProviderType, Set<String>> configuredVersions =
+            Collections.emptyMap();
+    private volatile Set<AgentProviderType> autoLatestProviders = Collections.emptySet();
+    private final AtomicBoolean cleanupRequested = new AtomicBoolean();
+    private final AtomicBoolean cleanupWorkerScheduled = new AtomicBoolean();
+    private volatile String latestCleanupReason = "unspecified";
     private volatile boolean autoLatestStarted;
 
     private NpmProviderRuntimeManager() {
+        this(CmdProxyHome.resolve("runtimes", "providers"),
+                UNUSED_VERSION_GRACE_MILLIS);
+    }
+
+    NpmProviderRuntimeManager(Path providersRoot, long unusedVersionGraceMillis) {
+        this.providersRoot = providersRoot.toAbsolutePath().normalize();
+        this.unusedVersionGraceMillis = Math.max(0L, unusedVersionGraceMillis);
         register(new Distribution(AgentProviderType.OPENCODE,
                 "opencode", "opencode-ai", "opencode"));
         register(new Distribution(AgentProviderType.CLAUDE_AGENT_ACP,
@@ -122,6 +153,7 @@ public final class NpmProviderRuntimeManager {
      * this method never blocks ACP startup.
      */
     public synchronized void configureAutoLatest(Collection<AcpRobotParam> robots) {
+        updateConfiguredReferences(robots);
         Map<AgentProviderType, List<Map<String, String>>> targets = new EnumMap<>(
                 AgentProviderType.class);
         if (robots != null) {
@@ -149,14 +181,67 @@ public final class NpmProviderRuntimeManager {
                     AUTO_LATEST_INTERVAL_HOURS, AUTO_LATEST_INTERVAL_HOURS, TimeUnit.HOURS);
         }
         autoLatestExecutor.execute(this::updateConfiguredLatestSafely);
+        requestCleanup("configuration-updated");
         logger.info("Provider 自动 latest 后台任务已配置, providers={}",
                 autoLatestTargets.keySet());
     }
 
+    void updateConfiguredReferences(Collection<AcpRobotParam> robots) {
+        Map<AgentProviderType, Set<String>> exactVersions =
+                new EnumMap<>(AgentProviderType.class);
+        Set<AgentProviderType> latestProviders = new HashSet<>();
+        if (robots != null) {
+            for (AcpRobotParam robot : robots) {
+                if (robot == null) continue;
+                AgentProviderType type = AgentProviderType.fromString(
+                        robot.getAgentProvider());
+                if (!supports(type)) continue;
+                String exactVersion = trimToNull(robot.getProviderVersion());
+                if (exactVersion != null && isExactVersion(exactVersion)) {
+                    exactVersions.computeIfAbsent(type, ignored -> new HashSet<>())
+                            .add(exactVersion);
+                } else if (robot.isEnabled() && exactVersion == null) {
+                    latestProviders.add(type);
+                }
+            }
+        }
+        Map<AgentProviderType, Set<String>> immutable =
+                new EnumMap<>(AgentProviderType.class);
+        for (Map.Entry<AgentProviderType, Set<String>> entry : exactVersions.entrySet()) {
+            immutable.put(entry.getKey(), Collections.unmodifiableSet(
+                    new HashSet<>(entry.getValue())));
+        }
+        configuredVersions = Collections.unmodifiableMap(immutable);
+        autoLatestProviders = Collections.unmodifiableSet(
+                new HashSet<>(latestProviders));
+    }
+
     public void prepareLaunch(AgentProviderType type, AcpRobotParam robot,
                               Map<String, String> environment) throws IOException {
-        RuntimeInstall installed = ensureInstalled(type,
+        RuntimeInstall installed = prepareInstalledRuntime(type, robot, environment);
+        applyPreparedRuntime(installed, environment);
+    }
+
+    public AgentProvider.RuntimeLease prepareRuntimeLaunch(
+            AgentProviderType type, AcpRobotParam robot,
+            Map<String, String> environment) throws IOException {
+        RuntimeInstall installed = prepareInstalledRuntime(type, robot, environment);
+        applyPreparedRuntime(installed, environment);
+        synchronized (runtimeMutationMonitor) {
+            return acquireRuntimeLease(installed.home, type, installed.version);
+        }
+    }
+
+    private RuntimeInstall prepareInstalledRuntime(AgentProviderType type,
+                                                   AcpRobotParam robot,
+                                                   Map<String, String> environment)
+            throws IOException {
+        return ensureInstalled(type,
                 robot == null ? null : robot.getProviderVersion(), environment);
+    }
+
+    private void applyPreparedRuntime(RuntimeInstall installed,
+                                      Map<String, String> environment) {
         environment.put(ENV_EXECUTABLE, installed.executable.toString());
         environment.put(ENV_VERSION, installed.version);
         prependPath(environment, installed.executable.getParent().toString());
@@ -262,13 +347,17 @@ public final class NpmProviderRuntimeManager {
 
     private void updateConfiguredLatestSafely() {
         Map<AgentProviderType, List<Map<String, String>>> snapshot = autoLatestTargets;
-        for (Map.Entry<AgentProviderType, List<Map<String, String>>> entry
-                : snapshot.entrySet()) {
-            try {
-                updateLatest(entry.getKey(), entry.getValue());
-            } catch (Exception e) {
-                logger.warn("Provider 自动 latest 更新失败, provider={}", entry.getKey(), e);
+        try {
+            for (Map.Entry<AgentProviderType, List<Map<String, String>>> entry
+                    : snapshot.entrySet()) {
+                try {
+                    updateLatest(entry.getKey(), entry.getValue());
+                } catch (Exception e) {
+                    logger.warn("Provider 自动 latest 更新失败, provider={}", entry.getKey(), e);
+                }
             }
+        } finally {
+            requestCleanup("auto-latest-check-completed");
         }
     }
 
@@ -581,8 +670,270 @@ public final class NpmProviderRuntimeManager {
     }
 
     private Path providerRoot(Distribution distribution) {
-        return CmdProxyHome.resolve("runtimes", "providers", distribution.runtimeKey)
+        return providersRoot.resolve(distribution.runtimeKey)
                 .toAbsolutePath().normalize();
+    }
+
+    AgentProvider.RuntimeLease acquireRuntimeLease(
+            Path runtimeHome, AgentProviderType type, String version) throws IOException {
+        Distribution distribution = requireDistribution(type);
+        String lockKey = distribution.runtimeKey + "@" + version;
+        Object localLock = installLocks.computeIfAbsent(lockKey, ignored -> new Object());
+        synchronized (localLock) {
+            Path lockFile = providerRoot(distribution)
+                    .resolve(".install-" + version + ".lock");
+            try (FileChannel versionChannel = FileChannel.open(lockFile,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                 FileLock ignored = versionChannel.lock()) {
+                return createRuntimeLease(runtimeHome, type, version);
+            } finally {
+                installLocks.remove(lockKey, localLock);
+            }
+        }
+    }
+
+    private AgentProvider.RuntimeLease createRuntimeLease(
+            Path runtimeHome, AgentProviderType type, String version) throws IOException {
+        Path normalizedHome = runtimeHome.toAbsolutePath().normalize();
+        if (!normalizedHome.startsWith(providersRoot)
+                || !Files.isDirectory(normalizedHome)) {
+            throw new IOException("provider runtime home is unavailable: " + normalizedHome);
+        }
+        Path leaseDirectory = normalizedHome.resolve(RUNTIME_LEASE_DIRECTORY);
+        Files.createDirectories(leaseDirectory);
+        Path leaseFile = leaseDirectory.resolve("lease-" + UUID.randomUUID() + ".lock");
+        FileChannel channel = null;
+        FileLock lock = null;
+        try {
+            channel = FileChannel.open(leaseFile, StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE);
+            lock = channel.lock();
+            return new RuntimeLeaseImpl(type, version, leaseDirectory,
+                    leaseFile, channel, lock);
+        } catch (IOException | RuntimeException e) {
+            if (lock != null) {
+                try { lock.release(); } catch (IOException ignored) { }
+            }
+            if (channel != null) {
+                try { channel.close(); } catch (IOException ignored) { }
+            }
+            try { Files.deleteIfExists(leaseFile); } catch (IOException ignored) { }
+            throw e;
+        }
+    }
+
+    private void requestCleanup(String reason) {
+        latestCleanupReason = reason;
+        cleanupRequested.set(true);
+        if (!cleanupWorkerScheduled.compareAndSet(false, true)) return;
+        cleanupExecutor.submit(() -> {
+            try {
+                do {
+                    cleanupRequested.set(false);
+                    try {
+                        cleanupUnusedInstalledVersions();
+                    } catch (Exception e) {
+                        logger.warn("Provider 未使用版本自动清理失败, reason={}",
+                                latestCleanupReason, e);
+                    }
+                } while (cleanupRequested.get());
+            } finally {
+                cleanupWorkerScheduled.set(false);
+                if (cleanupRequested.get()) requestCleanup(latestCleanupReason);
+            }
+        });
+    }
+
+    void cleanupUnusedInstalledVersions() {
+        List<Path> deletingDirectories = new ArrayList<>();
+        synchronized (runtimeMutationMonitor) {
+            for (Distribution distribution : distributions.values()) {
+                Path root = providerRoot(distribution);
+                if (!Files.isDirectory(root)) continue;
+                deletingDirectories.addAll(listAbandonedDeletes(root));
+                Set<String> protectedVersions = protectedVersions(distribution);
+                List<Path> versionDirectories = listVersionDirectories(root);
+                for (Path versionDirectory : versionDirectories) {
+                    String version = versionDirectory.getFileName().toString();
+                    if (protectedVersions.contains(version)
+                            || isWithinUnusedGracePeriod(versionDirectory)) {
+                        continue;
+                    }
+                    Path deleting = detachUnusedVersion(
+                            distribution, versionDirectory, version);
+                    if (deleting != null) {
+                        deletingDirectories.add(deleting);
+                    }
+                }
+            }
+        }
+        for (Path deleting : deletingDirectories) {
+            if (deleteTreeWithRetry(deleting)) {
+                logger.info("Provider 未使用版本已清理, path={}", deleting);
+            }
+        }
+    }
+
+    private Set<String> protectedVersions(Distribution distribution) {
+        Set<String> result = new HashSet<>();
+        Set<String> configured = configuredVersions.get(distribution.type);
+        if (configured != null) result.addAll(configured);
+        if (autoLatestProviders.contains(distribution.type)) {
+            String defaultVersion = readDefaultVersion(distribution);
+            if (defaultVersion != null) result.add(defaultVersion);
+        }
+        return result;
+    }
+
+    private String readDefaultVersion(Distribution distribution) {
+        Path marker = providerRoot(distribution).resolve("default-version.txt");
+        if (!Files.isRegularFile(marker)) return null;
+        try {
+            String value = new String(Files.readAllBytes(marker),
+                    StandardCharsets.UTF_8).trim();
+            return isExactVersion(value) ? value : null;
+        } catch (IOException e) {
+            logger.warn("Provider 默认版本标记读取失败, provider={}, path={}",
+                    distribution.type, marker, e);
+            return null;
+        }
+    }
+
+    private List<Path> listVersionDirectories(Path root) {
+        List<Path> result = new ArrayList<>();
+        try (DirectoryStream<Path> children = Files.newDirectoryStream(root)) {
+            for (Path child : children) {
+                if (Files.isDirectory(child)
+                        && isExactVersion(child.getFileName().toString())) {
+                    result.add(child);
+                }
+            }
+        } catch (IOException e) {
+            logger.warn("Provider 版本目录扫描失败, path={}", root, e);
+        }
+        return result;
+    }
+
+    private boolean isWithinUnusedGracePeriod(Path versionDirectory) {
+        if (unusedVersionGraceMillis <= 0L) return false;
+        try {
+            long age = System.currentTimeMillis()
+                    - Files.getLastModifiedTime(versionDirectory).toMillis();
+            return age < unusedVersionGraceMillis;
+        } catch (IOException e) {
+            logger.warn("Provider 版本时间读取失败，保守跳过清理, path={}",
+                    versionDirectory, e);
+            return true;
+        }
+    }
+
+    private Path detachUnusedVersion(Distribution distribution,
+                                     Path versionDirectory, String version) {
+        Object localLock = installLocks.computeIfAbsent(
+                distribution.runtimeKey + "@" + version, ignored -> new Object());
+        synchronized (localLock) {
+            Path lockFile = providerRoot(distribution)
+                    .resolve(".install-" + version + ".lock");
+            try (FileChannel channel = FileChannel.open(lockFile,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+                FileLock installLock;
+                try {
+                    installLock = channel.tryLock();
+                } catch (OverlappingFileLockException e) {
+                    return null;
+                }
+                if (installLock == null) return null;
+                try (FileLock ignored = installLock) {
+                    if (!Files.isDirectory(versionDirectory)
+                            || protectedVersions(distribution).contains(version)
+                            || isWithinUnusedGracePeriod(versionDirectory)
+                            || hasActiveRuntimeLease(versionDirectory)) {
+                        return null;
+                    }
+                    Path deleting = versionDirectory.resolveSibling(
+                            ".deleting-" + version + "-" + UUID.randomUUID());
+                    moveDirectoryWithRetry(versionDirectory, deleting);
+                    removeDefaultMarkerIfMatches(distribution, version);
+                    return deleting;
+                }
+            } catch (IOException e) {
+                logger.warn("Provider 未使用版本暂时无法隔离，等待下次清理, provider={}, version={}",
+                        distribution.type, version, e);
+                return null;
+            } finally {
+                installLocks.remove(distribution.runtimeKey + "@" + version, localLock);
+            }
+        }
+    }
+
+    private boolean hasActiveRuntimeLease(Path versionDirectory) {
+        Path leaseDirectory = versionDirectory.resolve(RUNTIME_LEASE_DIRECTORY);
+        if (!Files.isDirectory(leaseDirectory)) return false;
+        try (DirectoryStream<Path> leases = Files.newDirectoryStream(
+                leaseDirectory, "*.lock")) {
+            for (Path leaseFile : leases) {
+                boolean staleLease = false;
+                try (FileChannel channel = FileChannel.open(leaseFile,
+                        StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                    FileLock leaseLock;
+                    try {
+                        leaseLock = channel.tryLock();
+                    } catch (OverlappingFileLockException e) {
+                        return true;
+                    }
+                    if (leaseLock == null) return true;
+                    try (FileLock ignored = leaseLock) {
+                        staleLease = true;
+                    }
+                } catch (AccessDeniedException e) {
+                    return true;
+                } catch (IOException e) {
+                    logger.warn("Provider runtime 租约检查失败，保守跳过清理, path={}",
+                            leaseFile, e);
+                    return true;
+                }
+                if (staleLease) {
+                    try {
+                        Files.deleteIfExists(leaseFile);
+                    } catch (IOException e) {
+                        logger.warn("Provider stale runtime 租约删除失败，保守跳过清理, path={}",
+                                leaseFile, e);
+                        return true;
+                    }
+                }
+            }
+            try { Files.deleteIfExists(leaseDirectory); } catch (IOException ignored) { }
+            return false;
+        } catch (IOException e) {
+            logger.warn("Provider runtime 租约目录读取失败，保守跳过清理, path={}",
+                    leaseDirectory, e);
+            return true;
+        }
+    }
+
+    private void removeDefaultMarkerIfMatches(Distribution distribution,
+                                              String deletedVersion) {
+        if (!deletedVersion.equals(readDefaultVersion(distribution))) return;
+        Path marker = providerRoot(distribution).resolve("default-version.txt");
+        try {
+            Files.deleteIfExists(marker);
+        } catch (IOException e) {
+            logger.warn("Provider 已删除版本的默认标记清理失败, provider={}, version={}",
+                    distribution.type, deletedVersion, e);
+        }
+    }
+
+    private List<Path> listAbandonedDeletes(Path providerRoot) {
+        List<Path> abandoned = new ArrayList<>();
+        try (DirectoryStream<Path> children = Files.newDirectoryStream(
+                providerRoot, ".deleting-*")) {
+            for (Path child : children) {
+                if (Files.isDirectory(child)) abandoned.add(child);
+            }
+        } catch (IOException e) {
+            logger.warn("Provider 待删除目录扫描失败, path={}", providerRoot, e);
+        }
+        return abandoned;
     }
 
     private RuntimeInstall readDefaultInstall(Distribution distribution) {
@@ -686,12 +1037,71 @@ public final class NpmProviderRuntimeManager {
     }
 
     private void deleteTree(Path root) {
-        if (root == null || !Files.exists(root)) return;
-        try {
-            Files.walk(root).sorted(Comparator.reverseOrder()).forEach(path -> {
-                try { Files.deleteIfExists(path); } catch (IOException ignored) { }
-            });
-        } catch (IOException ignored) { }
+        deleteTreeWithRetry(root);
+    }
+
+    private boolean deleteTreeWithRetry(Path root) {
+        if (root == null || !Files.exists(root)) return true;
+        IOException lastError = null;
+        for (int attempt = 0; attempt < MOVE_RETRY_COUNT; attempt++) {
+            try {
+                List<Path> paths;
+                try (Stream<Path> stream = Files.walk(root)) {
+                    paths = stream.sorted(Comparator.reverseOrder())
+                            .collect(Collectors.toList());
+                }
+                for (Path path : paths) Files.deleteIfExists(path);
+                return true;
+            } catch (IOException e) {
+                lastError = e;
+                if (!isWindows() || attempt + 1 >= MOVE_RETRY_COUNT) break;
+                try {
+                    sleepBeforeMoveRetry(attempt);
+                } catch (IOException interrupted) {
+                    lastError = interrupted;
+                    break;
+                }
+            }
+        }
+        logger.warn("Provider runtime 目录删除失败，保留并等待后续重试, path={}",
+                root, lastError);
+        return false;
+    }
+
+    private final class RuntimeLeaseImpl implements AgentProvider.RuntimeLease {
+        private final AgentProviderType type;
+        private final String version;
+        private final Path leaseDirectory;
+        private final Path leaseFile;
+        private final FileChannel channel;
+        private final FileLock lock;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private RuntimeLeaseImpl(AgentProviderType type, String version,
+                                 Path leaseDirectory, Path leaseFile,
+                                 FileChannel channel, FileLock lock) {
+            this.type = type;
+            this.version = version;
+            this.leaseDirectory = leaseDirectory;
+            this.leaseFile = leaseFile;
+            this.channel = channel;
+            this.lock = lock;
+        }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) return;
+            try { lock.release(); } catch (IOException ignored) { }
+            try { channel.close(); } catch (IOException ignored) { }
+            try { Files.deleteIfExists(leaseFile); } catch (IOException e) {
+                logger.debug("Provider runtime 租约文件将在清理时回收, path={}",
+                        leaseFile, e);
+            }
+            try { Files.deleteIfExists(leaseDirectory); } catch (IOException ignored) { }
+            logger.debug("Provider runtime 租约已释放, provider={}, version={}",
+                    type, version);
+            requestCleanup("runtime-exited");
+        }
     }
 
     private void prependPath(Map<String, String> environment, String directory) {

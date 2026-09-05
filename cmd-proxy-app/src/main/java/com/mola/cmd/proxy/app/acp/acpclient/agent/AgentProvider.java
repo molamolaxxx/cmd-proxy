@@ -22,6 +22,17 @@ import java.util.Map;
  */
 public interface AgentProvider {
 
+    /**
+     * Keeps a version-managed Provider runtime protected for the lifetime of its
+     * child process. Ordinary providers use the no-op lease.
+     */
+    interface RuntimeLease extends AutoCloseable {
+        RuntimeLease NONE = () -> { };
+
+        @Override
+        void close();
+    }
+
     enum PermissionPolicy {
         REJECT,
         ALLOW_ONCE,
@@ -223,6 +234,18 @@ public interface AgentProvider {
     default void prepareLaunch(AcpRobotParam robotParam, Map<String, String> environment)
             throws IOException {
         // no-op
+    }
+
+    /**
+     * Prepare a Provider runtime and reserve it before the child process starts.
+     * The caller must close the lease only after the corresponding process has
+     * actually exited.
+     */
+    default RuntimeLease prepareRuntimeLaunch(AcpRobotParam robotParam,
+                                              Map<String, String> environment)
+            throws IOException {
+        prepareLaunch(robotParam, environment);
+        return RuntimeLease.NONE;
     }
 
     /**

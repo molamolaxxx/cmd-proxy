@@ -40,6 +40,16 @@ public class OpenCodeAgentProvider implements AgentProvider {
     }
 
     @Override
+    public RuntimeLease prepareRuntimeLaunch(AcpRobotParam robotParam,
+                                             Map<String, String> environment)
+            throws java.io.IOException {
+        RuntimeLease lease = RUNTIME_MANAGER.prepareRuntimeLaunch(
+                AgentProviderType.OPENCODE, robotParam, environment);
+        environment.put("OPENCODE_DISABLE_AUTOUPDATE", "true");
+        return lease;
+    }
+
+    @Override
     public boolean requiresSerializedWorkspaceLaunch() {
         return true;
     }

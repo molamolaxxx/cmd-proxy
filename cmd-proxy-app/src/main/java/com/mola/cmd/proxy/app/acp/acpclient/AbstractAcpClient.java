@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -52,6 +53,8 @@ public abstract class AbstractAcpClient implements Closeable {
     protected final AtomicInteger idCounter = new AtomicInteger(0);
     protected final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
     private final AtomicLong lifecycleGeneration = new AtomicLong(0L);
+    private final Map<Process, AgentProvider.RuntimeLease> runtimeLeases =
+            new ConcurrentHashMap<>();
     private volatile State stateBeforeClose = State.CREATED;
 
     protected Process process;
@@ -506,27 +509,43 @@ public abstract class AbstractAcpClient implements Closeable {
 
         // 备用命令是已存在的独立运行路径，不重复准备主 Provider 的托管 runtime。
         // latest 的 registry 检查和安装由后台维护任务完成，普通 ACP 启动只解析本地版本。
+        AgentProvider.RuntimeLease preparedRuntimeLease = AgentProvider.RuntimeLease.NONE;
         if (!useFallbackCommand) {
-            agentProvider.prepareLaunch(robotParamRef, pb.environment());
+            preparedRuntimeLease = agentProvider.prepareRuntimeLaunch(
+                    robotParamRef, pb.environment());
         }
 
         // prepareLaunch 可能刚刚安装了可执行文件，因此在准备完成后再解析最终启动命令。
         List<String> cmd = new ArrayList<>();
-        cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand()
-                : agentProvider.getCommand(robotParamRef, pb.environment()));
-        cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs()
-                : agentProvider.getArgs(robotParamRef, pb.environment())));
+        try {
+            cmd.add(useFallbackCommand ? agentProvider.getFallbackCommand()
+                    : agentProvider.getCommand(robotParamRef, pb.environment()));
+            cmd.addAll(Arrays.asList(useFallbackCommand ? agentProvider.getFallbackArgs()
+                    : agentProvider.getArgs(robotParamRef, pb.environment())));
 
-        // 追加 provider 特定的额外参数（如 --model）
-        List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);
-        if (extraArgs != null && !extraArgs.isEmpty()) {
-            cmd.addAll(extraArgs);
+            // 追加 provider 特定的额外参数（如 --model）
+            List<String> extraArgs = agentProvider.getExtraArgs(robotParamRef);
+            if (extraArgs != null && !extraArgs.isEmpty()) {
+                cmd.addAll(extraArgs);
+            }
+            pb.command(cmd);
+        } catch (RuntimeException e) {
+            preparedRuntimeLease.close();
+            throw e;
         }
-        pb.command(cmd);
 
         logger.info("启动 ACP 进程: {}, PATH contains node: {}", cmd,
                 pb.environment().getOrDefault("PATH", "").contains("node"));
-        Process startedProcess = pb.start();
+        Process startedProcess;
+        try {
+            startedProcess = pb.start();
+        } catch (IOException | RuntimeException e) {
+            preparedRuntimeLease.close();
+            throw e;
+        }
+        if (preparedRuntimeLease != AgentProvider.RuntimeLease.NONE) {
+            runtimeLeases.put(startedProcess, preparedRuntimeLease);
+        }
         process = startedProcess;
         writer = new BufferedWriter(new OutputStreamWriter(startedProcess.getOutputStream(), StandardCharsets.UTF_8));
         reader = new BufferedReader(new InputStreamReader(startedProcess.getInputStream(), StandardCharsets.UTF_8));
@@ -542,16 +561,24 @@ public abstract class AbstractAcpClient implements Closeable {
             } catch (IOException e) {
                 // 进程关闭时正常退出
             }
-            // 进程退出时记录 exit code
             try {
                 int exitCode = startedProcess.waitFor();
                 logger.warn("[ACP STDERR][{}] 进程已退出, exitCode={}", groupId, exitCode);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            } finally {
+                if (!startedProcess.isAlive()) {
+                    releaseRuntimeLease(startedProcess);
+                }
             }
         }, "acp-stderr-" + groupId);
         stderrThread.setDaemon(true);
         stderrThread.start();
+    }
+
+    private void releaseRuntimeLease(Process exitedProcess) {
+        AgentProvider.RuntimeLease lease = runtimeLeases.remove(exitedProcess);
+        if (lease != null) lease.close();
     }
 
     protected void initialize() throws IOException {

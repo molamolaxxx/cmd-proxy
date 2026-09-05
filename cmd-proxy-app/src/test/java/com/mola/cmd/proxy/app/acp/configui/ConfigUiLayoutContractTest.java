@@ -107,8 +107,8 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("request!==channelBindingTargetRequest"));
         assertTrue(html.contains("channelBindingTargets={instanceId:id,sessions:[],teams:[]}"));
         assertTrue(html.contains("await loadStarweaveTeams(false);await refreshChannelBindingTargets(false)"));
-        assertTrue(html.contains("if(ch.binding.groupId&&!selectedGroup)opts+="));
-        assertTrue(html.contains("ch.binding.groupId+' · 当前不可用'"));
+        assertTrue(html.contains("if(b.groupId&&!selectedGroup)groupOpts+="));
+        assertTrue(html.contains("b.groupId+' · 当前不可用'"));
         assertTrue(html.contains("channelBindingTargetFingerprint(channelBindingTargets)"));
         assertTrue(html.contains("/api/starweave/v1/sessions/stream"));
         assertTrue(html.contains("new EventSource(url)"));
@@ -163,7 +163,7 @@ public class ConfigUiLayoutContractTest {
         assertFalse(html.contains("(s.active?'当前会话':'已删除')"));
         assertTrue(html.contains(".tool-call-title{flex:1 1 auto;min-width:0;overflow-wrap:anywhere"));
         assertTrue(html.contains(".event-card-head .session-status{flex:0 0 auto;margin-left:auto}"));
-        assertTrue(countOccurrences(html, "<span class=\"tool-call-title\">'") == 3);
+        assertTrue(countOccurrences(html, "<span class=\"tool-call-title\">'") == 4);
         assertTrue(html.contains("session-sidebar.open"));
         assertTrue(html.contains("data-page=\"teams\""));
         assertTrue(html.contains("/api/starweave/v1/teams/create"));
@@ -173,7 +173,18 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains(".team-member-chip{position:relative;display:inline-flex"));
         assertTrue(html.contains(".team-member-chip .star-team-member{position:absolute;width:1px;height:1px;opacity:0"));
         assertTrue(html.contains("source.onlyTeamMember?'<span class=\"team-member-role\">仅 Team</span>'"));
-        assertTrue(html.contains("sourceGroupId:input.value,sourceRobotId:input.getAttribute('data-source-robot-id')"));
+        assertTrue(html.contains("id=\"starTeamSelectedMembers\""));
+        assertTrue(html.contains("已选成员备注（可选）"));
+        assertTrue(html.contains("function renderStarTeamSelectedMembers("));
+        assertTrue(html.contains("function updateStarTeamMemberRemark("));
+        assertTrue(html.contains("starTeamDraft={sources:[],remarks:Object.create(null)}"));
+        assertTrue(html.contains("data-source-key=\"'+esc(key)+'\""));
+        assertTrue(html.contains("function starTeamSourceKey("));
+        assertTrue(html.contains("coordinated:!!source.coordinated"));
+        assertTrue(html.contains("remark:starTeamDraft.remarks[input.value]||''"));
+        assertTrue(html.contains(".star-team-selected-members{display:grid;gap:8px;max-height:"));
+        assertTrue(html.contains(".star-team-selected-member{grid-template-columns:1fr;gap:7px}"));
+        assertFalse(html.contains("value=\"'+esc(source.remark"));
         assertFalse(html.contains("选择已开启的会话（1–6 个）"));
         assertFalse(html.contains("var active=starSessions.items.filter(function(s){return s.active&&s.groupId})"));
         assertFalse(html.contains("团队动态"));
@@ -189,7 +200,9 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("function openTeamSessionDialog("));
         assertTrue(html.contains("function toggleTeamSessionSidebar("));
         assertTrue(html.contains("function loadTeamSessionSnapshot("));
+        assertTrue(html.contains("function mergeTeamSessionMembers("));
         assertTrue(html.contains("function sendTeamSessionMessage("));
+        assertTrue(html.contains("if(!member.sessionId){showSnackbar('成员会话正在同步，请稍候');return}"));
         assertTrue(html.contains("function restoreTeamSession("));
         assertTrue(html.contains("function uploadTeamSessionFiles("));
         assertTrue(html.contains("/api/starweave/v1/teams/uploads"));
@@ -205,7 +218,9 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("function pollStarweaveTeamStates("));
         assertTrue(html.contains("activePage!=='teams'||starTeams.polling"));
         assertTrue(html.contains("var response=await api('/api/starweave/v1/teams')"));
-        assertTrue(html.contains("teamSession.members=(team.members||[]).slice()"));
+        assertTrue(html.contains("teamSession.members=mergeTeamSessionMembers(teamSession.members,team.members||[])"));
+        assertTrue(html.contains("if(old&&old.sessionId&&!member.sessionId)member.sessionId=old.sessionId"));
+        assertTrue(html.contains("type==='MEMBER_SESSION_CHANGED'&&p.newSessionId"));
         assertFalse(html.contains("teamSessionPost('status')"));
         assertFalse(html.contains("function applyTeamMemberEvent("));
         assertFalse(html.contains("function applyTeamSessionStatus("));
@@ -213,6 +228,12 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("renderTeamSessionDetail(false)"));
         assertTrue(html.contains("message.kind==='TEAM_TALK_TO'"));
         assertTrue(html.contains("function teamTalkToCardHtml("));
+        assertTrue(html.contains("function teamMemberDisplayName("));
+        assertTrue(html.contains("p.senderDisplayName:p.targetDisplayName"));
+        assertTrue(html.contains("member.displayName||member.sourceRobotName"));
+        assertTrue(html.contains("function teamPersistedEventHtml("));
+        assertTrue(html.contains("message.kind==='TEAM_EVENT'"));
+        assertTrue(html.contains("if(type==='TALK_TO_ROUTE_REQUEST')return false"));
         int teamDialogStart = html.indexOf("id=\"teamSessionDialog\"");
         int teamDialogEnd = html.indexOf("id=\"teamSessionRestoreDialog\"", teamDialogStart);
         assertTrue(teamDialogStart >= 0 && teamDialogEnd > teamDialogStart);
@@ -220,7 +241,7 @@ public class ConfigUiLayoutContractTest {
                 .contains("deleteStarweaveSession"));
         assertFalse(html.contains("team-member-check"));
         assertTrue(html.contains(".team-member-chip.selected{background:var(--sw-primary)"));
-        assertTrue(html.contains("classList.toggle(\\'selected\\',this.checked)"));
+        assertTrue(html.contains("onchange=\"toggleStarTeamMember(this)\""));
     }
 
     private static int countOccurrences(String source, String needle) {
@@ -304,7 +325,13 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("function toggleSidebar()"));
         assertTrue(html.contains(".app-layout.sidebar-collapsed"));
         assertTrue(html.contains(".app-layout.sidebar-fading .sidebar"));
+        assertTrue(html.contains(".env-sticky.sidebar-fading,.env-sticky.sidebar-collapsed"));
+        assertTrue(html.contains(".env-sticky.sidebar-collapsed{display:none}"));
         assertTrue(html.contains("layout.classList.add('sidebar-fading')"));
+        assertTrue(html.contains("environment.classList.add('sidebar-fading')"));
+        assertTrue(html.contains("environment.classList.add('sidebar-collapsed')"));
+        assertTrue(html.contains("environment.classList.remove('sidebar-collapsed');syncStarweaveViewport()"));
+        assertTrue(html.contains("environment.classList.remove('sidebar-fading')}syncStarweaveViewport()"));
         assertTrue(html.contains("layout.classList.add('sidebar-collapsed');layout.classList.remove('sidebar-fading')"));
         assertTrue(html.contains("transition:grid-template-columns .28s ease"));
         assertTrue(html.contains("starweave-sidebar-collapsed"));
@@ -323,6 +350,11 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("aria-label=\"选择子智能体\""));
         assertTrue(html.contains("aria-label=\"选择联系人智能体\""));
         assertTrue(html.contains("configuredRobotOptions(s.name||'')"));
+        assertTrue(html.contains("openRobotDialog('+i+',\\'copy\\')"));
+        assertTrue(html.contains("function nextRobotCopyName(sourceName)"));
+        assertTrue(html.contains("robotDialogMode==='copy'?'复制智能体'"));
+        assertTrue(html.contains("id=\"robotDialogSubmit\""));
+        assertTrue(html.contains("智能体名称已存在"));
     }
 
     @Test

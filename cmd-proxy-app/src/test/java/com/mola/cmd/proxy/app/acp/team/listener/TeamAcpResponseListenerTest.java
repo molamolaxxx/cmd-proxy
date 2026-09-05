@@ -7,7 +7,12 @@ import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberState;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
+import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -17,6 +22,9 @@ import java.util.Map;
 import static org.junit.Assert.*;
 
 public class TeamAcpResponseListenerTest {
+
+    @Rule
+    public TemporaryFolder temporary = new TemporaryFolder();
 
     @Test
     public void mapsMessageToolAndCompletionWithStableMemberRoute() {
@@ -73,6 +81,33 @@ public class TeamAcpResponseListenerTest {
                 TeamEventType.TALK_TO_REJECTED,
                 TeamEventType.MESSAGE_CHUNK,
                 TeamEventType.COMPACTION_EVENT), types(fixture.events));
+    }
+
+    @Test
+    public void persistsUiOnlyEventsForTeamHistoryRecovery() throws Exception {
+        TeamMemberDefinition member = member("member-history", 0);
+        TeamRuntime runtime = new TeamRuntime(TeamDefinition.creating(
+                "team-history", "owner-1", "Team", "team-acp-instance",
+                "request-1", java.util.Collections.singletonList(member), 100L));
+        ConversationHistoryManager history = new ConversationHistoryManager(
+                AcpClientIdentity.team("team-acp-member-history", "team-acp-instance",
+                        "team/team-history/member-history", "owner-1",
+                        "team-history", "member-history", "Source"),
+                temporary.newFolder("history").toPath());
+        TeamAcpResponseListener listener = new TeamAcpResponseListener(
+                runtime, member, event -> { }, TeamMemberStateObserver.NOOP, history);
+
+        listener.onSubAgentEvent("AGENT_COMPLETE", "worker", "done");
+        listener.onScheduleEvent("SCHEDULE_CREATE", "created", true);
+        listener.onCompactionEvent("COMPACTION_COMPLETED", "codex");
+        listener.onError(new IllegalStateException("failed"));
+
+        assertEquals(4, history.getCurrentTurn().size());
+        for (ContextMessage message : history.getCurrentTurn()) {
+            assertEquals(ContextMessage.Role.EVENT, message.getRole());
+        }
+        assertEquals("SUB_AGENT_EVENT", history.getCurrentTurn().get(0).getEventType());
+        assertEquals("MESSAGE_ERROR", history.getCurrentTurn().get(3).getEventType());
     }
 
     @Test

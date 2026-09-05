@@ -79,6 +79,7 @@
 - [x] `SW-605` ✅ 增加结构化 `AgentAddress(instanceId/surface/ownerId/robotId)` 并随 Starweave 会话/信道目标输出，为远程通讯录和 Team placement 保留稳定地址。
 - [x] `SW-606` ✅ Starweave client 继续走统一 feature initializer；记忆、能力反思、MCP、权限、子 Agent、schedule、TalkTo 和自动新会话均以精确 group/identity owner 隔离。
 - [x] `SW-607` ✅ 新增 Starweave 团队页面，可从已开启会话创建/删除本地 Fast Team、向成员发消息、取消、新建会话和触发记忆整理；Team 事件按 Starweave owner 投影到自有动态卡片，禁止回调 MolaChat。
+- [x] `SW-608` ✅ Starweave Team 已接入 MolaChat 的可信 mixed-Team 协调器：本环境 Starweave 来源、明确共享给 `starweave-{instanceId}` 的本地 MolaChat 来源和跨环境来源可统一发现与选择；创建、删除、成员命令和结构化事件按稳定 instance/transport/team/member 身份路由，协调器离线时 mixed fragment 保持可见但操作 fail-closed，纯本地 Starweave Team 继续可用。
 
 ### 0.7 测试与发布门槛
 

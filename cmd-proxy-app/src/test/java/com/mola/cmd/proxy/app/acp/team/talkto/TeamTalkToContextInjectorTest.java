@@ -18,7 +18,7 @@ import static org.junit.Assert.*;
 public class TeamTalkToContextInjectorTest {
 
     @Test
-    public void buildsStrictMemberIdOnlyContactBookFromPersistedRemarks() {
+    public void buildsSelfIdentityAndStrictMemberIdOnlyContactBookFromPersistedRemarks() {
         TeamRuntime runtime = runtime();
         TeamTalkToContextInjector injector =
                 new TeamTalkToContextInjector(runtime, "member-1");
@@ -34,6 +34,13 @@ public class TeamTalkToContextInjectorTest {
         assertEquals("member-2", contacts.get(0).getTargetTeamMemberId());
         assertEquals("team-acp-member-2", contacts.get(0).getTargetAcpClientId());
         assertEquals("signature for member-2", contacts.get(0).getRemark());
+        assertTrue(context.contains("当前成员身份（这是你自己，不是可路由联系人）"));
+        assertTrue(context.contains("\"teamMemberId\":\"member-1\""));
+        assertTrue(context.contains("\"displayName\":\"Display member-1\""));
+        assertTrue(context.contains("\"remark\":\"队长，负责协调团队\""));
+        assertTrue(context.contains("请将 remark 视为你在当前 Team 中的角色与职责"));
+        assertTrue(context.contains("不要对自己调用 talk_to"));
+        assertFalse(context.contains("\"target\":\"member-1\""));
         assertTrue(context.contains("\"target\":\"member-2\""));
         assertTrue(context.contains("\"displayName\":\"Display member-2\""));
         assertTrue(context.contains("\"remark\":\"signature for member-2\""));
@@ -99,11 +106,13 @@ public class TeamTalkToContextInjectorTest {
 
         assertTrue(injector.contacts().isEmpty());
         assertTrue(context.contains("当前 Team 没有其他队员，队内 talk_to 不可用"));
+        assertTrue(context.contains("当前成员身份（这是你自己，不是可路由联系人）"));
+        assertTrue(context.contains("\"remark\":\"signature for member-1\""));
         assertFalse(context.contains("发送给同队成员的格式"));
     }
 
     private static TeamRuntime runtime() {
-        TeamMemberDefinition first = member("member-1", 0);
+        TeamMemberDefinition first = member("member-1", 0, "队长，负责协调团队");
         TeamMemberDefinition second = member("member-2", 1);
         TeamDefinition creating = TeamDefinition.creating(
                 "team-1", "owner-1", "Fast Team", "team-acp-instance", "request-1",
@@ -119,9 +128,13 @@ public class TeamTalkToContextInjectorTest {
     }
 
     private static TeamMemberDefinition member(String id, int order) {
+        return member(id, order, "signature for " + id);
+    }
+
+    private static TeamMemberDefinition member(String id, int order, String remark) {
         return new TeamMemberDefinition(
                 id, "acp-source-" + id, "source-group-" + id,
                 "source-robot-" + id, "Display " + id, "", order,
-                "signature for " + id, "fingerprint-" + id);
+                remark, "fingerprint-" + id);
     }
 }

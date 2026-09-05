@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.acpclient.context;
 
+import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity;
 import org.junit.Rule;
@@ -124,6 +125,30 @@ public class ConversationHistoryManagerTest {
 
         assertTrue(manager.getLastMessageAt("session-2") > 0L);
         assertEquals(0L, manager.getLastMessageAt("missing-session"));
+    }
+
+    @Test
+    public void structuredUiEventsSurviveFlushAndReload() throws Exception {
+        Path root = temporaryFolder.newFolder("event-sessions").toPath();
+        AcpClientIdentity identity = teamIdentity("team/team-1/member-event");
+        ConversationHistoryManager writer =
+                new ConversationHistoryManager(identity, root);
+        JsonObject data = new JsonObject();
+        data.addProperty("eventType", "COMPACTION_COMPLETED");
+        data.addProperty("provider", "codex");
+
+        writer.addUserMessage("hello");
+        writer.addEventMessage("COMPACTION_EVENT", data);
+        writer.addAssistantMessage("done");
+        writer.flushTurn("session-event");
+
+        ConversationHistoryManager reader =
+                new ConversationHistoryManager(identity, root);
+        List<ContextMessage> history = reader.getFullHistory("session-event");
+        assertEquals(3, history.size());
+        assertEquals(ContextMessage.Role.EVENT, history.get(1).getRole());
+        assertEquals("COMPACTION_EVENT", history.get(1).getEventType());
+        assertEquals("codex", history.get(1).getEventData().get("provider").getAsString());
     }
 
     @Test

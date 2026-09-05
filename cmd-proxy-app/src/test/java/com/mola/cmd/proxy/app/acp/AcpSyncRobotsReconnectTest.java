@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry;
 import com.mola.cmd.proxy.app.acp.team.TeamManager;
 import com.mola.cmd.proxy.app.acp.team.TeamStore;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportDescriptor;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportProtocol;
 import org.junit.Test;
 
 import java.nio.file.Files;
@@ -40,7 +41,9 @@ public class AcpSyncRobotsReconnectTest {
         JsonObject discovery = JsonParser.parseString(
                 reconnected.get("teamDiscovery")).getAsJsonObject();
         assertTrue(discovery.get("businessCommandsReady").getAsBoolean());
-        assertEquals(15, discovery.getAsJsonArray("commands").size());
+        assertEquals(16, discovery.getAsJsonArray("commands").size());
+        assertTrue(discovery.getAsJsonArray("commands").toString()
+                .contains(TeamTransportProtocol.GET_SESSION_HISTORY_COMMAND));
     }
 
     @Test

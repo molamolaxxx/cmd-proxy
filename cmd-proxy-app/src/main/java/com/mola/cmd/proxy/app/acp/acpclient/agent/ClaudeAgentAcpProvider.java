@@ -51,6 +51,14 @@ public class ClaudeAgentAcpProvider implements AgentProvider {
     }
 
     @Override
+    public RuntimeLease prepareRuntimeLaunch(AcpRobotParam robotParam,
+                                             Map<String, String> environment)
+            throws java.io.IOException {
+        return RUNTIME_MANAGER.prepareRuntimeLaunch(
+                AgentProviderType.CLAUDE_AGENT_ACP, robotParam, environment);
+    }
+
+    @Override
     public List<Path> getMcpConfigPaths(String workspacePath) {
         List<Path> paths = new ArrayList<>();
         // Claude 的 user/local scope 都保存在 ~/.claude.json：user scope 位于
