@@ -40,6 +40,11 @@ public class OpenCodeAgentProvider implements AgentProvider {
     }
 
     @Override
+    public boolean requiresSerializedWorkspaceLaunch() {
+        return true;
+    }
+
+    @Override
     public String[] getArgs() {
         return new String[]{"acp"};
     }

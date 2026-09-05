@@ -226,6 +226,17 @@ public interface AgentProvider {
     }
 
     /**
+     * Whether ACP clients using this provider must serialize their startup sequence per workspace.
+     * <p>
+     * The serialized window ends when the client reaches READY (or startup fails); it does not
+     * cover the lifetime of the provider process. Providers that share workspace-scoped bootstrap
+     * state can opt in without reducing concurrency for other providers or other workspaces.
+     */
+    default boolean requiresSerializedWorkspaceLaunch() {
+        return false;
+    }
+
+    /**
      * 获取 ACP session 创建或恢复后需要立即应用的配置项。
      * <p>
      * 返回值会通过标准 {@code session/set_config_option} 请求逐项设置，适用于

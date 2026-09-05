@@ -111,7 +111,9 @@ public abstract class AbstractAcpClient implements Closeable {
      */
     public void start() throws IOException {
         state.set(State.STARTING);
-        try {
+        try (AcpLaunchConcurrencyGuard.Lease ignored =
+                     AcpLaunchConcurrencyGuard.acquire(
+                             agentProvider, workspacePath, clientIdentity.getLogicalId())) {
             startProcessAndInitialize();
             try {
                 createSession();

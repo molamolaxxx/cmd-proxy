@@ -54,6 +54,7 @@ public final class TeamTransportDescriptor {
                         TeamTransportProtocol.CANCEL_COMMAND,
                         TeamTransportProtocol.NEW_SESSION_COMMAND,
                         TeamTransportProtocol.LIST_SESSIONS_COMMAND,
+                        TeamTransportProtocol.GET_SESSION_HISTORY_COMMAND,
                         TeamTransportProtocol.RESTORE_SESSION_COMMAND,
                         TeamTransportProtocol.GET_STATUS_COMMAND,
                         TeamTransportProtocol.GET_CONTEXT_USAGE_COMMAND,

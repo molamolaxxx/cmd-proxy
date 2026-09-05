@@ -767,6 +767,9 @@ public final class TeamManager implements AutoCloseable {
             data.put("taskId", taskId);
             data.put("owner", owner);
             data.put("sessionId", replacement.getSessionId());
+            replacement.getHistoryManager().addEventMessage(
+                    TeamEventType.SCHEDULE_EVENT.name(),
+                    gson.toJsonTree(data).getAsJsonObject());
             eventSink.publish(TeamEventEnvelope.next(runtime,
                     member.getTeamMemberId(), member.getAcpClientId(),
                     TeamEventType.SCHEDULE_EVENT, data));
@@ -927,27 +930,104 @@ public final class TeamManager implements AutoCloseable {
             if (sessionId == null || sessionId.trim().isEmpty()) {
                 sessionId = client.getSessionId();
             }
+            List<com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage> history =
+                    client.getHistoryManager().getFullHistory(sessionId);
+            Set<String> eventTypes = new HashSet<>();
+            Set<String> receivedTalkTo = new HashSet<>();
+            Set<String> channelMessages = new HashSet<>();
+            Set<String> schedulePrompts = new HashSet<>();
+            Map<String, Integer> lastToolEvents = new HashMap<>();
+            for (int historyIndex = 0; historyIndex < history.size(); historyIndex++) {
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage message =
+                        history.get(historyIndex);
+                if (message.getRole()
+                        != com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.EVENT) {
+                    continue;
+                }
+                String type = message.getEventType();
+                com.google.gson.JsonObject payload = message.getEventData();
+                eventTypes.add(type);
+                if (TeamEventType.TOOL_CALL.name().equals(type)) {
+                    String toolCallId = jsonText(payload, "toolCallId");
+                    if (!toolCallId.isEmpty()) lastToolEvents.put(toolCallId, historyIndex);
+                } else if (TeamEventType.TALK_TO_RECEIVE.name().equals(type)) {
+                    String content = jsonText(payload, "content");
+                    String sender = jsonText(payload, "senderTeamMemberId");
+                    if (sender.isEmpty()) sender = jsonText(payload, "robotName");
+                    if (jsonText(payload, "cardType").equals("CHANNEL_TALK_TO")
+                            || sender.startsWith("channel:")) {
+                        channelMessages.add(content);
+                    } else {
+                        receivedTalkTo.add(sender + "\n" + content);
+                    }
+                } else if (TeamEventType.SCHEDULE_EVENT.name().equals(type)
+                        && "SCHEDULE_EXECUTE".equals(jsonText(payload, "eventType"))) {
+                    schedulePrompts.add(jsonText(payload, "detail"));
+                }
+            }
+
             List<Map<String, Object>> messages = new ArrayList<>();
-            for (com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage message
-                    : client.getHistoryManager().getFullHistory(sessionId)) {
+            for (int historyIndex = 0; historyIndex < history.size(); historyIndex++) {
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage message =
+                        history.get(historyIndex);
                 Map<String, Object> value = new LinkedHashMap<>();
                 value.put("role", message.getRole().name());
                 if (message.getRole()
+                        == com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.EVENT) {
+                    if (TeamEventType.TOOL_CALL.name().equals(message.getEventType())
+                            && !jsonText(message.getEventData(), "toolCallId").isEmpty()
+                            && !Integer.valueOf(historyIndex).equals(lastToolEvents.get(
+                                    jsonText(message.getEventData(), "toolCallId")))) {
+                        continue;
+                    }
+                    value.put("kind", "TEAM_EVENT");
+                    value.put("eventType", message.getEventType());
+                    value.put("payload", gson.fromJson(
+                            message.getEventData(), Map.class));
+                } else if (message.getRole()
                         == com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.TOOL) {
-                    value.put("toolCallId", message.getToolCallId());
-                    value.put("toolName", message.getToolName());
-                    value.put("status", message.getStatus());
-                    value.put("rawInput", message.getRawInput());
-                    value.put("rawOutput", message.getRawOutput());
+                    if (lastToolEvents.containsKey(message.getToolCallId())) continue;
+                    TeamHistoryActionTool action = TeamHistoryActionTool.parse(message);
+                    if (action != null) {
+                        if (eventTypes.contains(action.persistedEventType)) continue;
+                        value.put("kind", "TEAM_EVENT");
+                        value.put("eventType", action.persistedEventType);
+                        value.put("payload", action.payload);
+                    } else {
+                        value.put("toolCallId", message.getToolCallId());
+                        value.put("toolName", message.getToolName());
+                        value.put("status", message.getStatus());
+                        value.put("rawInput", message.getRawInput());
+                        value.put("rawOutput", message.getRawOutput());
+                    }
                 } else {
                     String content = message.getContent();
                     TeamHistoryTalkTo talkTo = TeamHistoryTalkTo.parse(content);
                     if (talkTo != null) {
+                        if (receivedTalkTo.contains(
+                                talkTo.senderTeamMemberId + "\n" + talkTo.content)) continue;
                         value.put("kind", "TEAM_TALK_TO");
                         value.put("senderTeamMemberId", talkTo.senderTeamMemberId);
                         value.put("content", talkTo.content);
                     } else {
-                        value.put("content", content);
+                        TeamHistoryChannelMessage channel =
+                                TeamHistoryChannelMessage.parse(content);
+                        if (channel != null) {
+                            if (channelMessages.contains(channel.content)) continue;
+                            value.put("kind", "TEAM_EVENT");
+                            value.put("eventType", TeamEventType.TALK_TO_RECEIVE.name());
+                            Map<String, Object> payload = new LinkedHashMap<>();
+                            payload.put("eventType", TeamEventType.TALK_TO_RECEIVE.name());
+                            payload.put("direction", "RECEIVE");
+                            payload.put("robotName", channel.label);
+                            payload.put("content", channel.content);
+                            payload.put("cardType", "CHANNEL_TALK_TO");
+                            value.put("payload", payload);
+                        } else if (schedulePrompts.contains(content)) {
+                            continue;
+                        } else {
+                            value.put("content", content);
+                        }
                     }
                 }
                 messages.add(value);
@@ -959,6 +1039,15 @@ public final class TeamManager implements AutoCloseable {
                     "Team session history loaded", route.team.getVersion(), data);
         } catch (MemberRouteException e) {
             return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        }
+    }
+
+    private static String jsonText(com.google.gson.JsonObject value, String key) {
+        if (value == null || !value.has(key) || value.get(key).isJsonNull()) return "";
+        try {
+            return value.get(key).getAsString();
+        } catch (RuntimeException ignored) {
+            return value.get(key).toString();
         }
     }
 
@@ -991,6 +1080,122 @@ public final class TeamManager implements AutoCloseable {
             if (sender.isEmpty()) return null;
             return new TeamHistoryTalkTo(sender,
                     value.substring(contentStart, contentEnd));
+        }
+    }
+
+    /** Backward-compatible projection for Team sessions saved before EVENT history. */
+    static final class TeamHistoryActionTool {
+        final String persistedEventType;
+        final Map<String, Object> payload;
+
+        private TeamHistoryActionTool(String persistedEventType,
+                                      Map<String, Object> payload) {
+            this.persistedEventType = persistedEventType;
+            this.payload = payload;
+        }
+
+        static TeamHistoryActionTool parse(
+                com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage message) {
+            String name = message.getToolName();
+            if (name == null) return null;
+            String normalized = name.toLowerCase(Locale.ROOT).replace('_', '-');
+            if (!normalized.contains("cmd-proxy")) return null;
+            Map<String, Object> payload = new LinkedHashMap<>();
+            String output = firstString(message.getRawOutput(), "text");
+            if (normalized.contains("talk-to")) {
+                String target = firstString(message.getRawInput(), "target");
+                String content = firstString(message.getRawInput(), "content");
+                payload.put("eventType", TeamEventType.TALK_TO_SEND.name());
+                payload.put("direction", "SEND");
+                payload.put("targetTeamMemberId", target);
+                payload.put("content", content);
+                payload.put("delivery", legacyTalkToDelivery(output));
+                return new TeamHistoryActionTool(
+                        TeamEventType.TALK_TO_SEND.name(), payload);
+            }
+            if (normalized.contains("dispatch-subagent")) {
+                payload.put("eventType", "DISPATCH_COMPLETE");
+                payload.put("detail", output.isEmpty()
+                        ? "子 Agent 调用已完成" : output);
+                return new TeamHistoryActionTool(
+                        TeamEventType.SUB_AGENT_EVENT.name(), payload);
+            }
+            if (normalized.contains("schedule-task")
+                    || normalized.contains("manage-schedule")) {
+                payload.put("eventType", normalized.contains("schedule-task")
+                        ? "SCHEDULE_CREATE" : "SCHEDULE_MANAGE");
+                payload.put("detail", output.isEmpty()
+                        ? "定时任务操作已完成" : output);
+                payload.put("expanded", normalized.contains("schedule-task"));
+                return new TeamHistoryActionTool(
+                        TeamEventType.SCHEDULE_EVENT.name(), payload);
+            }
+            return null;
+        }
+
+        private static String legacyTalkToDelivery(String output) {
+            if (output.contains("路由")) return "ROUTE_REQUESTED";
+            if (output.contains("inbox") || output.contains("正忙")) return "QUEUED";
+            if (output.contains("失败")) return "REJECTED";
+            return "DELIVERED";
+        }
+
+        private static String firstString(com.google.gson.JsonElement value,
+                                          String key) {
+            if (value == null || value.isJsonNull()) return "";
+            if (value.isJsonObject()) {
+                com.google.gson.JsonObject object = value.getAsJsonObject();
+                if (object.has(key) && !object.get(key).isJsonNull()
+                        && object.get(key).isJsonPrimitive()) {
+                    return object.get(key).getAsString();
+                }
+                for (Map.Entry<String, com.google.gson.JsonElement> entry
+                        : object.entrySet()) {
+                    String nested = firstString(entry.getValue(), key);
+                    if (!nested.isEmpty()) return nested;
+                }
+            } else if (value.isJsonArray()) {
+                for (com.google.gson.JsonElement child : value.getAsJsonArray()) {
+                    String nested = firstString(child, key);
+                    if (!nested.isEmpty()) return nested;
+                }
+            }
+            return "";
+        }
+    }
+
+    /** Hides channel routing instructions while preserving the external message. */
+    static final class TeamHistoryChannelMessage {
+        private static final String MARKER = "📨 [外部信道消息] ";
+        private static final String CONTENT_START = "当前消息:\n";
+        private static final String[] CONTENT_END_MARKERS = {
+                "\n\n引用消息（", "\n\n本次消息关联附件",
+                "\n\n本次消息已绑定其原始信道会话。"
+        };
+        final String label;
+        final String content;
+
+        private TeamHistoryChannelMessage(String label, String content) {
+            this.label = label;
+            this.content = content;
+        }
+
+        static TeamHistoryChannelMessage parse(String value) {
+            if (value == null) return null;
+            int marker = value.indexOf(MARKER);
+            int labelEnd = marker < 0 ? -1 : value.indexOf('\n', marker);
+            int contentMarker = value.indexOf(CONTENT_START);
+            if (marker < 0 || labelEnd < 0 || contentMarker < 0) return null;
+            int start = contentMarker + CONTENT_START.length();
+            int end = value.length();
+            for (String endMarker : CONTENT_END_MARKERS) {
+                int candidate = value.indexOf(endMarker, start);
+                if (candidate >= start && candidate < end) end = candidate;
+            }
+            if (end <= start) return null;
+            return new TeamHistoryChannelMessage(
+                    "channel:" + value.substring(marker + MARKER.length(), labelEnd).trim(),
+                    value.substring(start, end));
         }
     }
 

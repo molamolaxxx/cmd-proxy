@@ -21,6 +21,7 @@ import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberState;
 import com.mola.cmd.proxy.app.acp.team.model.TeamState;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
+import com.google.gson.Gson;
 
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -43,6 +44,8 @@ import java.util.function.BooleanSupplier;
  */
 public final class TeamTalkToDispatcher extends TalkToDispatcher
         implements AutoCloseable {
+
+    private static final Gson GSON = new Gson();
 
     public static final int INBOX_CAPACITY = 10;
     public static final long INBOX_TTL_MS = 30L * 60L * 1000L;
@@ -215,8 +218,10 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             route.put("teamId", team.getTeamId());
             route.put("senderTeamMemberId", sender.getTeamMemberId());
             route.put("senderAcpClientId", sender.getAcpClientId());
+            route.put("senderDisplayName", sender.getDisplayName());
             route.put("targetTeamMemberId", rosterTarget.getTargetTeamMemberId());
             route.put("targetAcpClientId", rosterTarget.getTargetAcpClientId());
+            route.put("targetDisplayName", rosterTarget.getDisplayName());
             route.put("content", content);
             route.put("depth", nextDepth);
             route.put("createdAt", now);
@@ -561,6 +566,15 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             return;
         }
         try {
+            if (type == TeamEventType.TALK_TO_SEND
+                    || type == TeamEventType.TALK_TO_RECEIVE
+                    || type == TeamEventType.TALK_TO_QUEUED
+                    || type == TeamEventType.TALK_TO_REJECTED) {
+                clientRegistry.get(runtime.getDefinition().getTeamId(),
+                                envelopeMember.getTeamMemberId())
+                        .ifPresent(client -> client.getHistoryManager().addEventMessage(
+                                type.name(), GSON.toJsonTree(data).getAsJsonObject()));
+            }
             eventSink.publish(TeamEventEnvelope.next(runtime,
                     envelopeMember.getTeamMemberId(),
                     envelopeMember.getAcpClientId(), type, data));
@@ -620,10 +634,14 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                 sender == null ? null : sender.getTeamMemberId());
         data.put("senderAcpClientId",
                 sender == null ? null : sender.getAcpClientId());
+        data.put("senderDisplayName",
+                sender == null ? null : sender.getDisplayName());
         data.put("targetTeamMemberId",
                 target == null ? null : target.getTeamMemberId());
         data.put("targetAcpClientId",
                 target == null ? null : target.getAcpClientId());
+        data.put("targetDisplayName",
+                target == null ? null : target.getDisplayName());
         data.put("content", content);
         data.put("depth", depth);
         data.put("delivery", delivery);
@@ -651,10 +669,14 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                 ? senderTeamMemberId : sender.getTargetTeamMemberId());
         data.put("senderAcpClientId", sender == null
                 ? null : sender.getTargetAcpClientId());
+        data.put("senderDisplayName", sender == null
+                ? null : sender.getDisplayName());
         data.put("targetTeamMemberId",
                 target == null ? null : target.getTeamMemberId());
         data.put("targetAcpClientId",
                 target == null ? null : target.getAcpClientId());
+        data.put("targetDisplayName",
+                target == null ? null : target.getDisplayName());
         data.put("content", content);
         data.put("depth", depth);
         data.put("delivery", delivery);

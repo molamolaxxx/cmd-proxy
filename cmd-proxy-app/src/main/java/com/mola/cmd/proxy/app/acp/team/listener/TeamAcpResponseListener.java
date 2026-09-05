@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.team.listener;
 
 import com.google.gson.JsonObject;
+import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseContentRenderer;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
@@ -29,17 +30,26 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
     private final TeamEventSink sink;
     private final TeamMemberStateObserver stateObserver;
     private final AcpResponseContentRenderer renderer;
+    private final ConversationHistoryManager historyManager;
 
     public TeamAcpResponseListener(TeamRuntime runtime,
                                    TeamMemberDefinition member,
                                    TeamEventSink sink) {
-        this(runtime, member, sink, TeamMemberStateObserver.NOOP);
+        this(runtime, member, sink, TeamMemberStateObserver.NOOP, null);
     }
 
     public TeamAcpResponseListener(TeamRuntime runtime,
                                    TeamMemberDefinition member,
                                    TeamEventSink sink,
                                    TeamMemberStateObserver stateObserver) {
+        this(runtime, member, sink, stateObserver, null);
+    }
+
+    public TeamAcpResponseListener(TeamRuntime runtime,
+                                   TeamMemberDefinition member,
+                                   TeamEventSink sink,
+                                   TeamMemberStateObserver stateObserver,
+                                   ConversationHistoryManager historyManager) {
         this.runtime = java.util.Objects.requireNonNull(runtime, "runtime");
         TeamMemberDefinition checked = java.util.Objects.requireNonNull(member, "member");
         boolean belongsToTeam = false;
@@ -60,6 +70,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         this.stateObserver = java.util.Objects.requireNonNull(
                 stateObserver, "stateObserver");
         this.renderer = new AcpResponseContentRenderer(this::publishRendered);
+        this.historyManager = historyManager;
     }
 
     @Override
@@ -76,6 +87,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         data.put("title", nullToEmpty(title));
         data.put("status", nullToEmpty(status));
         data.put("update", update == null ? new JsonObject() : update);
+        persist(TeamEventType.TOOL_CALL, data);
         publish(TeamEventType.TOOL_CALL, data);
     }
 
@@ -86,6 +98,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         data.put("eventType", nullToEmpty(eventType));
         data.put("agentName", agentName);
         data.put("detail", nullToEmpty(detail));
+        persist(TeamEventType.SUB_AGENT_EVENT, data);
         publish(TeamEventType.SUB_AGENT_EVENT, data);
     }
 
@@ -96,6 +109,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         data.put("eventType", nullToEmpty(eventType));
         data.put("detail", nullToEmpty(detail));
         data.put("expanded", expanded);
+        persist(TeamEventType.SCHEDULE_EVENT, data);
         publish(TeamEventType.SCHEDULE_EVENT, data);
     }
 
@@ -115,6 +129,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         } else {
             type = TeamEventType.TALK_TO_SEND;
         }
+        persist(type, data);
         publish(type, data);
     }
 
@@ -124,6 +139,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("eventType", nullToEmpty(eventType));
         data.put("provider", nullToEmpty(provider));
+        persist(TeamEventType.COMPACTION_EVENT, data);
         publish(TeamEventType.COMPACTION_EVENT, data);
     }
 
@@ -149,6 +165,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         data.put("message", teamError.getMessage());
         data.put("retryable", teamError.isRetryable());
         data.put("content", AcpResponseContentRenderer.errorContent(error));
+        persist(TeamEventType.MESSAGE_ERROR, data);
         publish(TeamEventType.MESSAGE_ERROR, data);
         stateObserver.onState(runtime.getDefinition().getTeamId(),
                 teamMemberId, TeamMemberState.ERROR, teamError);
@@ -160,6 +177,12 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         }
         sink.publish(TeamEventEnvelope.next(
                 runtime, teamMemberId, acpClientId, type, data));
+    }
+
+    private void persist(TeamEventType type, Map<String, Object> data) {
+        if (historyManager == null || !runtime.isAcceptingRequests()) return;
+        JsonObject value = new com.google.gson.Gson().toJsonTree(data).getAsJsonObject();
+        historyManager.addEventMessage(type.name(), value);
     }
 
     private void publishRendered(String content, boolean end) {

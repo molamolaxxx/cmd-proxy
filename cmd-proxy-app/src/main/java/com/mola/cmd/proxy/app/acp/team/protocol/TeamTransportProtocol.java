@@ -23,6 +23,7 @@ public final class TeamTransportProtocol {
     public static final String CANCEL_COMMAND = "acpTeamCancel";
     public static final String NEW_SESSION_COMMAND = "acpTeamNewSession";
     public static final String LIST_SESSIONS_COMMAND = "acpTeamListSessions";
+    public static final String GET_SESSION_HISTORY_COMMAND = "acpTeamGetSessionHistory";
     public static final String RESTORE_SESSION_COMMAND = "acpTeamRestoreSession";
     public static final String GET_STATUS_COMMAND = "acpTeamGetStatus";
     public static final String GET_CONTEXT_USAGE_COMMAND = "acpTeamGetContextUsage";

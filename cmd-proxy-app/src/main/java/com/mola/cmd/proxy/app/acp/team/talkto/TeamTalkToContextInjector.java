@@ -54,10 +54,22 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
                                Map<String, AcpRobotParam> ignoredRobotRegistry,
                                String ignoredSelfName) {
         TeamDefinition team = runtime.getDefinition();
+        TeamContactRef self = findContact(team, selfTeamMemberId);
+        if (self == null) {
+            throw new IllegalStateException("current Team member is missing from roster");
+        }
         List<TeamContactRef> contacts = contacts();
         StringBuilder sb = new StringBuilder();
         sb.append("\n<agent-team>\n");
-        sb.append("你处于 Fast Team「").append(team.getName()).append("」中。");
+        sb.append("你处于 Fast Team「").append(team.getName()).append("」中。\n");
+        Map<String, String> selfCard = new LinkedHashMap<>();
+        selfCard.put("teamMemberId", self.getTargetTeamMemberId());
+        selfCard.put("displayName", self.getDisplayName());
+        selfCard.put("remark", self.getRemark());
+        sb.append("当前成员身份（这是你自己，不是可路由联系人）：\n");
+        sb.append("- ").append(GSON.toJson(selfCard)).append("\n");
+        sb.append("请将 remark 视为你在当前 Team 中的角色与职责并据此行动；")
+                .append("不要对自己调用 talk_to。\n");
         if (contacts.isEmpty()) {
             sb.append("当前 Team 没有其他队员，队内 talk_to 不可用；绑定的外部信道仍可使用。");
         } else {

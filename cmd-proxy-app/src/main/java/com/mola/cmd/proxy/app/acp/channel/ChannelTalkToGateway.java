@@ -88,9 +88,14 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
                                                  String senderGroupId) {
         if (context == null) return null;
         ChannelConfig config = configs.get(context.getChannelId());
+        String contextOwner = trim(context.getOwnerKey());
+        ChannelBinding binding = config == null ? null : config.getBinding();
+        boolean authorized = senderGroupId != null && (contextOwner.isEmpty()
+                ? senderGroupId.equals(bindingOwnerKey(binding))
+                : senderGroupId.equals(contextOwner)
+                    && bindingAllowsOwner(binding, contextOwner));
         if (config == null || !config.isEnabled()
-                || senderGroupId == null
-                || !senderGroupId.equals(bindingOwnerKey(config.getBinding()))) {
+                || !authorized) {
             return null;
         }
         String chatType = trim(context.getChatType());
@@ -103,8 +108,8 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
                 "group".equals(chatType) ? address : "", chatType, expiresAt);
         String replyTarget = createRoute(context.getChannelId(), route,
                 senderGroupId, true);
-        return new ChannelTurnContext(context.getChannelId(), replyTarget, chatType,
-                address, context.getSenderId(), context.getSenderDisplayName());
+        return ChannelTurnContext.owned(context.getChannelId(), replyTarget, chatType,
+                address, context.getSenderId(), context.getSenderDisplayName(), senderGroupId);
     }
 
     public void discard(String target) {
@@ -282,6 +287,18 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
                     ? "" : "team:" + teamId + ":" + memberId;
         }
         return trim(binding.getGroupId());
+    }
+
+    private static boolean bindingAllowsOwner(ChannelBinding binding, String ownerKey) {
+        if (binding == null) return false;
+        if (!ChannelBinding.TYPE_TEAM_MEMBER.equals(binding.getType())
+                || ChannelBinding.MEMBER_SELECTION_FIXED.equals(
+                        binding.effectiveTeamMemberSelection())) {
+            return ownerKey.equals(bindingOwnerKey(binding));
+        }
+        String teamId = trim(binding.getTeamId());
+        return !teamId.isEmpty() && ownerKey.startsWith("team:" + teamId + ":")
+                && ownerKey.length() > ("team:" + teamId + ":").length();
     }
 
     private static final class RouteEntry {

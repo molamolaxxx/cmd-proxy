@@ -38,8 +38,14 @@ public final class StarweaveTeamApiBridge {
 
     public static void install(TeamManager manager, String instanceId,
                                Supplier<List<TeamMemberSourceDescriptor>> sources) {
+        install(manager, instanceId, sources, null);
+    }
+
+    public static void install(TeamManager manager, String instanceId,
+                               Supplier<List<TeamMemberSourceDescriptor>> sources,
+                               StarweaveTeamGateway gateway) {
         runtime = new Runtime(Objects.requireNonNull(manager, "manager"),
-                instanceId, Objects.requireNonNull(sources, "sources"));
+                instanceId, Objects.requireNonNull(sources, "sources"), gateway);
     }
 
     public static void clear(TeamManager expected) {
@@ -51,8 +57,35 @@ public final class StarweaveTeamApiBridge {
 
     public static JSONObject list() {
         Runtime current = requireRuntime();
-        return result(current.manager.list(new TeamQuery(
+        if (current.gateway != null) {
+            try {
+                JSONObject data = current.gateway.query("list", new JSONObject(true));
+                JSONArray teams = data.getJSONArray("teams");
+                if (teams != null) {
+                    for (int i = 0; i < teams.size(); i++) {
+                        teams.getJSONObject(i).put("coordinated", true);
+                    }
+                    return success(data);
+                }
+            } catch (IllegalStateException ignored) {
+                // Starweave remains fully usable in local-only deployments.
+            }
+        }
+        JSONObject local = result(current.manager.list(new TeamQuery(
                 TeamDefinition.SCHEMA_VERSION, current.ownerId, null, null)));
+        JSONObject data = local.getJSONObject("data");
+        JSONArray teams = data == null ? null : data.getJSONArray("teams");
+        if (teams != null) {
+            for (int i = 0; i < teams.size(); i++) {
+                JSONObject team = teams.getJSONObject(i);
+                if (team.getBooleanValue("mixedPlacement")) {
+                    // A persisted local fragment is not an ordinary local Team. Keep all
+                    // mutations fail-closed through the coordinator while it reconnects.
+                    team.put("coordinated", true);
+                }
+            }
+        }
+        return local;
     }
 
     public static JSONObject sources() {
@@ -68,7 +101,35 @@ public final class StarweaveTeamApiBridge {
             value.put("avatar", source.getAvatar());
             value.put("remark", source.getRemark());
             value.put("onlyTeamMember", source.isOnlyTeamMember());
+            value.put("cmdProxyInstanceId", current.instanceId);
+            value.put("transportGroup", current.transportGroup);
+            value.put("sourceType", "STARWEAVE");
+            value.put("sourceLabel", "本环境 · Starweave");
+            value.put("coordinated", false);
             values.add(value);
+        }
+        if (current.gateway != null) {
+            try {
+                JSONArray coordinated = current.gateway.query(
+                        "sources", new JSONObject(true)).getJSONArray("sources");
+                if (coordinated != null) {
+                    java.util.Set<String> identities = new java.util.HashSet<>();
+                    for (Object item : values) {
+                        JSONObject source = (JSONObject) item;
+                        identities.add(sourceIdentity(source));
+                    }
+                    for (int i = 0; i < coordinated.size(); i++) {
+                        JSONObject source = coordinated.getJSONObject(i);
+                        source.put("coordinated", true);
+                        String identity = sourceIdentity(source);
+                        int existingIndex = indexOfSource(values, identity);
+                        if (existingIndex >= 0) values.set(existingIndex, source);
+                        else if (identities.add(identity)) values.add(source);
+                    }
+                }
+            } catch (IllegalStateException ignored) {
+                // No coordinator is a supported Starweave-only deployment mode.
+            }
         }
         JSONObject result = new JSONObject(true);
         result.put("sources", values);
@@ -81,6 +142,17 @@ public final class StarweaveTeamApiBridge {
         if (requestedMembers == null || requestedMembers.isEmpty()
                 || requestedMembers.size() > 6) {
             throw new IllegalArgumentException("members size must be between 1 and 6");
+        }
+        boolean coordinated = false;
+        for (int i = 0; i < requestedMembers.size(); i++) {
+            coordinated |= requestedMembers.getJSONObject(i)
+                    .getBooleanValue("coordinated");
+        }
+        if (coordinated) {
+            if (current.gateway == null) {
+                throw new IllegalStateException("Starweave Team coordinator is unavailable");
+            }
+            return success(current.gateway.mutate("create", new JSONObject(request)));
         }
         List<TeamMemberSourceDescriptor> availableSources = current.sources.get();
         List<TeamMemberCreateSpec> members = new ArrayList<>();
@@ -119,6 +191,12 @@ public final class StarweaveTeamApiBridge {
 
     public static JSONObject delete(JSONObject request) {
         Runtime current = requireRuntime();
+        if (request != null && request.getBooleanValue("coordinated")) {
+            if (current.gateway == null) {
+                throw new IllegalStateException("Starweave Team coordinator is unavailable");
+            }
+            return success(current.gateway.mutate("delete", new JSONObject(request)));
+        }
         String requestId = textOr(request == null ? null : request.getString("requestId"),
                 UUID.randomUUID().toString());
         TeamDeleteCommand command = new TeamDeleteCommand(
@@ -138,7 +216,9 @@ public final class StarweaveTeamApiBridge {
         if ("send".equals(request.getString("action"))) {
             String teamId = required(request.getString("teamId"), "teamId");
             String memberId = required(request.getString("teamMemberId"), "teamMemberId");
-            String sessionId = currentSessionId(current, teamId, memberId,
+            String sessionId = request.getBooleanValue("coordinated")
+                    ? required(request.getString("sessionId"), "sessionId")
+                    : currentSessionId(current, teamId, memberId,
                     request.getString("sessionId"));
             JSONArray uploadIds = request.getJSONArray("uploadIds");
             JSONArray files = new JSONArray();
@@ -158,6 +238,16 @@ public final class StarweaveTeamApiBridge {
                 }
             }
             commandValue.put("files", files);
+        }
+        if (request.getBooleanValue("coordinated")) {
+            if (current.gateway == null) {
+                throw new IllegalStateException("Starweave Team coordinator is unavailable");
+            }
+            JSONObject data = current.gateway.mutate("member", commandValue);
+            for (StarweaveUploadStore.ResolvedUpload upload : resolvedUploads) {
+                UPLOADS.delete(upload.uploadId);
+            }
+            return success(data);
         }
         TeamMemberCommand command = GSON.fromJson(
                 commandValue.toJSONString(), TeamMemberCommand.class);
@@ -189,7 +279,9 @@ public final class StarweaveTeamApiBridge {
         if (request == null) throw new IllegalArgumentException("request body is required");
         String teamId = required(request.getString("teamId"), "teamId");
         String memberId = required(request.getString("teamMemberId"), "teamMemberId");
-        String sessionId = currentSessionId(current, teamId, memberId,
+        String sessionId = request.getBooleanValue("coordinated")
+                ? required(request.getString("sessionId"), "sessionId")
+                : currentSessionId(current, teamId, memberId,
                 request.getString("sessionId"));
         return UPLOADS.stage(uploadOwner(teamId, memberId), sessionId, 0L,
                 request.getString("fileName"), request.getString("contentBase64"));
@@ -239,6 +331,70 @@ public final class StarweaveTeamApiBridge {
             EVENTS.notifyAll();
         }
         return true;
+    }
+
+    /** Mixed Starweave fragments must also reach the MolaChat global coordinator. */
+    public static boolean requiresCoordinator(TeamEventEnvelope event) {
+        Runtime current = runtime;
+        if (current == null || event == null) return false;
+        java.util.Optional<com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime> team =
+                current.manager.getRuntime(event.getTeamId());
+        return team.isPresent() && current.ownerId.equals(
+                team.get().getDefinition().getOwnerChatterId())
+                && team.get().getDefinition().isMixedPlacement();
+    }
+
+    public static java.util.Map<String, String> acceptGatewayResult(
+            String rpcRequestId, String[] args) {
+        Runtime current = requireRuntime();
+        if (current.gateway == null) {
+            throw new IllegalStateException("Starweave Team coordinator is unavailable");
+        }
+        return current.gateway.acceptResult(rpcRequestId, args);
+    }
+
+    public static java.util.Map<String, String> acceptGatewayReady(
+            String rpcRequestId, String[] args) {
+        Runtime current = requireRuntime();
+        if (current.gateway == null) {
+            throw new IllegalStateException("Starweave Team coordinator is unavailable");
+        }
+        return current.gateway.acceptReady(rpcRequestId, args);
+    }
+
+    public static java.util.Map<String, String> acceptGatewayEvent(
+            String rpcRequestId, String[] args) {
+        if (args == null || args.length != 1) {
+            throw new IllegalArgumentException("exactly one event argument is required");
+        }
+        Runtime current = requireRuntime();
+        JSONObject wrapper = JSON.parseObject(args[0]);
+        if (wrapper == null || !current.ownerId.equals(wrapper.getString("ownerChatterId"))) {
+            throw new IllegalArgumentException("Starweave Team event owner mismatch");
+        }
+        JSONObject event = wrapper.getJSONObject("event");
+        if (event == null) throw new IllegalArgumentException("event is required");
+        String teamId = required(event.getString("teamId"), "event.teamId");
+        com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime team = current.manager
+                .getRuntime(teamId).orElseThrow(() ->
+                        new IllegalArgumentException("coordinated Team not found"));
+        TeamDefinition definition = team.getDefinition();
+        if (!definition.isMixedPlacement()
+                || !current.ownerId.equals(definition.getOwnerChatterId())) {
+            throw new IllegalArgumentException("event does not belong to a mixed Starweave Team");
+        }
+        String memberId = event.getString("teamMemberId");
+        if (memberId != null && !memberId.trim().isEmpty()
+                && definition.getRoster().stream().noneMatch(contact ->
+                memberId.equals(contact.getTargetTeamMemberId()))) {
+            throw new IllegalArgumentException("event Team member is not in the roster");
+        }
+        appendEvent(event);
+        java.util.Map<String, String> result = new java.util.LinkedHashMap<>();
+        result.put("requestId", rpcRequestId == null ? "" : rpcRequestId);
+        result.put("accepted", "true");
+        result.put("code", "OK");
+        return result;
     }
 
     public static JSONArray events(long afterSeq, String teamId, String teamMemberId) {
@@ -300,6 +456,13 @@ public final class StarweaveTeamApiBridge {
             throw new IllegalArgumentException("Team does not belong to Starweave owner");
         }
         if (teamMemberId == null || teamMemberId.trim().isEmpty()) return;
+        if (team.getDefinition().isMixedPlacement()) {
+            for (com.mola.cmd.proxy.app.acp.team.model.TeamContactRef contact
+                    : team.getDefinition().getRoster()) {
+                if (teamMemberId.equals(contact.getTargetTeamMemberId())) return;
+            }
+            throw new IllegalArgumentException("Team member not found");
+        }
         for (com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition member
                 : team.getDefinition().getMembers()) {
             if (teamMemberId.equals(member.getTeamMemberId())) return;
@@ -336,6 +499,45 @@ public final class StarweaveTeamApiBridge {
         return JSON.parseObject(GSON.toJson(result));
     }
 
+    private static JSONObject success(JSONObject data) {
+        JSONObject result = new JSONObject(true);
+        result.put("accepted", true);
+        result.put("code", "OK");
+        result.put("message", "OK");
+        result.put("data", data == null ? new JSONObject(true) : data);
+        return result;
+    }
+
+    private static void appendEvent(JSONObject source) {
+        JSONObject event = new JSONObject(source);
+        synchronized (EVENTS) {
+            String eventId = event.getString("eventId");
+            if (eventId != null) {
+                for (JSONObject existing : EVENTS) {
+                    if (eventId.equals(existing.getString("eventId"))) return;
+                }
+            }
+            event.put("teamEventSeq", event.getLongValue("eventSeq"));
+            event.put("eventSeq", EVENT_SEQUENCE.incrementAndGet());
+            EVENTS.addLast(event);
+            while (EVENTS.size() > EVENT_CAPACITY) EVENTS.removeFirst();
+            EVENTS.notifyAll();
+        }
+    }
+
+    private static String sourceIdentity(JSONObject source) {
+        return textOr(source.getString("cmdProxyInstanceId"), "") + "\n"
+                + textOr(source.getString("sourceGroupId"), "") + "\n"
+                + textOr(source.getString("sourceRobotId"), "");
+    }
+
+    private static int indexOfSource(JSONArray values, String identity) {
+        for (int i = 0; i < values.size(); i++) {
+            if (identity.equals(sourceIdentity(values.getJSONObject(i)))) return i;
+        }
+        return -1;
+    }
+
     private static TeamMemberSourceDescriptor findSource(
             List<TeamMemberSourceDescriptor> sources, String groupId) {
         for (TeamMemberSourceDescriptor source : sources) {
@@ -365,15 +567,20 @@ public final class StarweaveTeamApiBridge {
     private static final class Runtime {
         final TeamManager manager;
         final String ownerId;
+        final String instanceId;
         final String transportGroup;
         final Supplier<List<TeamMemberSourceDescriptor>> sources;
+        final StarweaveTeamGateway gateway;
 
         Runtime(TeamManager manager, String instanceId,
-                Supplier<List<TeamMemberSourceDescriptor>> sources) {
+                Supplier<List<TeamMemberSourceDescriptor>> sources,
+                StarweaveTeamGateway gateway) {
             this.manager = manager;
+            this.instanceId = instanceId;
             this.ownerId = StarweaveIdentity.ownerId(instanceId);
             this.transportGroup = "starweave-team:" + instanceId;
             this.sources = sources;
+            this.gateway = gateway;
         }
     }
 }

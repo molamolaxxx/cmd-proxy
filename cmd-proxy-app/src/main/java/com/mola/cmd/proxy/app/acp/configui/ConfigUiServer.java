@@ -566,6 +566,7 @@ public class ConfigUiServer {
         // 格式化写入
         JSONObject json = JSON.parseObject(body);
         if (json.getJSONArray("robots") != null) {
+            java.util.Set<String> robotNames = new java.util.HashSet<>();
             for (int i = 0; i < json.getJSONArray("robots").size(); i++) {
                 JSONObject robot = json.getJSONArray("robots").getJSONObject(i);
                 if (robot != null) {
@@ -579,6 +580,21 @@ public class ConfigUiServer {
                             "{\"error\":\"onlySubAgent and onlyTeamMember cannot both be true\"}");
                     return;
                 }
+                String robotName = robot == null ? "" : robot.getString("name");
+                robotName = robotName == null ? "" : robotName.trim();
+                if (robotName.isEmpty()) {
+                    sendResponse(exchange, 400, "application/json",
+                            "{\"error\":\"robot name is required\"}");
+                    return;
+                }
+                if (!robotNames.add(robotName)) {
+                    JSONObject error = new JSONObject(true);
+                    error.put("error", "duplicate robot name: " + robotName);
+                    sendResponse(exchange, 400, "application/json",
+                            JSON.toJSONString(error));
+                    return;
+                }
+                robot.put("name", robotName);
             }
         }
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。

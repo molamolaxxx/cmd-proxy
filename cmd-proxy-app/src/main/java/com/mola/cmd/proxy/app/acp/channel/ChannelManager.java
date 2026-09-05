@@ -11,6 +11,7 @@ import com.mola.cmd.proxy.app.acp.team.TeamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,6 +41,7 @@ public final class ChannelManager implements AutoCloseable {
     private final ChannelTalkToGateway gateway;
     private final ChannelTalkToBridge bridge;
     private final TeamManager teamManager;
+    private final ChannelAffinityStore affinityStore;
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     public ChannelManager(List<ChannelConfig> configuredChannels, String instanceId,
@@ -52,9 +54,11 @@ public final class ChannelManager implements AutoCloseable {
         this.dispatcher = dispatcher;
         this.adapterFactory = adapterFactory;
         this.teamManager = teamManager;
+        this.affinityStore = new ChannelAffinityStore();
         this.gateway = new ChannelTalkToGateway(adapters, configs);
         this.bridge = new ChannelTalkToBridge(configs,
-                new DefaultChannelBindingResolver(clientRegistry, dispatcher, teamManager), gateway);
+                new DefaultChannelBindingResolver(clientRegistry, dispatcher, teamManager,
+                        affinityStore), gateway);
     }
 
     public ChannelManager(List<ChannelConfig> configuredChannels, String instanceId,
@@ -136,6 +140,8 @@ public final class ChannelManager implements AutoCloseable {
             if (error != null) throw new IllegalArgumentException(error);
         }
 
+        ChannelConfig previousConfig = previousId.isEmpty() ? null : configs.get(previousId);
+        clearChangedAffinityScope(previousId, previousConfig, newId, config);
         if (!previousId.isEmpty()) removeChannel(previousId);
         if (!newId.isEmpty() && !newId.equals(previousId)) removeChannel(newId);
         if (config == null) {
@@ -185,6 +191,29 @@ public final class ChannelManager implements AutoCloseable {
         errors.remove(channelId);
     }
 
+    private void clearChangedAffinityScope(String previousId, ChannelConfig previous,
+                                           String newId, ChannelConfig replacement) {
+        if (!isAffinity(previous)) return;
+        ChannelBinding oldBinding = previous.getBinding();
+        boolean unchanged = isAffinity(replacement)
+                && previousId.equals(newId)
+                && trim(oldBinding.getTeamId()).equals(
+                        trim(replacement.getBinding().getTeamId()));
+        if (unchanged) return;
+        try {
+            affinityStore.clearScope(instanceId, previousId, oldBinding.getTeamId());
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to clear channel affinity state", e);
+        }
+    }
+
+    private static boolean isAffinity(ChannelConfig config) {
+        return config != null && config.getBinding() != null
+                && ChannelBinding.TYPE_TEAM_MEMBER.equals(config.getBinding().getType())
+                && ChannelBinding.MEMBER_SELECTION_AFFINITY.equals(
+                        config.getBinding().effectiveTeamMemberSelection());
+    }
+
     private String validate(ChannelConfig config, Set<String> ids, Set<String> botIds) {
         if (config == null) return "channel is null";
         String id = trim(config.getId());
@@ -218,7 +247,19 @@ public final class ChannelManager implements AutoCloseable {
                 return "TEAM_MEMBER binding cannot contain groupId";
             }
             if (trim(binding.getTeamId()).isEmpty()) return "binding.teamId is required";
-            if (trim(binding.getTeamMemberId()).isEmpty()) return "binding.teamMemberId is required";
+            String selection = binding.effectiveTeamMemberSelection();
+            if (!ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)
+                    && !ChannelBinding.MEMBER_SELECTION_RANDOM.equals(selection)
+                    && !ChannelBinding.MEMBER_SELECTION_AFFINITY.equals(selection)) {
+                return "unsupported binding.teamMemberSelection";
+            }
+            if (ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)) {
+                if (trim(binding.getTeamMemberId()).isEmpty()) {
+                    return "binding.teamMemberId is required";
+                }
+            } else if (!trim(binding.getTeamMemberId()).isEmpty()) {
+                return "automatic TEAM_MEMBER binding cannot contain teamMemberId";
+            }
         } else {
             return "unsupported binding.type";
         }

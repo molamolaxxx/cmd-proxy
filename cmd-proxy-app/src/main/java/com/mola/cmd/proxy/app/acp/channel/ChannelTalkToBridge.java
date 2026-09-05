@@ -78,11 +78,11 @@ public final class ChannelTalkToBridge {
                 return TalkToDispatcher.InboundDeliveryResult.rejected(
                         "channel private chat disabled");
             }
-            ChannelBoundTarget target = bindingResolver.resolve(config.getBinding());
+            ChannelBoundTarget target = bindingResolver.resolve(config.getBinding(), event);
             AcpClient client = target == null ? null : target.getClient();
             if (!isMainClient(client)) {
                 String replyTarget = gateway.createRoute(event.getChannelId(),
-                        event.getReplyRoute(), ownerKey(config.getBinding()));
+                        event.getReplyRoute(), null);
                 replyFailureAsync(replyTarget, "信道当前未绑定到可用的 ACP，请检查配置。");
                 return TalkToDispatcher.InboundDeliveryResult.rejected("ACP binding not found");
             }
@@ -93,7 +93,7 @@ public final class ChannelTalkToBridge {
                         event.getChannelId(), event.getEventId(), event.getAttachments());
             } catch (IOException e) {
                 String replyTarget = gateway.createRoute(event.getChannelId(),
-                        event.getReplyRoute(), ownerKey(config.getBinding()));
+                        event.getReplyRoute(), target.getSenderKey());
                 replyFailureAsync(replyTarget, "附件下载或保存失败，请稍后重试。");
                 return TalkToDispatcher.InboundDeliveryResult.rejected(
                         "attachment staging failed: " + e.getMessage());
@@ -102,7 +102,7 @@ public final class ChannelTalkToBridge {
                 return TalkToDispatcher.InboundDeliveryResult.saved();
             }
 
-            String ownerKey = ownerKey(config.getBinding());
+            String ownerKey = target.getSenderKey();
             String replyTarget = gateway.createRoute(
                     event.getChannelId(), event.getReplyRoute(), ownerKey);
 
@@ -110,7 +110,7 @@ public final class ChannelTalkToBridge {
                     replyTarget, config.getId(), event.getSenderDisplayName(), event.getSenderId(),
                     event.getReplyRoute().getChatType(), event.getReplyRoute().getChatId(),
                     event.getMessageType(), event.getContent(), event.getQuotedMessage(),
-                    localAttachments);
+                    localAttachments, ownerKey);
             TalkToDispatcher.InboundDeliveryResult result = deliverInbound(
                     config, target, client, message);
             if (result.getStatus() != TalkToDispatcher.InboundDeliveryResult.Status.REJECTED
@@ -252,11 +252,4 @@ public final class ChannelTalkToBridge {
         return "single".equals(chatType);
     }
 
-    private static String ownerKey(com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding binding) {
-        if (com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding.TYPE_TEAM_MEMBER
-                .equals(binding.getType())) {
-            return "team:" + binding.getTeamId().trim() + ":" + binding.getTeamMemberId().trim();
-        }
-        return binding.getGroupId().trim();
-    }
 }

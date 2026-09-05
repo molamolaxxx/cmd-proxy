@@ -37,6 +37,15 @@ public final class ChannelTalkToMessage extends TalkToMessage {
                                 String chatType, String chatId, String messageType,
                                 String content, ChannelQuotedMessage quotedMessage,
                                 List<String> localAttachments) {
+        this(replyTarget, channelDisplayName, senderDisplayName, senderId, chatType,
+                chatId, messageType, content, quotedMessage, localAttachments, null);
+    }
+
+    public ChannelTalkToMessage(String replyTarget, String channelDisplayName,
+                                String senderDisplayName, String senderId,
+                                String chatType, String chatId, String messageType,
+                                String content, ChannelQuotedMessage quotedMessage,
+                                List<String> localAttachments, String ownerKey) {
         super(replyTarget, content, 1, localAttachments);
         this.channelDisplayName = channelDisplayName;
         this.senderDisplayName = senderDisplayName;
@@ -46,7 +55,7 @@ public final class ChannelTalkToMessage extends TalkToMessage {
         this.messageType = messageType;
         this.quotedMessage = quotedMessage;
         this.turnContext = turnContext(replyTarget, channelDisplayName, chatType, chatId,
-                senderId, senderDisplayName);
+                senderId, senderDisplayName, ownerKey);
     }
 
     public String getChannelDisplayName() {
@@ -98,9 +107,17 @@ public final class ChannelTalkToMessage extends TalkToMessage {
     private static ChannelTurnContext turnContext(String replyTarget, String channelId,
                                                   String chatType, String chatId,
                                                   String senderId, String senderDisplayName) {
+        return turnContext(replyTarget, channelId, chatType, chatId, senderId,
+                senderDisplayName, null);
+    }
+
+    private static ChannelTurnContext turnContext(String replyTarget, String channelId,
+                                                  String chatType, String chatId,
+                                                  String senderId, String senderDisplayName,
+                                                  String ownerKey) {
         String address = "group".equals(chatType) ? chatId : senderId;
-        return new ChannelTurnContext(channelId, replyTarget, chatType, address,
-                senderId, senderDisplayName);
+        return ChannelTurnContext.owned(channelId, replyTarget, chatType, address,
+                senderId, senderDisplayName, ownerKey);
     }
 
     private static String safe(String value) {

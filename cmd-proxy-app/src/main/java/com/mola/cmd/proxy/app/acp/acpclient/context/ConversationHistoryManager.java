@@ -172,19 +172,24 @@ public class ConversationHistoryManager {
     // ==================== 消息收集 ====================
 
     /** 记录一条用户消息 */
-    public void addUserMessage(String content) {
+    public synchronized void addUserMessage(String content) {
         currentTurn.add(new ContextMessage(ContextMessage.Role.USER, content));
     }
 
     /** 记录一条 agent 回答 */
-    public void addAssistantMessage(String content) {
+    public synchronized void addAssistantMessage(String content) {
         currentTurn.add(new ContextMessage(ContextMessage.Role.ASSISTANT, content));
     }
 
     /** 记录一条工具调用结果 */
-    public void addToolMessage(String toolCallId, String toolName, String status,
+    public synchronized void addToolMessage(String toolCallId, String toolName, String status,
                                JsonObject rawInput, JsonObject rawOutput) {
         currentTurn.add(new ContextMessage(toolCallId, toolName, status, rawInput, rawOutput));
+    }
+
+    /** Records a UI-only business event alongside the turn without changing model context. */
+    public synchronized void addEventMessage(String eventType, JsonObject eventData) {
+        currentTurn.add(ContextMessage.event(eventType, eventData));
     }
 
     /**
@@ -307,7 +312,7 @@ public class ConversationHistoryManager {
      *
      * @param sessionId 当前会话 ID
      */
-    public void flushTurn(String sessionId) {
+    public synchronized void flushTurn(String sessionId) {
         if (currentTurn.isEmpty() || sessionId == null) {
             return;
         }
@@ -344,7 +349,7 @@ public class ConversationHistoryManager {
     /**
      * 强制落盘（用于 close 等场景的兜底）。
      */
-    public void forceFlush(String sessionId) {
+    public synchronized void forceFlush(String sessionId) {
         if (!currentTurn.isEmpty()) {
             flushTurn(sessionId);
         }
@@ -491,7 +496,7 @@ public class ConversationHistoryManager {
     /**
      * 获取完整的会话上下文（磁盘 + 内存未落盘部分）。
      */
-    public List<ContextMessage> getFullHistory(String sessionId) {
+    public synchronized List<ContextMessage> getFullHistory(String sessionId) {
         List<ContextMessage> result = new ArrayList<>();
         if (sessionId != null) {
             Path sessionDir = sessionBaseDir.resolve(sessionId);
@@ -524,8 +529,8 @@ public class ConversationHistoryManager {
     /**
      * 获取当前 turn 内存中尚未落盘的消息（只读）。
      */
-    public List<ContextMessage> getCurrentTurn() {
-        return Collections.unmodifiableList(currentTurn);
+    public synchronized List<ContextMessage> getCurrentTurn() {
+        return Collections.unmodifiableList(new ArrayList<>(currentTurn));
     }
 
     /**
@@ -592,7 +597,7 @@ public class ConversationHistoryManager {
     /**
      * 重置状态（用于 session 重建等场景）。
      */
-    public void reset() {
+    public synchronized void reset() {
         currentTurn.clear();
         fileAbsolutePaths.clear();
         turnCounter.set(0);
@@ -798,6 +803,9 @@ public class ConversationHistoryManager {
             obj.addProperty("status", msg.getStatus());
             if (msg.getRawInput() != null) obj.add("rawInput", msg.getRawInput());
             if (msg.getRawOutput() != null) obj.add("rawOutput", msg.getRawOutput());
+        } else if (msg.getRole() == ContextMessage.Role.EVENT) {
+            obj.addProperty("eventType", msg.getEventType());
+            obj.add("eventData", msg.getEventData());
         } else {
             obj.addProperty("content", msg.getContent());
         }
@@ -814,6 +822,12 @@ public class ConversationHistoryManager {
                     obj.has("rawInput") ? obj.getAsJsonObject("rawInput") : null,
                     obj.has("rawOutput") ? obj.getAsJsonObject("rawOutput") : null
             );
+        }
+        if (role == ContextMessage.Role.EVENT) {
+            return ContextMessage.event(
+                    obj.has("eventType") ? obj.get("eventType").getAsString() : "UNKNOWN",
+                    obj.has("eventData") && obj.get("eventData").isJsonObject()
+                            ? obj.getAsJsonObject("eventData") : new JsonObject());
         }
         return new ContextMessage(role, obj.has("content") ? obj.get("content").getAsString() : "");
     }

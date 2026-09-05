@@ -13,11 +13,9 @@ public final class TeamTalkToCardRenderer {
                                 String peerDisplayName, String content,
                                 String delivery, String reason) {
         String memberId = requireMemberId(peerTeamMemberId);
-        String label = escapeHtml(memberId);
-        if (peerDisplayName != null && !peerDisplayName.trim().isEmpty()
-                && !memberId.equals(peerDisplayName.trim())) {
-            label += "（" + escapeHtml(peerDisplayName.trim()) + "）";
-        }
+        String displayName = peerDisplayName == null
+                ? "" : peerDisplayName.trim();
+        String label = escapeHtml(displayName.isEmpty() ? memberId : displayName);
         String icon;
         String title;
         if ("TALK_TO_RECEIVE".equals(eventType)) {

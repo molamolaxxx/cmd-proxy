@@ -391,6 +391,9 @@ public class MemoryExtractor {
                             msg.getRawInput() != null ? msg.getRawInput().toString() : "",
                             msg.getRawOutput() != null ? truncate(msg.getRawOutput().toString(), 500) : ""));
                     break;
+                case EVENT:
+                    // UI projection only; USER/ASSISTANT/TOOL already contain model context.
+                    break;
             }
         }
         return sb.toString();

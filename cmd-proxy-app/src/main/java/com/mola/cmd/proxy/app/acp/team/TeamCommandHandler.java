@@ -86,6 +86,10 @@ public final class TeamCommandHandler {
         return handleMember(rpcRequestId, args, manager::listSessions);
     }
 
+    public Map<String, String> handleGetSessionHistory(String rpcRequestId, String[] args) {
+        return handleMember(rpcRequestId, args, manager::getSessionHistory);
+    }
+
     public Map<String, String> handleRestoreSession(String rpcRequestId, String[] args) {
         return handleMember(rpcRequestId, args, manager::restoreSession);
     }
