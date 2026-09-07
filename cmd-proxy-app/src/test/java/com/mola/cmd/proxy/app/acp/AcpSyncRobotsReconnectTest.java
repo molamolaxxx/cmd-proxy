@@ -65,6 +65,29 @@ public class AcpSyncRobotsReconnectTest {
     }
 
     @Test
+    public void starweaveOnlyInstancePublishesReadyDiscoveryWithoutVisibleChatter() {
+        AcpSyncRobotsSnapshot snapshot = new AcpSyncRobotsSnapshot(
+                "[]", "[]",
+                TeamTransportDescriptor.readyForBusiness("remote-instance"));
+        AtomicReference<Map<String, String>> published = new AtomicReference<>();
+        AcpSyncRobotsHeartbeat heartbeat = new AcpSyncRobotsHeartbeat(
+                snapshot, published::set, 1L, TimeUnit.DAYS);
+
+        try {
+            heartbeat.start();
+            heartbeat.publishOnce();
+
+            assertEquals("[]", published.get().get("visibleChatterIds"));
+            assertEquals("remote-instance",
+                    published.get().get("teamCmdProxyInstanceId"));
+            assertTrue(JsonParser.parseString(published.get().get("teamDiscovery"))
+                    .getAsJsonObject().get("businessCommandsReady").getAsBoolean());
+        } finally {
+            heartbeat.close();
+        }
+    }
+
+    @Test
     public void hotReloadStopRevokesReadyDiscoveryWithoutDroppingOrdinaryRobots() {
         AcpSyncRobotsSnapshot snapshot = new AcpSyncRobotsSnapshot(
                 "[{\"name\":\"robot-a\"}]", "[\"owner-a\"]",

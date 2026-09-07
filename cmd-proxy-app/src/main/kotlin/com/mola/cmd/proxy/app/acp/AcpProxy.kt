@@ -386,9 +386,9 @@ object AcpProxy {
         startScheduler(groupRobotMap)
         startAutoNewSession()
 
-        // 会话注册完成后，调用 acpSyncRobots 通知服务端同步 robot 信息
-        if (activeChatterIds.isNotEmpty()
-            && !robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank()) {
+        // 会话注册完成后发布完整 discovery。Starweave-only 实例虽然没有
+        // MolaChat chatterId，仍是 Mixed Team participant，必须持续向协调器续租。
+        if (!robotsJson.isNullOrBlank() && !chatterIdsJson.isNullOrBlank()) {
             try {
                 publishAcpSyncRobots()
                 log.info("acpSyncRobots 回调已发送")
@@ -396,18 +396,14 @@ object AcpProxy {
                 log.error("acpSyncRobots 回调发送失败", e)
             }
         }
-        if (activeChatterIds.isNotEmpty()) {
-            acpSyncRobotsHeartbeat = AcpSyncRobotsHeartbeat(
-                acpSyncRobotsSnapshot,
-                { snapshot -> publishAcpSyncRobots(snapshot) },
-                20L,
-                TimeUnit.SECONDS
-            ).also { it.start() }
-            log.info("acpSyncRobots heartbeat 已启动, intervalSeconds=20")
-        } else {
-            acpSyncRobotsHeartbeat = null
-            log.info("未配置 MolaChat chatterId，跳过 acpSyncRobots callback 与 heartbeat")
-        }
+        acpSyncRobotsHeartbeat = AcpSyncRobotsHeartbeat(
+            acpSyncRobotsSnapshot,
+            { snapshot -> publishAcpSyncRobots(snapshot) },
+            20L,
+            TimeUnit.SECONDS
+        ).also { it.start() }
+        log.info("acpSyncRobots heartbeat 已启动, intervalSeconds=20, visibleChatterCount={}",
+            activeChatterIds.size)
 
         log.info("AcpProxy 命令注册完成")
     }
@@ -2203,12 +2199,8 @@ object AcpProxy {
                 CmdProxyHome.instanceId(), coordinatorTeamMemberSourceDescriptors(),
                 remoteTeamMemberSourceDescriptors())
             acpSyncRobotsSnapshot.updateTeamDescriptor(teamTransportDescriptor)
-            if (activeChatterIds.isNotEmpty()) {
-                publishAcpSyncRobots()
-                log.info("acpSyncRobots 回调已发送 (robot级重载后)")
-            } else {
-                log.info("未配置 MolaChat chatterId，robot 级重载跳过 acpSyncRobots callback")
-            }
+            publishAcpSyncRobots()
+            log.info("acpSyncRobots 回调已发送 (robot级重载后)")
         } catch (e: Exception) {
             log.error("acpSyncRobots 回调发送失败 (robot级重载)", e)
         }
