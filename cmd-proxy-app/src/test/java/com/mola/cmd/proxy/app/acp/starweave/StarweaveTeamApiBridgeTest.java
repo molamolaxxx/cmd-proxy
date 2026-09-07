@@ -189,6 +189,64 @@ public class StarweaveTeamApiBridgeTest {
     }
 
     @Test
+    public void listMergesLocalTeamsWithCoordinatorMixedTeams() throws Exception {
+        String instanceId = "instance-home";
+        String ownerId = StarweaveIdentity.ownerId(instanceId);
+        AcpRobotParam localRobot = robot("Local", false);
+        TeamMemberSourceDescriptor localSource = source(instanceId, ownerId, localRobot);
+        Map<String, AcpRobotParam> robots = new LinkedHashMap<>();
+        robots.put(localSource.getSourceGroupId(), localRobot);
+        TeamManager manager = new TeamManager(
+                new TeamStore(temporary.newFolder("merged-list").toPath()),
+                new TeamClientRegistry(), new MapTeamSourceRobotResolver(robots));
+        assertTrue(manager.create(new TeamCreateCommand("1", "request-local",
+                "team-local", ownerId, "Local Team",
+                java.util.Collections.singletonList(new TeamMemberCreateSpec(
+                        "member-local", localSource.getSourceRobotId(),
+                        localSource.getSourceGroupId(), 0))),
+                "team-acp-" + instanceId).isAccepted());
+
+        final StarweaveTeamGateway[] holder = new StarweaveTeamGateway[1];
+        holder[0] = new StarweaveTeamGateway(instanceId, "team-acp-" + instanceId,
+                200L, 200L, (command, group, callback) -> {
+            JSONObject mixed = new JSONObject(true);
+            mixed.put("teamId", "team-mixed");
+            mixed.put("ownerChatterId", ownerId);
+            mixed.put("name", "Mixed Team");
+            mixed.put("state", "READY");
+            mixed.put("members", new JSONArray());
+            JSONObject data = new JSONObject(true);
+            data.put("teams", new JSONArray(
+                    java.util.Collections.singletonList(mixed)));
+            JSONObject response = new JSONObject(true);
+            response.put("requestId", callback.getCmdId());
+            response.put("accepted", true);
+            response.put("code", "OK");
+            response.put("data", data);
+            holder[0].acceptResult("rpc-result",
+                    new String[]{response.toJSONString()});
+        });
+        JSONObject ready = new JSONObject(true);
+        ready.put("instanceId", instanceId);
+        ready.put("ownerChatterId", ownerId);
+        holder[0].acceptReady("ready", new String[]{ready.toJSONString()});
+        StarweaveTeamApiBridge.install(manager, instanceId,
+                () -> java.util.Collections.singletonList(localSource), holder[0]);
+        try {
+            JSONArray teams = StarweaveTeamApiBridge.list()
+                    .getJSONObject("data").getJSONArray("teams");
+
+            assertEquals(2, teams.size());
+            assertEquals("team-local", teams.getJSONObject(0).getString("teamId"));
+            assertEquals("team-mixed", teams.getJSONObject(1).getString("teamId"));
+            assertTrue(teams.getJSONObject(1).getBooleanValue("coordinated"));
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
+    }
+
+    @Test
     public void coordinatorReplacesLocalSourceAndReceivesStableMixedSelection()
             throws Exception {
         String instanceId = "instance-home";

@@ -60,27 +60,40 @@ public final class StarweaveTeamApiBridge {
 
     public static JSONObject list() {
         Runtime current = requireRuntime();
+        JSONObject local = result(current.manager.list(new TeamQuery(
+                TeamDefinition.SCHEMA_VERSION, current.ownerId, null, null)));
+        JSONObject localData = local.getJSONObject("data");
+        JSONArray localTeams = localData == null ? null : localData.getJSONArray("teams");
+        if (localTeams == null) {
+            localTeams = new JSONArray();
+            if (localData == null) {
+                localData = new JSONObject(true);
+                local.put("data", localData);
+            }
+            localData.put("teams", localTeams);
+        }
         if (current.gateway != null) {
             try {
                 JSONObject data = current.gateway.query("list", new JSONObject(true));
                 JSONArray teams = data.getJSONArray("teams");
                 if (teams != null) {
                     for (int i = 0; i < teams.size(); i++) {
-                        teams.getJSONObject(i).put("coordinated", true);
+                        JSONObject coordinated = teams.getJSONObject(i);
+                        coordinated.put("coordinated", true);
+                        int localIndex = indexOfTeam(
+                                localTeams, coordinated.getString("teamId"));
+                        if (localIndex >= 0) localTeams.set(localIndex, coordinated);
+                        else localTeams.add(coordinated);
                     }
-                    return success(data);
+                    return local;
                 }
             } catch (IllegalStateException ignored) {
                 // Starweave remains fully usable in local-only deployments.
             }
         }
-        JSONObject local = result(current.manager.list(new TeamQuery(
-                TeamDefinition.SCHEMA_VERSION, current.ownerId, null, null)));
-        JSONObject data = local.getJSONObject("data");
-        JSONArray teams = data == null ? null : data.getJSONArray("teams");
-        if (teams != null) {
-            for (int i = 0; i < teams.size(); i++) {
-                JSONObject team = teams.getJSONObject(i);
+        if (localTeams != null) {
+            for (int i = 0; i < localTeams.size(); i++) {
+                JSONObject team = localTeams.getJSONObject(i);
                 if (team.getBooleanValue("mixedPlacement")) {
                     // A persisted local fragment is not an ordinary local Team. Keep all
                     // mutations fail-closed through the coordinator while it reconnects.
@@ -90,6 +103,14 @@ public final class StarweaveTeamApiBridge {
             }
         }
         return local;
+    }
+
+    private static int indexOfTeam(JSONArray teams, String teamId) {
+        if (teamId == null) return -1;
+        for (int i = 0; i < teams.size(); i++) {
+            if (teamId.equals(teams.getJSONObject(i).getString("teamId"))) return i;
+        }
+        return -1;
     }
 
     public static JSONObject sources() {
