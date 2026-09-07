@@ -152,6 +152,23 @@ public class ConversationHistoryManagerTest {
     }
 
     @Test
+    public void internalUserOriginsSurviveFlushWithoutChangingModelRole() throws Exception {
+        Path root = temporaryFolder.newFolder("origin-sessions").toPath();
+        AcpClientIdentity identity = teamIdentity("team/team-1/member-origin");
+        ConversationHistoryManager writer = new ConversationHistoryManager(identity, root);
+        writer.addUserMessage("[Starweave Task] internal",
+                ContextMessage.UserOrigin.TASK);
+        writer.addAssistantMessage("done");
+        writer.flushTurn("session-origin");
+
+        ConversationHistoryManager reader = new ConversationHistoryManager(identity, root);
+        ContextMessage message = reader.getFullHistory("session-origin").get(0);
+        assertEquals(ContextMessage.Role.USER, message.getRole());
+        assertEquals(ContextMessage.UserOrigin.TASK, message.getUserOrigin());
+        assertFalse(message.isVisibleUserMessage());
+    }
+
+    @Test
     public void repeatedSessionDirectoryScansDoNotLeakFileDescriptors()
             throws Exception {
         Path procFds = Paths.get("/proc/self/fd");

@@ -66,6 +66,11 @@ public final class LifecycleGuardedAcpResponseListener implements AcpResponseLis
     }
 
     @Override
+    public void onTaskEvent(JsonObject payload) {
+        forward("onTaskEvent", () -> delegate.onTaskEvent(payload));
+    }
+
+    @Override
     public void onComplete(String fullResponse) {
         forward("onComplete", () -> delegate.onComplete(fullResponse));
     }

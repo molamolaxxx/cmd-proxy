@@ -19,8 +19,14 @@ public class ContextMessage {
         USER, ASSISTANT, TOOL, EVENT
     }
 
+    /** Identifies who supplied a USER-role prompt without removing it from model context. */
+    public enum UserOrigin {
+        USER, TASK, CHANNEL, TALK_TO, SCHEDULE
+    }
+
     private final Role role;
     private final String content;
+    private final UserOrigin userOrigin;
 
     // ---- TOOL 专用字段 ----
     private final String toolCallId;
@@ -35,8 +41,15 @@ public class ContextMessage {
 
     /** 构造 USER / ASSISTANT 消息 */
     public ContextMessage(Role role, String content) {
+        this(role, content, role == Role.USER ? UserOrigin.USER : null);
+    }
+
+    /** Constructs a USER message whose internal origin remains available to UI projections. */
+    public ContextMessage(Role role, String content, UserOrigin userOrigin) {
         this.role = role;
         this.content = content;
+        this.userOrigin = role == Role.USER
+                ? (userOrigin == null ? UserOrigin.USER : userOrigin) : null;
         this.toolCallId = null;
         this.toolName = null;
         this.status = null;
@@ -51,6 +64,7 @@ public class ContextMessage {
                           JsonObject rawInput, JsonObject rawOutput) {
         this.role = Role.TOOL;
         this.content = null;
+        this.userOrigin = null;
         this.toolCallId = toolCallId;
         this.toolName = toolName;
         this.status = status;
@@ -63,6 +77,7 @@ public class ContextMessage {
     private ContextMessage(String eventType, JsonObject eventData) {
         this.role = Role.EVENT;
         this.content = null;
+        this.userOrigin = null;
         this.toolCallId = null;
         this.toolName = null;
         this.status = null;
@@ -81,6 +96,10 @@ public class ContextMessage {
 
     public Role getRole() { return role; }
     public String getContent() { return content; }
+    public UserOrigin getUserOrigin() { return userOrigin; }
+    public boolean isVisibleUserMessage() {
+        return role != Role.USER || userOrigin == null || userOrigin == UserOrigin.USER;
+    }
     public String getToolCallId() { return toolCallId; }
     public String getToolName() { return toolName; }
     public String getStatus() { return status; }

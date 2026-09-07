@@ -46,6 +46,25 @@ public class StarweaveAcpResponseListenerTest {
     }
 
     @Test
+    public void taskEventKeepsBusinessEventIdInStructuredJournal() {
+        StarweaveSessionEventStore store = new StarweaveSessionEventStore(10);
+        StarweaveAcpResponseListener listener = new StarweaveAcpResponseListener(
+                "group-task", () -> "session-task", () -> 2L, store);
+        JsonObject card = new JsonObject();
+        card.addProperty("cardType", "STARWEAVE_TASK");
+        card.addProperty("eventId", "task-event-1");
+        card.addProperty("taskId", "task-1");
+
+        listener.onTaskEvent(card);
+
+        StarweaveSessionEvent event = store.snapshot(
+                "group-task", "session-task", 0L).get(0);
+        assertEquals("TASK_EVENT", event.getType());
+        assertEquals("task-event-1", event.toJson().getJSONObject("payload")
+                .getString("eventId"));
+    }
+
+    @Test
     public void boundedStoreDropsOldestEvents() {
         StarweaveSessionEventStore store = new StarweaveSessionEventStore(2);
         store.append("group-1", "session-1", 1L, "ONE", null);

@@ -97,6 +97,29 @@ public class TeamTalkToContextInjectorTest {
     }
 
     @Test
+    public void captainMemberSeesEveryoneWhileOrdinaryMemberSeesOnlyCaptain() {
+        TeamRuntime runtime = captainRuntime();
+
+        TeamTalkToContextInjector captain = new TeamTalkToContextInjector(
+                runtime, "member-1");
+        TeamTalkToContextInjector ordinary = new TeamTalkToContextInjector(
+                runtime, "member-2", requested -> Collections.singletonList(
+                new ExternalTalkToContact("channel:wecom", "wecom", "external")),
+                "team:team-1:member-2");
+
+        assertEquals(2, captain.contacts().size());
+        assertEquals(Collections.singletonList("member-1"), ordinary.contacts().stream()
+                .map(TeamContactRef::getTargetTeamMemberId)
+                .collect(java.util.stream.Collectors.toList()));
+        String context = ordinary.buildContext(Collections.emptyList(),
+                Collections.emptyMap(), "ignored");
+        assertTrue(context.contains("当前成员是普通队员"));
+        assertTrue(context.contains("队内消息只能发送给队长"));
+        assertFalse(context.contains("Display member-3"));
+        assertFalse(context.contains("channel:wecom"));
+    }
+
+    @Test
     public void singleMemberTeamExplainsThatTeamTalkToIsUnavailable() {
         TeamTalkToContextInjector injector =
                 new TeamTalkToContextInjector(singleMemberRuntime(), "member-1");
@@ -124,6 +147,18 @@ public class TeamTalkToContextInjectorTest {
         TeamDefinition creating = TeamDefinition.creating(
                 "team-1", "owner-1", "Fast Team", "team-acp-instance", "request-1",
                 Collections.singletonList(member("member-1", 0)), 100L);
+        return new TeamRuntime(creating);
+    }
+
+    private static TeamRuntime captainRuntime() {
+        TeamMemberDefinition captain = member("member-1", 0, "coordinates");
+        TeamMemberDefinition second = member("member-2", 1, "backend");
+        TeamMemberDefinition third = member("member-3", 2, "frontend");
+        TeamDefinition creating = TeamDefinition.creating(
+                "team-1", "owner-1", "Captain Team", "team-acp-instance", "request-1",
+                Arrays.asList(captain, second, third), false, null,
+                com.mola.cmd.proxy.app.acp.team.model.TeamMode.CAPTAIN,
+                "member-1", 100L);
         return new TeamRuntime(creating);
     }
 

@@ -261,6 +261,8 @@ public final class TeamManager implements AutoCloseable {
         String requestId = command == null ? "" : command.getRequestId();
         try {
             validateCreate(command, transportGroup);
+        } catch (TeamValidationException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
         } catch (IllegalArgumentException e) {
             return TeamCommandResult.error(requestId,
                     TeamErrorCode.VALIDATION_ERROR, e.getMessage());
@@ -332,7 +334,9 @@ public final class TeamManager implements AutoCloseable {
                     TeamDefinition definition = TeamDefinition.creating(
                             command.getTeamId(), command.getOwnerChatterId(),
                             command.getName(), transportGroup, requestId, members,
-                            command.isMixedPlacement(), roster, now);
+                            command.isMixedPlacement(), roster,
+                            TeamMode.fromWire(command.getMode()),
+                            normalizeOptional(command.getCaptainTeamMemberId()), now);
                     store.saveTeam(definition);
                     if (!attachPersistedDefinition(definition)) {
                         throw new IllegalStateException("Team runtime already exists");
@@ -793,6 +797,48 @@ public final class TeamManager implements AutoCloseable {
     }
 
     public TeamCommandResult send(String requestId, TeamMemberCommand command) {
+        return sendWithOptions(requestId, command, null);
+    }
+
+    public TeamCommandResult sendTask(String requestId, TeamMemberCommand command,
+                                      com.mola.cmd.proxy.app.acp.acpclient.PromptOptions options) {
+        return sendWithOptions(requestId, command, options);
+    }
+
+    /** Interrupts only a BUSY turn whose task identity matches the control event. */
+    public TeamCommandResult interruptTask(String requestId, TeamMemberCommand command,
+                                           String taskId) {
+        MemberRoute route;
+        try {
+            route = requireMemberRoute(command, false);
+        } catch (MemberRouteException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        }
+        route.runtime.getOperationLock().lock();
+        try {
+            route = requireMemberRoute(command, false);
+            AcpClient client = requireCancellableClient(route);
+            if (!client.isActiveTask(taskId)) {
+                return TeamCommandResult.error(requestId, TeamErrorCode.MEMBER_BUSY,
+                        "Busy Team turn does not belong to this task");
+            }
+            client.cancelForQueuedWork();
+            return TeamCommandResult.success(requestId, "TASK_INTERRUPT_REQUESTED",
+                    "Matching task turn cancellation sent",
+                    route.runtime.getDefinition().getVersion(),
+                    memberData(route.runtime, route.member, client));
+        } catch (MemberRouteException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        } catch (Exception e) {
+            return TeamCommandResult.error(requestId, TeamErrorCode.INTERNAL_ERROR,
+                    safeMessage(e));
+        } finally {
+            route.runtime.getOperationLock().unlock();
+        }
+    }
+
+    private TeamCommandResult sendWithOptions(String requestId, TeamMemberCommand command,
+                                              com.mola.cmd.proxy.app.acp.acpclient.PromptOptions options) {
         MemberRoute route;
         try {
             route = requireMemberRoute(command, true);
@@ -810,7 +856,8 @@ public final class TeamManager implements AutoCloseable {
             AcpClient client = requireReadyClient(route);
             publishMemberState(route.runtime, route.member.getTeamMemberId(),
                     com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.BUSY, null);
-            client.send(command.getMessage(), command.getFiles());
+            if (options == null) client.send(command.getMessage(), command.getFiles());
+            else client.send(command.getMessage(), command.getFiles(), options);
             TeamMemberDefinition busy = findMember(
                     route.runtime.getDefinition(), route.member.getTeamMemberId());
             Map<String, Object> data = memberData(route.runtime, busy, client);
@@ -1002,6 +1049,10 @@ public final class TeamManager implements AutoCloseable {
                     }
                 } else {
                     String content = message.getContent();
+                    if (!message.isVisibleUserMessage()
+                            || TeamHistoryTaskPrompt.isInternal(content)) {
+                        continue;
+                    }
                     TeamHistoryTalkTo talkTo = TeamHistoryTalkTo.parse(content);
                     if (talkTo != null) {
                         if (receivedTalkTo.contains(
@@ -1048,6 +1099,20 @@ public final class TeamManager implements AutoCloseable {
             return value.get(key).getAsString();
         } catch (RuntimeException ignored) {
             return value.get(key).toString();
+        }
+    }
+
+    /** Recognizes task execution prompts persisted before USER origins were recorded. */
+    static final class TeamHistoryTaskPrompt {
+        private static final String MARKER = "[Starweave Task]\n";
+
+        static boolean isInternal(String value) {
+            if (value == null) return false;
+            String normalized = value.trim();
+            return normalized.startsWith(MARKER)
+                    && normalized.contains("\neventId: ")
+                    && normalized.contains("\neventType: ")
+                    && normalized.contains("\ntaskId: ");
         }
     }
 
@@ -1465,6 +1530,15 @@ public final class TeamManager implements AutoCloseable {
     }
 
     public TeamCommandResult deliverTalkTo(TeamTalkToDeliverCommand command) {
+        return handleTalkToDelivery(command, false);
+    }
+
+    public TeamCommandResult openTalkToCircuit(TeamTalkToDeliverCommand command) {
+        return handleTalkToDelivery(command, true);
+    }
+
+    private TeamCommandResult handleTalkToDelivery(TeamTalkToDeliverCommand command,
+                                                   boolean circuitControl) {
         String requestId = command == null ? "" : command.getRequestId();
         try {
             ensureOpen();
@@ -1505,6 +1579,28 @@ public final class TeamManager implements AutoCloseable {
                 return TeamCommandResult.error(requestId, TeamErrorCode.UNAUTHORIZED,
                         "sender/target is not authorized by roster or target is not local");
             }
+            if (!circuitControl && !team.canCommunicate(
+                    command.getSenderTeamMemberId(),
+                    command.getTargetTeamMemberId())) {
+                return TeamCommandResult.error(requestId,
+                        TeamErrorCode.TEAM_COMMUNICATION_FORBIDDEN,
+                        "captain Team members may communicate only with the captain");
+            }
+            if (circuitControl) {
+                requireSafeId(command.getCascadeId(), "cascadeId");
+                if (command.getCascadeStartedAt() <= 0L
+                        || command.getCascadeStartedAt() > now + 60_000L) {
+                    throw new IllegalArgumentException("invalid cascadeStartedAt");
+                }
+                getOrCreateTalkToDispatcher(team.getTeamId()).openRemoteCircuit(
+                        command.getTargetTeamMemberId(), command.getSenderTeamMemberId(),
+                        new com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace(
+                                command.getCascadeId(), command.getMessageId(),
+                                command.getParentMessageId(), command.getDepth(),
+                                command.getCascadeStartedAt()).withCascadeIds(command.getCascadeIds()), command.getContent());
+                return TeamCommandResult.success(requestId, "OK", "cascade closed without prompt",
+                        team.getVersion(), Collections.emptyMap());
+            }
             String dedupKey = team.getTeamId() + "/" + command.getMessageId();
             Long old = receivedTalkToMessages.putIfAbsent(dedupKey, command.getExpiresAt());
             receivedTalkToMessages.entrySet().removeIf(e -> e.getValue() < now);
@@ -1519,7 +1615,10 @@ public final class TeamManager implements AutoCloseable {
                     getOrCreateTalkToDispatcher(team.getTeamId()).deliverRemoteInbound(
                             command.getMessageId(), command.getSenderTeamMemberId(),
                             command.getTargetTeamMemberId(), command.getContent(),
-                            command.getDepth(), command.getAuthPrincipalId() == null
+                            command.getDepth(), command.getCascadeId(),
+                            command.getParentMessageId(), command.getCascadeStartedAt(),
+                            command.getCascadeIds(),
+                            command.getAuthPrincipalId() == null
                                     || command.getAuthPrincipalId().trim().isEmpty() ? null
                                     : new AuthPrincipalContext(
                                             command.getAuthPrincipalId(),
@@ -2632,6 +2731,47 @@ public final class TeamManager implements AutoCloseable {
             }
         } else if (roster != null && !roster.isEmpty()) {
             throw new IllegalArgumentException("roster requires mixedPlacement=true");
+        }
+        TeamMode mode = TeamMode.fromWire(command.getMode());
+        String captainId = normalizeOptional(command.getCaptainTeamMemberId());
+        if (mode == TeamMode.NORMAL) {
+            if (captainId != null) {
+                throw new IllegalArgumentException(
+                        "NORMAL Team must not define captainTeamMemberId");
+            }
+            return;
+        }
+        if (captainId == null) {
+            throw new TeamValidationException(TeamErrorCode.CAPTAIN_REQUIRED,
+                    "captainTeamMemberId is required for CAPTAIN Team");
+        }
+        Set<String> authoritativeIds = command.isMixedPlacement()
+                ? new HashSet<>() : memberIds;
+        if (command.isMixedPlacement()) {
+            for (TeamRosterMemberSpec item : roster) {
+                authoritativeIds.add(item.getTeamMemberId().trim());
+            }
+        }
+        if (authoritativeIds.size() < 2) {
+            throw new TeamValidationException(TeamErrorCode.CAPTAIN_REQUIRED,
+                    "CAPTAIN Team must contain a captain and at least one member");
+        }
+        if (!authoritativeIds.contains(captainId)) {
+            throw new TeamValidationException(TeamErrorCode.CAPTAIN_REQUIRED,
+                    "captainTeamMemberId must belong to Team roster");
+        }
+    }
+
+    private static String normalizeOptional(String value) {
+        return value == null || value.trim().isEmpty() ? null : value.trim();
+    }
+
+    private static final class TeamValidationException extends IllegalArgumentException {
+        private final TeamErrorCode code;
+
+        private TeamValidationException(TeamErrorCode code, String message) {
+            super(message);
+            this.code = code;
         }
     }
 

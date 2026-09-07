@@ -4,6 +4,10 @@ public final class TeamTalkToDeliverCommand {
     private String schemaVersion;
     private String requestId;
     private String messageId;
+    private String cascadeId;
+    private java.util.List<String> cascadeIds;
+    private String parentMessageId;
+    private long cascadeStartedAt;
     private String ownerChatterId;
     private String teamId;
     private String senderTeamMemberId;
@@ -33,6 +37,10 @@ public final class TeamTalkToDeliverCommand {
     public String getSchemaVersion() { return schemaVersion; }
     public String getRequestId() { return requestId; }
     public String getMessageId() { return messageId; }
+    public String getCascadeId() { return cascadeId; }
+    public java.util.List<String> getCascadeIds() { return cascadeIds; }
+    public String getParentMessageId() { return parentMessageId; }
+    public long getCascadeStartedAt() { return cascadeStartedAt; }
     public String getOwnerChatterId() { return ownerChatterId; }
     public String getTeamId() { return teamId; }
     public String getSenderTeamMemberId() { return senderTeamMemberId; }

@@ -123,7 +123,7 @@ public class TeamTransportProtocolTest {
                 TeamTransportDescriptor.readyForBusiness("instance-a");
 
         assertTrue(descriptor.isBusinessCommandsReady());
-        assertEquals(16, descriptor.getCommands().size());
+        assertEquals(17, descriptor.getCommands().size());
         assertTrue(descriptor.getCommands().contains("acpTeamCreate"));
         assertTrue(descriptor.getCommands().contains("acpTeamList"));
         assertTrue(descriptor.getCommands().contains("acpTeamGet"));
@@ -134,6 +134,7 @@ public class TeamTransportProtocolTest {
         assertTrue(descriptor.getCommands().contains("acpTeamGetContextUsage"));
         assertTrue(descriptor.getCommands().contains("acpTeamMemoryDream"));
         assertTrue(descriptor.getCommands().contains("acpTeamReadTextFile"));
+        assertTrue(descriptor.getCommands().contains("acpTeamTalkToCircuitOpen"));
         assertTrue(descriptor.getCommands().contains("acpTeamTalkToDeliver"));
     }
 

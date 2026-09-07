@@ -18,7 +18,10 @@ public final class TeamTalkToCardRenderer {
         String label = escapeHtml(displayName.isEmpty() ? memberId : displayName);
         String icon;
         String title;
-        if ("TALK_TO_RECEIVE".equals(eventType)) {
+        if ("TALK_TO_CIRCUIT_OPENED".equals(eventType)) {
+            icon = "🛑";
+            title = "通信链已终止 · " + label;
+        } else if ("TALK_TO_RECEIVE".equals(eventType)) {
             icon = "📨";
             title = "收到来自 " + label + " 的 Team 消息";
         } else if ("TALK_TO_QUEUED".equals(eventType)) {

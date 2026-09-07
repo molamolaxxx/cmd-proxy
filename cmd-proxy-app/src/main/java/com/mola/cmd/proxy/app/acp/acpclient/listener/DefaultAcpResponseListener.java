@@ -104,6 +104,27 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         renderer.onCompactionEvent(eventType, provider);
     }
 
+    @Override
+    public void onTaskEvent(JsonObject payload) {
+        if (payload == null) return;
+        String name = text(payload, "name", "任务更新");
+        String status = text(payload, "status", "");
+        String summary = text(payload, "summary", "");
+        String taskId = text(payload, "taskId", "");
+        StringBuilder card = new StringBuilder("\n**📋 ").append(name).append("**");
+        if (!status.isEmpty()) card.append(" · ").append(status);
+        if (!summary.isEmpty()) card.append("\n\n").append(summary);
+        if (!taskId.isEmpty()) card.append("\n\n任务 ID：`").append(taskId).append('`');
+        card.append("\n\n");
+        sendContent(card.toString(), false);
+    }
+
+    private static String text(JsonObject value, String key, String fallback) {
+        if (!value.has(key) || value.get(key).isJsonNull()) return fallback;
+        String result = value.get(key).getAsString();
+        return result == null ? fallback : result;
+    }
+
     private void sendContent(String content, boolean end) {
         if (buffering && !end) {
             buffer.append(content);

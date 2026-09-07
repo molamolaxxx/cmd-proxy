@@ -7,9 +7,12 @@ import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseContentRenderer;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
+import com.mola.cmd.proxy.app.acp.talkto.TalkToCircuitBreaker;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToBatchMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace;
 import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope;
 import com.mola.cmd.proxy.app.acp.team.event.TeamEventSink;
@@ -50,7 +53,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
     public static final int INBOX_CAPACITY = 10;
     public static final long INBOX_TTL_MS = 30L * 60L * 1000L;
     public static final long DEDUP_WINDOW_MS = 60_000L;
-    public static final int MAX_DEPTH = 5;
+    public static final int MAX_DEPTH = TalkToCircuitBreaker.MAX_HOPS;
 
     private final TeamRuntime runtime;
     private final TeamClientRegistry clientRegistry;
@@ -175,10 +178,6 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             return reject(sender, senderName, target, content, request.getDepth(),
                     "INVALID_DEPTH", "消息传递深度不能为负数");
         }
-        if (request.getDepth() >= MAX_DEPTH) {
-            return reject(sender, senderName, target, content, request.getDepth(),
-                    "DEPTH_EXCEEDED", "消息传递深度超过上限（" + MAX_DEPTH + "）");
-        }
         if (target == null && rosterTarget == null) {
             return reject(sender, senderName, null, content, request.getDepth(),
                     "TARGET_NOT_IN_TEAM",
@@ -188,9 +187,20 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             return reject(sender, senderName, target, content, request.getDepth(),
                     "SELF_TARGET", "不能向自己发送 talk_to 消息");
         }
+        if (!team.canCommunicate(sender.getTeamMemberId(),
+                rosterTarget.getTargetTeamMemberId())) {
+            return reject(sender, senderName, target, content, request.getDepth(),
+                    "TEAM_COMMUNICATION_FORBIDDEN",
+                    "队长模式下普通队员只能联系队长");
+        }
         if (content.isEmpty()) {
             return reject(sender, senderName, target, content, request.getDepth(),
                     "EMPTY_CONTENT", "content 不能为空");
+        }
+        if (request.getParentTrace() != null && !circuitBreaker.canDeliver(request.getParentTrace())) {
+            return rejectCircuit(sender, target, rosterTarget, content,
+                    circuitBreaker.admit(request.getParentTrace(), sender.getTeamMemberId(),
+                            rosterTarget.getTargetTeamMemberId()));
         }
 
         long now = clock.getAsLong();
@@ -206,12 +216,19 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             recentMessages.replace(dedupKey, previous, now);
         }
 
-        String messageId = UUID.randomUUID().toString();
-        int nextDepth = request.getDepth() + 1;
+        String targetMemberId = rosterTarget.getTargetTeamMemberId();
+        TalkToCircuitBreaker.Admission circuit = circuitBreaker.admit(
+                request.getParentTrace(), sender.getTeamMemberId(), targetMemberId);
+        if (!circuit.isAccepted()) {
+            recentMessages.remove(dedupKey, now);
+            return rejectCircuit(sender, target, rosterTarget, content, circuit);
+        }
+        String messageId = circuit.getTrace().getMessageId();
+        int nextDepth = circuit.getTrace().getHopCount();
         TeamTalkToMessage message = new TeamTalkToMessage(
                 messageId, sender.getTeamMemberId(), content, nextDepth,
-                authPrincipalContext);
-        if (target == null) {
+                authPrincipalContext, circuit.getTrace());
+        if (target == null || team.isMixedPlacement()) {
             long expiresAt = now + inboxTtlMillis;
             Map<String, Object> route = new LinkedHashMap<>();
             route.put("messageId", messageId);
@@ -224,6 +241,10 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             route.put("targetDisplayName", rosterTarget.getDisplayName());
             route.put("content", content);
             route.put("depth", nextDepth);
+            route.put("cascadeId", circuit.getTrace().getCascadeId());
+            route.put("cascadeIds", circuit.getTrace().getCascadeIds());
+            route.put("parentMessageId", circuit.getTrace().getParentMessageId());
+            route.put("cascadeStartedAt", circuit.getTrace().getStartedAt());
             route.put("createdAt", now);
             route.put("expiresAt", expiresAt);
             route.put("delivery", "ROUTE_REQUESTED");
@@ -238,6 +259,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                     TeamEventType.TALK_TO_ROUTE_REQUEST, route);
             if (!eventSink.tryPublish(routeEvent)) {
                 recentMessages.remove(dedupKey, now);
+                circuitBreaker.rollback(circuit, sender.getTeamMemberId(), targetMemberId);
                 return "[talkTo 结果]\n发送失败：跨实例路由队列繁忙，消息未提交，"
                         + "请稍后重试。";
             }
@@ -296,12 +318,14 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                         + " 条，30 分钟内有效）。对方空闲后会自动收到。";
             }
             recentMessages.remove(dedupKey, now);
+            circuitBreaker.rollback(circuit, sender.getTeamMemberId(), targetMemberId);
             return reject(sender, senderName, target, content, request.getDepth(),
                     "INBOX_FULL", "目标 Team inbox 已满（"
                             + INBOX_CAPACITY + "/" + INBOX_CAPACITY + "）");
         }
 
         recentMessages.remove(dedupKey, now);
+        circuitBreaker.rollback(circuit, sender.getTeamMemberId(), targetMemberId);
         return reject(sender, senderName, target, content, request.getDepth(),
                 "TARGET_NOT_READY", "目标 Team member 当前不可投递且不处于可排队的 BUSY 状态");
     }
@@ -321,7 +345,12 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                           AuthPrincipalContext authPrincipalContext) {
         if (request != null && request.getTarget() != null
                 && request.getTarget().startsWith("channel:")) {
-            String senderKey = "team:" + runtime.getDefinition().getTeamId()
+            TeamDefinition team = runtime.getDefinition();
+            if (!team.isBusinessEntryMember(senderName)) {
+                return "[talkTo 结果]\n发送失败（TEAM_COMMUNICATION_FORBIDDEN）："
+                        + "队长模式下只有队长可以联系外部信道。";
+            }
+            String senderKey = "team:" + team.getTeamId()
                     + ":" + senderName;
             String result = super.deliver(
                     request, senderName, senderChatterId, senderKey, contacts,
@@ -345,6 +374,9 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             String messageId, TeamContactRef remoteSender) {
         if (teamMemberId == null || targetClient == null || message == null || closed) {
             return InboundDeliveryResult.rejected("invalid external Team delivery");
+        }
+        if (!canDeliverMessage(message)) {
+            return InboundDeliveryResult.rejected("TalkTo cascade is closed or expired");
         }
         TeamMemberDefinition target = findMember(runtime.getDefinition(), teamMemberId);
         if (target == null || runtime.getDefinition().getState() != TeamState.READY) {
@@ -387,15 +419,45 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                                                        String teamMemberId,
                                                        String content, int depth,
                                                        AuthPrincipalContext authPrincipalContext) {
+        return deliverRemoteInbound(messageId, senderTeamMemberId, teamMemberId,
+                content, depth, null, null, 0L, authPrincipalContext);
+    }
+
+    public InboundDeliveryResult deliverRemoteInbound(String messageId,
+                                                       String senderTeamMemberId,
+                                                       String teamMemberId,
+                                                       String content, int depth,
+                                                       String cascadeId,
+                                                       String parentMessageId,
+                                                       long cascadeStartedAt,
+                                                       AuthPrincipalContext authPrincipalContext) {
+        return deliverRemoteInbound(messageId, senderTeamMemberId, teamMemberId, content, depth,
+                cascadeId, parentMessageId, cascadeStartedAt, null, authPrincipalContext);
+    }
+
+    public InboundDeliveryResult deliverRemoteInbound(String messageId, String senderTeamMemberId,
+            String teamMemberId, String content, int depth, String cascadeId, String parentMessageId,
+            long cascadeStartedAt, java.util.List<String> cascadeIds, AuthPrincipalContext authPrincipalContext) {
+        TeamDefinition team = runtime.getDefinition();
+        if (findContact(team, senderTeamMemberId) == null
+                || findContact(team, teamMemberId) == null) {
+            return InboundDeliveryResult.rejected("sender or target is outside Team roster");
+        }
+        if (!team.canCommunicate(senderTeamMemberId, teamMemberId)) {
+            return InboundDeliveryResult.rejected(
+                    "TEAM_COMMUNICATION_FORBIDDEN: captain Team members may communicate only with captain");
+        }
         AcpClient targetClient = clientRegistry.get(
-                runtime.getDefinition().getTeamId(), teamMemberId).orElse(null);
+                team.getTeamId(), teamMemberId).orElse(null);
         if (targetClient == null) return InboundDeliveryResult.rejected("target client absent");
         TeamContactRef sender = findContact(
-                runtime.getDefinition(), senderTeamMemberId);
+                team, senderTeamMemberId);
+        TalkToTrace trace = new TalkToTrace(cascadeId, messageId,
+                parentMessageId, depth, cascadeStartedAt).withCascadeIds(cascadeIds);
         InboundDeliveryResult result = deliverInbound(
                 teamMemberId, targetClient,
                 new TeamTalkToMessage(messageId, senderTeamMemberId, content, depth,
-                        authPrincipalContext),
+                        authPrincipalContext, trace),
                 messageId, sender);
         if (result.getStatus() != InboundDeliveryResult.Status.REJECTED) {
             TeamMemberDefinition target = findMember(runtime.getDefinition(), teamMemberId);
@@ -415,6 +477,16 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         return result;
     }
 
+    /** UI-only coordinator control. Never send a prompt for a terminated communication chain. */
+    public void openRemoteCircuit(String localMemberId, String peerMemberId,
+                                  TalkToTrace trace, String reason) {
+        TeamMemberDefinition local = findMember(runtime.getDefinition(), localMemberId);
+        TeamContactRef peer = findContact(runtime.getDefinition(), peerMemberId);
+        TalkToCircuitBreaker.Admission opened = circuitBreaker.openCascade(trace, reason);
+        if (local != null) rejectCircuit(local, null, peer,
+                "通信链已由协调器终止，后续排队消息不再触发 Agent。", opened);
+    }
+
     @Override
     public TalkToMessage pollInbox(String teamMemberId) {
         LinkedBlockingQueue<QueuedMessage> inbox = inboxes.get(teamMemberId);
@@ -423,6 +495,9 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         long now = clock.getAsLong();
         purgeExpired(inbox, now);
         QueuedMessage queued = inbox.poll();
+        while (queued != null && !canDeliverMessage(queued.message)) {
+            queued = inbox.poll();
+        }
         if (queued == null) return null;
         stateObserver.onState(runtime.getDefinition().getTeamId(),
                 queued.target.getTeamMemberId(), TeamMemberState.BUSY, null);
@@ -445,6 +520,27 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                     queued.message.getContent(), "DELIVERED_FROM_INBOX", null);
         }
         return queued.message;
+    }
+
+    @Override
+    public TalkToMessage pollInboxBatch(String teamMemberId, String ignoredGroupId,
+                                        int maxMessages) {
+        TalkToMessage first = pollInbox(teamMemberId);
+        if (first == null || maxMessages < 2 || !first.isBatchable()) return first;
+        LinkedBlockingQueue<QueuedMessage> inbox = inboxes.get(teamMemberId);
+        if (inbox == null) return first;
+        java.util.ArrayList<TalkToMessage> batch = new java.util.ArrayList<>();
+        batch.add(first);
+        while (batch.size() < Math.min(maxMessages, INBOX_BATCH_SIZE)) {
+            purgeExpired(inbox, clock.getAsLong());
+            QueuedMessage candidate = inbox.peek();
+            if (candidate == null
+                    || !TalkToBatchMessage.canAppend(batch, candidate.message)) break;
+            TalkToMessage drained = pollInbox(teamMemberId);
+            if (drained == null) break;
+            batch.add(drained);
+        }
+        return batch.size() == 1 ? first : new TalkToBatchMessage(batch);
     }
 
     @Override
@@ -514,6 +610,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         closed = true;
         inboxes.clear();
         recentMessages.clear();
+        circuitBreaker.clear();
     }
 
     private String reject(TeamMemberDefinition sender, String senderName,
@@ -531,7 +628,39 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                         "REJECTED", reason);
             }
         }
-        return "[talkTo 结果]\n发送失败：" + message + "。";
+        return "[talkTo 结果]\n发送失败（" + reason + "）：" + message + "。";
+    }
+
+    private String rejectCircuit(TeamMemberDefinition sender,
+                                 TeamMemberDefinition target,
+                                 TeamContactRef rosterTarget,
+                                 String content,
+                                 TalkToCircuitBreaker.Admission admission) {
+        String result = circuitOpenResult(admission, sender.getTeamMemberId(),
+                rosterTarget == null ? "" : rosterTarget.getTargetTeamMemberId());
+        if (!circuitBreaker.claimNotification(admission.getTrace().getCascadeId())) return result;
+        Map<String, Object> data = eventData(admission.getTrace().getMessageId(),
+                sender, target, content, admission.getTrace().getHopCount(),
+                "CIRCUIT_OPEN", null, null, admission.getReason());
+        data.put("cascadeId", admission.getTrace().getCascadeId());
+        data.put("cascadeIds", admission.getTrace().getCascadeIds());
+        data.put("parentMessageId", admission.getTrace().getParentMessageId());
+        data.put("cascadeStartedAt", admission.getTrace().getStartedAt());
+        if (target == null && rosterTarget != null) {
+            data.put("targetTeamMemberId", rosterTarget.getTargetTeamMemberId());
+            data.put("targetDisplayName", rosterTarget.getDisplayName());
+        }
+        publish(sender, TeamEventType.TALK_TO_CIRCUIT_OPENED, data);
+        if (target != null) {
+            publishCard(sender, target, TeamEventType.TALK_TO_CIRCUIT_OPENED,
+                    admission.getTrace().getMessageId(), content,
+                    "CIRCUIT_OPEN", admission.getReason());
+        } else if (rosterTarget != null) {
+            publishCard(sender, rosterTarget, TeamEventType.TALK_TO_CIRCUIT_OPENED,
+                    admission.getTrace().getMessageId(), content,
+                    "CIRCUIT_OPEN", admission.getReason());
+        }
+        return result;
     }
 
     private void purgeExpired(LinkedBlockingQueue<QueuedMessage> inbox,
@@ -569,7 +698,8 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             if (type == TeamEventType.TALK_TO_SEND
                     || type == TeamEventType.TALK_TO_RECEIVE
                     || type == TeamEventType.TALK_TO_QUEUED
-                    || type == TeamEventType.TALK_TO_REJECTED) {
+                    || type == TeamEventType.TALK_TO_REJECTED
+                    || type == TeamEventType.TALK_TO_CIRCUIT_OPENED) {
                 clientRegistry.get(runtime.getDefinition().getTeamId(),
                                 envelopeMember.getTeamMemberId())
                         .ifPresent(client -> client.getHistoryManager().addEventMessage(
@@ -751,8 +881,17 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         private TeamTalkToMessage(String messageId, String sender,
                                   String content, int depth,
                                   AuthPrincipalContext authPrincipalContext) {
+            this(messageId, sender, content, depth, authPrincipalContext,
+                    new TalkToTrace(null, messageId, null, depth,
+                            System.currentTimeMillis()));
+        }
+
+        private TeamTalkToMessage(String messageId, String sender,
+                                  String content, int depth,
+                                  AuthPrincipalContext authPrincipalContext,
+                                  TalkToTrace trace) {
             super(sender, content, depth, java.util.Collections.emptyList(),
-                    authPrincipalContext);
+                    authPrincipalContext, trace);
             this.messageId = messageId;
         }
 
@@ -765,12 +904,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
             sb.append("以下消息由当前 Fast Team 的严格队内路由投递，发送者身份已经过验证：\n\n");
             sb.append(getContent()).append("\n\n");
-            sb.append("─── 回复方式 ───\n");
-            sb.append("如需回复，请调用 talk_to MCP 工具，并将 target 精确设置为：")
-                    .append(getSender()).append("。\n");
-            sb.append("为保留防循环上下文，请将工具参数 _depth 设置为：")
-                    .append(getDepth()).append("。\n");
-            sb.append("工具结果会直接返回当前上下文；不要输出 Action JSON。\n");
+            appendReplyPolicy(sb, getSender(), getDepth());
             return sb.toString();
         }
     }

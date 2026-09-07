@@ -63,4 +63,18 @@ public class TeamHistoryTalkToProjectionTest {
         assertEquals("channel:企业微信 / 小王", projection.label);
         assertEquals("请确认报价\n\n第二段说明", projection.content);
     }
+
+    @Test
+    public void recognizesLegacyTaskPromptAsInternalUiInput() {
+        String prompt = "[Starweave Task]\n"
+                + "eventId: event-1\n"
+                + "eventType: TASK_ASSIGNED\n"
+                + "taskId: task-1\n"
+                + "revision: 1\n"
+                + "status: START\n"
+                + "Call get_task before acting.";
+
+        assertEquals(true, TeamManager.TeamHistoryTaskPrompt.isInternal(prompt));
+        assertEquals(false, TeamManager.TeamHistoryTaskPrompt.isInternal("普通用户消息"));
+    }
 }

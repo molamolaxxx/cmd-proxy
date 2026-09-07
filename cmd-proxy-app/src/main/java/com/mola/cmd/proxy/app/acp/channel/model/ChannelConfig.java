@@ -9,6 +9,8 @@ public class ChannelConfig {
     public static final String USER_BEHAVIOR_INTERRUPT = "INTERRUPT";
 
     private String id;
+    /** Stable persistence identity; unlike id it survives a channel rename. */
+    private String archiveId;
     private String type;
     private boolean enabled;
     /** Whether external messages may enter the bound ACP. Outbound remains available. */
@@ -28,6 +30,10 @@ public class ChannelConfig {
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
+    public String getArchiveId() {
+        return archiveId == null || archiveId.trim().isEmpty() ? id : archiveId;
+    }
+    public void setArchiveId(String archiveId) { this.archiveId = archiveId; }
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
     public boolean isEnabled() { return enabled; }

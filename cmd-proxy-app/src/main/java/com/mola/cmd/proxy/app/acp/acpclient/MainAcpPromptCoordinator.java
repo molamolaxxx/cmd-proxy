@@ -18,6 +18,10 @@ final class MainAcpPromptCoordinator {
         Object identity();
         AbstractAcpClient.State state();
         void send(String message, List<Map<String, String>> files);
+        default void send(String message, List<Map<String, String>> files,
+                          PromptOptions options) {
+            send(message, files);
+        }
         void cancel() throws IOException;
         default void markNextTermination(String termination) { }
         default void clearNextTermination() { }
@@ -37,12 +41,14 @@ final class MainAcpPromptCoordinator {
         private final Object clientIdentity;
         private final String message;
         private final List<Map<String, String>> files;
+        private final PromptOptions options;
 
         private PendingPrompt(Object clientIdentity, String message,
-                              List<Map<String, String>> files) {
+                              List<Map<String, String>> files, PromptOptions options) {
             this.clientIdentity = clientIdentity;
             this.message = message;
             this.files = files;
+            this.options = options;
         }
     }
 
@@ -51,11 +57,17 @@ final class MainAcpPromptCoordinator {
 
     PromptCommandResult send(String groupId, ClientPort client, String message,
                              List<Map<String, String>> files, BusyPolicy busyPolicy) {
+        return send(groupId, client, message, files, busyPolicy, PromptOptions.defaults());
+    }
+
+    PromptCommandResult send(String groupId, ClientPort client, String message,
+                             List<Map<String, String>> files, BusyPolicy busyPolicy,
+                             PromptOptions options) {
         AbstractAcpClient.State state = client.state();
         if (state == AbstractAcpClient.State.READY) {
             // READY 事件已发生但回调尚在等待 group lock 时，新请求是最新请求。
             pendingByGroup.remove(groupId);
-            client.send(message, files);
+            client.send(message, files, options);
             return PromptCommandResult.accepted("SENT", "消息发送成功");
         }
         if (state != AbstractAcpClient.State.BUSY || busyPolicy != BusyPolicy.INTERRUPT) {
@@ -79,7 +91,7 @@ final class MainAcpPromptCoordinator {
                     "CANCEL_FAILED", "取消当前消息失败: " + e.getMessage());
         }
         pendingByGroup.put(groupId,
-                new PendingPrompt(client.identity(), message, copyFiles(files)));
+                new PendingPrompt(client.identity(), message, copyFiles(files), options));
         return PromptCommandResult.accepted(
                 "INTERRUPTED_PENDING", "已取消当前消息，等待会话就绪后发送");
     }
@@ -108,7 +120,7 @@ final class MainAcpPromptCoordinator {
             return;
         }
         if (!pendingByGroup.remove(groupId, pending)) return;
-        client.send(pending.message, pending.files);
+        client.send(pending.message, pending.files, pending.options);
     }
 
     void clear(String groupId) {

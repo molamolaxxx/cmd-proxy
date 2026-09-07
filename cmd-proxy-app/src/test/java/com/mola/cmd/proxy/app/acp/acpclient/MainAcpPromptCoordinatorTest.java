@@ -153,6 +153,8 @@ public class MainAcpPromptCoordinatorTest {
         assertEquals(Collections.singletonList("cancel"), client.events);
     }
 
+    @Test public void interruptedTaskControlRetainsTaskPromptOptions(){MainAcpPromptCoordinator coordinator=new MainAcpPromptCoordinator();FakeClient client=new FakeClient(AbstractAcpClient.State.BUSY);PromptOptions options=PromptOptions.forTask("task-1","event-2",3L,4L,2L,true);PromptCommandResult result=coordinator.send("g1",client,"suspend",null,MainAcpPromptCoordinator.BusyPolicy.INTERRUPT,options);assertResult(result,true,"INTERRUPTED_PENDING");client.state=AbstractAcpClient.State.READY;coordinator.onReady("g1",client);assertSame(options,client.lastOptions);assertEquals("task-1",client.lastOptions.getTaskId());}
+
     private static void assertResult(PromptCommandResult result,
                                      boolean accepted, String code) {
         assertEquals(accepted, result.isAccepted());
@@ -169,6 +171,7 @@ public class MainAcpPromptCoordinatorTest {
         private final List<String> events = new ArrayList<>();
         private AbstractAcpClient.State state;
         private boolean failCancel;
+        private PromptOptions lastOptions;
 
         private FakeClient(AbstractAcpClient.State state) {
             this.state = state;
@@ -182,6 +185,8 @@ public class MainAcpPromptCoordinatorTest {
             events.add("send:" + message);
             state = AbstractAcpClient.State.BUSY;
         }
+
+        @Override public void send(String message,List<Map<String,String>> files,PromptOptions options){lastOptions=options;send(message,files);}
 
         @Override
         public void cancel() throws IOException {

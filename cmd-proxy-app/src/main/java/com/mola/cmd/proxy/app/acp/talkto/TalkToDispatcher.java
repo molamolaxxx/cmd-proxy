@@ -15,6 +15,7 @@ import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.ContactRef;
 import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToBatchMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import com.mola.cmd.proxy.client.provider.CmdReceiver;
 import com.mola.cmd.proxy.client.resp.CmdResponseContent;
@@ -45,11 +46,11 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
     private static final String TALK_TO_TRIGGER = "\"action\"";
     private static final String TALK_TO_ACTION = "talk_to";
 
-    /** 防循环：最大消息深度 */
-    private static final int MAX_DEPTH = 5;
-
     /** inbox 容量上限 */
-    private static final int INBOX_CAPACITY = 5;
+    private static final int INBOX_CAPACITY = 10;
+
+    /** Maximum compatible messages consumed by one ACP inbox turn. */
+    public static final int INBOX_BATCH_SIZE = 8;
 
     /** 短时间重复检测窗口（毫秒） */
     private static final long DEDUP_WINDOW_MS = 60_000;
@@ -67,6 +68,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
 
     /** 短时间重复检测，key 为 messageKey，value 为时间戳 */
     private final ConcurrentHashMap<String, Long> recentMessages = new ConcurrentHashMap<>();
+    /** Server-owned causal budget; model-provided _depth is compatibility metadata only. */
+    protected final TalkToCircuitBreaker circuitBreaker = new TalkToCircuitBreaker();
 
     public TalkToDispatcher(Map<String, AcpRobotParam> robotRegistry,
                             AcpClientRegistry clientRegistry,
@@ -241,7 +244,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         ContactRef remoteContact = findRemoteContact(target, contacts);
         if (remoteContact != null) {
             return deliverCrossChatter(remoteContact, request, senderName, senderChatterId,
-                    authPrincipalContext);
+                    authPrincipalContext, senderGroupId);
         }
 
         // 如果 target 包含冒号（"chatterId:robotName" 格式），说明是跨 chatter 回复场景
@@ -255,7 +258,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 adhocRemote.setChatterId(targetChatterId);
                 adhocRemote.setRemote(true);
                 return deliverCrossChatter(adhocRemote, request, senderName, senderChatterId,
-                        authPrincipalContext);
+                        authPrincipalContext, senderGroupId);
             }
         }
 
@@ -314,12 +317,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                                 AuthPrincipalContext authPrincipalContext) {
         String target = request.getTarget();
         String content = request.getContent();
-        int depth = request.getDepth();
-
-        // 1. 防循环：深度检查
-        if (depth >= MAX_DEPTH) {
-            logger.warn("talkTo 深度超限: sender={}, target={}, depth={}", senderName, target, depth);
-            return "[talkTo 结果]\n发送失败：消息传递深度超过上限（" + MAX_DEPTH + "），可能存在循环。已终止发送。";
+        if (request.getParentTrace() != null && !circuitBreaker.canDeliver(request.getParentTrace())) {
+            return circuitOpenResult(circuitBreaker.admit(request.getParentTrace(),
+                    senderGroupId == null ? senderName : senderGroupId, target), senderName, target);
         }
 
         // 2. 防循环：短时间重复检测
@@ -364,13 +364,21 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
             return "[talkTo 结果]\n发送失败：robot '" + target + "' 的 client 不存在。";
         }
 
+        TalkToCircuitBreaker.Admission circuit = circuitBreaker.admit(
+                request.getParentTrace(), senderGroupId == null ? senderName : senderGroupId,
+                targetGroupId);
+        if (!circuit.isAccepted()) {
+            return circuitOpenResult(circuit, senderName, target);
+        }
+
         // 6. 记录发送记录（用于去重）
         recentMessages.put(dedupKey, now);
         cleanExpiredDedup();
 
         // 7. 构造消息
-        TalkToMessage message = new TalkToMessage(senderName, content, depth + 1,
-                Collections.emptyList(), authPrincipalContext);
+        TalkToMessage message = new TalkToMessage(senderName, content,
+                circuit.getTrace().getHopCount(), Collections.emptyList(),
+                authPrincipalContext, circuit.getTrace());
 
         // 8. 检查目标状态并投递
         if (targetClient.getState() == AbstractAcpClient.State.READY) {
@@ -392,6 +400,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                         + queueSize + "/" + INBOX_CAPACITY + " 条）。对方空闲后会自动收到。";
             } else {
                 logger.warn("talkTo inbox 已满: {} → {}", senderName, target);
+                recentMessages.remove(dedupKey, now);
+                circuitBreaker.rollback(circuit,
+                        senderGroupId == null ? senderName : senderGroupId, targetGroupId);
                 return "[talkTo 结果]\n发送失败：" + target + " 的消息队列已满（"
                         + INBOX_CAPACITY + "/" + INBOX_CAPACITY + "），无法接收新消息。"
                         + "你可以稍后再试，或使用 dispatch_subagent 创建独立子进程执行。";
@@ -422,16 +433,20 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      */
     private String deliverCrossChatter(ContactRef remoteContact, TalkToRequest request,
                                        String senderName, String senderChatterId,
-                                       AuthPrincipalContext authPrincipalContext) {
+                                       AuthPrincipalContext authPrincipalContext, String senderGroupId) {
         String target = remoteContact.getName();
         String targetChatterId = remoteContact.getChatterId();
         String content = request.getContent();
-        int depth = request.getDepth();
+        String budgetSender = senderGroupId == null ? senderName : senderGroupId;
 
-        // 1. 防循环：深度检查
-        if (depth >= MAX_DEPTH) {
-            logger.warn("crossTalkTo 深度超限: sender={}, target={}, depth={}", senderName, target, depth);
-            return "[talkTo 结果]\n发送失败：消息传递深度超过上限（" + MAX_DEPTH + "），可能存在循环。已终止发送。";
+        TalkToCircuitBreaker.Admission circuit = circuitBreaker.admit(
+                request.getParentTrace(), budgetSender,
+                targetChatterId + ":" + target);
+        if (!circuit.isAccepted()) {
+            if (circuitBreaker.claimRelay(circuit.getTrace().getCascadeId())) {
+                relayCrossCircuit(circuit, senderName, senderChatterId, target, targetChatterId);
+            }
+            return circuitOpenResult(circuit, senderName, target);
         }
 
         // 2. 防循环：短时间重复检测
@@ -440,6 +455,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         long now = System.currentTimeMillis();
         if (lastSent != null && (now - lastSent) < DEDUP_WINDOW_MS) {
             logger.warn("crossTalkTo 短时间重复: key={}", dedupKey);
+            circuitBreaker.rollback(circuit, budgetSender,
+                    targetChatterId + ":" + target);
             return "[talkTo 结果]\n发送失败：短时间内向 " + target + " 发送了相同内容，已阻止重复发送。";
         }
 
@@ -455,7 +472,14 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
             resultMap.put("senderChatterId", senderChatterId);
             resultMap.put("senderRobotName", senderName);
             resultMap.put("content", content);
-            resultMap.put("depth", String.valueOf(depth));
+            resultMap.put("depth", String.valueOf(circuit.getTrace().getHopCount()));
+            resultMap.put("cascadeId", circuit.getTrace().getCascadeId());
+            resultMap.put("cascadeIds", new com.google.gson.Gson().toJson(circuit.getTrace().getCascadeIds()));
+            resultMap.put("messageId", circuit.getTrace().getMessageId());
+            resultMap.put("parentMessageId", circuit.getTrace().getParentMessageId() == null
+                    ? "" : circuit.getTrace().getParentMessageId());
+            resultMap.put("cascadeStartedAt",
+                    String.valueOf(circuit.getTrace().getStartedAt()));
             if (authPrincipalContext != null) {
                 resultMap.put("authPrincipalId", authPrincipalContext.getPrincipalId());
                 resultMap.put("authPrincipalName", authPrincipalContext.getDisplayName());
@@ -472,9 +496,43 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
             return "[talkTo 结果]\n已成功将消息发送给 " + target
                     + "（跨服务器）。对方会处理你的请求，你可以继续当前工作。";
         } catch (Exception e) {
+            circuitBreaker.rollback(circuit, budgetSender,
+                    targetChatterId + ":" + target);
             logger.error("crossTalkTo callback 发送失败", e);
             return "[talkTo 结果]\n发送失败：网关通信异常 - " + e.getMessage();
         }
+    }
+
+    private void relayCrossCircuit(TalkToCircuitBreaker.Admission admission, String sender,
+                                    String chatter, String target, String targetChatter) {
+        Map<String, String> data = new HashMap<>();
+        data.put("eventType", "TALK_TO_CIRCUIT_OPENED");
+        data.put("targetChatterId", targetChatter);
+        data.put("targetRobotName", target);
+        data.put("senderChatterId", chatter);
+        data.put("senderRobotName", sender);
+        data.put("cascadeId", admission.getTrace().getCascadeId());
+        data.put("cascadeIds", new com.google.gson.Gson().toJson(admission.getTrace().getCascadeIds()));
+        data.put("messageId", admission.getTrace().getMessageId());
+        data.put("parentMessageId", admission.getTrace().getParentMessageId() == null
+                ? "" : admission.getTrace().getParentMessageId());
+        data.put("depth", String.valueOf(admission.getTrace().getHopCount()));
+        data.put("cascadeStartedAt", String.valueOf(admission.getTrace().getStartedAt()));
+        data.put("reason", admission.getReason());
+        try {
+            CmdReceiver.INSTANCE.callback("crossTalkTo", "crossTalkTo",
+                    new CmdResponseContent(UUID.randomUUID().toString(), data));
+        } catch (RuntimeException failure) {
+            logger.warn("Cross-Chatter circuit notification failed: cascadeId={}",
+                    admission.getTrace().getCascadeId(), failure);
+        }
+    }
+
+    public void openRemoteCircuit(AcpClient target, com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace trace,
+                                  String reason) {
+        TalkToCircuitBreaker.Admission admission = circuitBreaker.openCascade(trace, reason);
+        // The callback is a UI-only control, never a mailbox message or session/prompt.
+        target.onTalkToCircuitOpened(circuitOpenResult(admission, "coordinator", "local-session"));
     }
 
     /**
@@ -502,6 +560,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      * @return true 入队成功，false inbox 已满
      */
     public boolean offerToInbox(String robotName, TalkToMessage message) {
+        if (message == null || !canDeliverMessage(message)) return false;
         LinkedBlockingQueue<TalkToMessage> inbox = inboxes.computeIfAbsent(
                 robotName, k -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
         return inbox.offer(message);
@@ -517,6 +576,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 || targetClient == null || message == null) {
             return InboundDeliveryResult.rejected("invalid inbound delivery arguments");
         }
+        if (!canDeliverMessage(message)) {
+            return InboundDeliveryResult.rejected("TalkTo cascade is closed or expired");
+        }
         synchronized (targetClient) {
             if (targetClient.getState() == AbstractAcpClient.State.READY) {
                 pushIncomingMessageCard(targetClient, message);
@@ -528,6 +590,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         }
         LinkedBlockingQueue<TalkToMessage> inbox = inboxes.computeIfAbsent(
                 routingKey, key -> new LinkedBlockingQueue<>(INBOX_CAPACITY));
+        if (message instanceof ChannelTalkToMessage && inbox.size() >= 5) {
+            return InboundDeliveryResult.rejected("inbox full");
+        }
         if (inbox.offer(message)) {
             return InboundDeliveryResult.queued(inbox.size());
         }
@@ -546,15 +611,50 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      * @return 待投递的消息，inbox 为空时返回 null
      */
     public TalkToMessage pollInbox(String robotName) {
+        if (robotName == null) return null;
         LinkedBlockingQueue<TalkToMessage> inbox = inboxes.get(robotName);
         if (inbox == null) return null;
-        return inbox.poll();
+        TalkToMessage message;
+        while ((message = inbox.poll()) != null) {
+            if (canDeliverMessage(message)) return message;
+            logger.info("TalkTo queued message discarded: cascadeId={}, messageId={}",
+                    message.getTrace().getCascadeId(), message.getTrace().getMessageId());
+        }
+        return null;
     }
 
     /** groupId 精确队列优先，随后兼容原有 robotName 队列。 */
     public TalkToMessage pollInbox(String routingName, String groupId) {
         TalkToMessage message = pollInbox(groupId);
         return message != null ? message : pollInbox(routingName);
+    }
+
+    /**
+     * Drains a FIFO batch without crossing sender or authenticated-principal boundaries.
+     * The legacy single-message poll methods remain unchanged for diagnostics and callers that
+     * explicitly need one item.
+     */
+    public TalkToMessage pollInboxBatch(String routingName, String groupId, int maxMessages) {
+        TalkToMessage message = pollInboxBatch(groupId, maxMessages);
+        return message != null ? message : pollInboxBatch(routingName, maxMessages);
+    }
+
+    protected TalkToMessage pollInboxBatch(String routingKey, int maxMessages) {
+        if (routingKey == null) return null;
+        LinkedBlockingQueue<TalkToMessage> inbox = inboxes.get(routingKey);
+        if (inbox == null) return null;
+        TalkToMessage first = pollInbox(routingKey);
+        if (first == null || maxMessages < 2 || !first.isBatchable()) return first;
+        java.util.ArrayList<TalkToMessage> batch = new java.util.ArrayList<>();
+        batch.add(first);
+        while (batch.size() < Math.min(maxMessages, INBOX_BATCH_SIZE)) {
+            TalkToMessage candidate = inbox.peek();
+            if (!TalkToBatchMessage.canAppend(batch, candidate)) break;
+            TalkToMessage drained = inbox.poll();
+            if (drained == null) break;
+            batch.add(drained);
+        }
+        return batch.size() == 1 ? first : new TalkToBatchMessage(batch);
     }
 
     public static void sendInboundMessage(AcpClient targetClient, TalkToMessage message) {
@@ -571,20 +671,24 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                     + "使用 talk_to 并将 target 指定为“回复”。"
                     + "不要选择或猜测稳定信道 target。\n";
         }
-        if (options.hasChannelTurnContext()) {
-            if (message.getLocalAttachments().isEmpty()) {
-                targetClient.send(prompt, null, options);
-            } else {
-                targetClient.sendLocalFiles(
-                        prompt, message.getLocalAttachments(), options);
-            }
-            return;
-        }
         if (message.getLocalAttachments().isEmpty()) {
-            targetClient.send(prompt, null);
+            targetClient.send(prompt, null, options);
         } else {
-            targetClient.sendLocalFiles(prompt, message.getLocalAttachments());
+            targetClient.sendLocalFiles(prompt, message.getLocalAttachments(), options);
         }
+    }
+
+    public boolean canDeliverMessage(TalkToMessage message) {
+        // External user turns have their own lifecycle and never consume agent-chain budgets.
+        return message instanceof ChannelTalkToMessage || circuitBreaker.canDeliver(message.getTrace());
+    }
+
+    public boolean claimCircuitNotification(String result) {
+        if (result == null) return false;
+        int start = result.indexOf("cascadeId=");
+        int end = result.indexOf(", reason=", start);
+        return start >= 0 && end > start
+                && circuitBreaker.claimNotification(result.substring(start + 10, end));
     }
 
     public static final class InboundDeliveryResult {
@@ -629,6 +733,16 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         recentMessages.entrySet().removeIf(entry -> (now - entry.getValue()) > DEDUP_WINDOW_MS);
     }
 
+    protected String circuitOpenResult(TalkToCircuitBreaker.Admission admission,
+                                       String sender, String target) {
+        logger.warn("TalkTo circuit opened: cascadeId={}, sender={}, target={}, hop={}, reason={}",
+                admission.getTrace().getCascadeId(), sender, target,
+                admission.getTrace().getHopCount(), admission.getReason());
+        return "[TALK_TO_CIRCUIT_OPENED]\n通信链已由服务端终止，不要重试或发送确认消息。"
+                + " cascadeId=" + admission.getTrace().getCascadeId()
+                + ", reason=" + admission.getReason() + "。";
+    }
+
     /**
      * 向目标 client 的前端推送"来信卡片"，让用户知道即将收到的消息来自哪个 robot。
      */
@@ -643,6 +757,12 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      * 供 AcpClient.checkAndDeliverInbox() 调用。
      */
     public void pushIncomingMessageCard(AcpClient targetClient, TalkToMessage message) {
+        if (message instanceof TalkToBatchMessage) {
+            for (TalkToMessage item : ((TalkToBatchMessage) message).getMessages()) {
+                pushIncomingMessageCard(targetClient, item.getSender(), item.getContent());
+            }
+            return;
+        }
         pushIncomingMessageCard(targetClient, message.getSender(), message.getContent());
     }
 }

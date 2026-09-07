@@ -173,7 +173,12 @@ public class ConversationHistoryManager {
 
     /** 记录一条用户消息 */
     public synchronized void addUserMessage(String content) {
-        currentTurn.add(new ContextMessage(ContextMessage.Role.USER, content));
+        addUserMessage(content, ContextMessage.UserOrigin.USER);
+    }
+
+    /** Records a model-visible prompt while retaining whether it is UI-visible user input. */
+    public synchronized void addUserMessage(String content, ContextMessage.UserOrigin origin) {
+        currentTurn.add(new ContextMessage(ContextMessage.Role.USER, content, origin));
     }
 
     /** 记录一条 agent 回答 */
@@ -808,6 +813,9 @@ public class ConversationHistoryManager {
             obj.add("eventData", msg.getEventData());
         } else {
             obj.addProperty("content", msg.getContent());
+            if (msg.getRole() == ContextMessage.Role.USER && msg.getUserOrigin() != null) {
+                obj.addProperty("userOrigin", msg.getUserOrigin().name());
+            }
         }
         return obj;
     }
@@ -829,6 +837,17 @@ public class ConversationHistoryManager {
                     obj.has("eventData") && obj.get("eventData").isJsonObject()
                             ? obj.getAsJsonObject("eventData") : new JsonObject());
         }
-        return new ContextMessage(role, obj.has("content") ? obj.get("content").getAsString() : "");
+        String content = obj.has("content") ? obj.get("content").getAsString() : "";
+        if (role != ContextMessage.Role.USER) return new ContextMessage(role, content);
+        ContextMessage.UserOrigin origin = ContextMessage.UserOrigin.USER;
+        if (obj.has("userOrigin")) {
+            try {
+                origin = ContextMessage.UserOrigin.valueOf(
+                        obj.get("userOrigin").getAsString());
+            } catch (IllegalArgumentException ignored) {
+                // Old or unknown values remain visible rather than silently losing user data.
+            }
+        }
+        return new ContextMessage(role, content, origin);
     }
 }

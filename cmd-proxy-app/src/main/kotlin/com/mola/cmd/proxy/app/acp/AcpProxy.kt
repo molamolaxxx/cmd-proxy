@@ -133,6 +133,15 @@ object AcpProxy {
 
     private val shutdownHookRegistered = AtomicBoolean(false)
 
+    private var taskService: com.mola.cmd.proxy.app.acp.task.service.TaskService? = null
+    private var taskMcpServer: com.mola.cmd.proxy.app.acp.task.mcp.TaskMcpServer? = null
+    private var taskMcpDescriptor: com.google.gson.JsonObject? = null
+    private var taskDeliveryAdapter:
+        com.mola.cmd.proxy.app.acp.task.dispatch.LocalTaskDeliveryAdapter? = null
+    private var taskDispatchService:
+        com.mola.cmd.proxy.app.acp.task.dispatch.TaskDispatchService? = null
+    private val taskRobotRegistry = ConcurrentHashMap<String, AcpRobotParam>()
+
     private var autoNewSessionExecutor: ScheduledExecutorService? = null
     private val autoNewSessionLastChecks = ConcurrentHashMap<String, Long>()
 
@@ -151,6 +160,67 @@ object AcpProxy {
         if (teamManager != null) {
             throw IllegalStateException(
                 "AcpProxy is already started; stop it before starting a new generation")
+        }
+        if (taskService == null) {
+            try {
+                val service = com.mola.cmd.proxy.app.acp.task.service.TaskService(
+                    CmdProxyHome.resolve("starweave/tasks"), CmdProxyHome.instanceId()) { target ->
+                        if (target.getString("type") == "TEAM") {
+                            val teamId = target.getString("teamId")?.trim().orEmpty()
+                            if (teamId.isEmpty()) {
+                                throw com.mola.cmd.proxy.app.acp.task.model.TaskException(
+                                    "INVALID_ARGUMENT", "target.teamId is required", 400)
+                            }
+                            val manager = teamManager
+                                ?: throw com.mola.cmd.proxy.app.acp.task.model.TaskException(
+                                    "TASK_TARGETS_NOT_READY",
+                                    "Starweave Team targets are not ready",
+                                    503
+                                )
+                            val runtime = manager.getRuntime(teamId).orElse(null)
+                                ?: throw com.mola.cmd.proxy.app.acp.task.model.TaskException(
+                                    "TASK_TARGET_UNAVAILABLE",
+                                    "Starweave Team target is unavailable",
+                                    400
+                                )
+                            if (runtime.definition.isMixedPlacement) {
+                                throw com.mola.cmd.proxy.app.acp.task.model.TaskException(
+                                    "MIXED_TEAM_NOT_SUPPORTED",
+                                    "Starweave tasks cannot be assigned to mixed Teams",
+                                    400
+                                )
+                            }
+                            if (runtime.definition.isCaptainMode) {
+                                val mode = target.getString("mode")?.trim()?.uppercase()
+                                    .orEmpty().ifEmpty { "FIXED" }
+                                val memberId = target.getString("teamMemberId")?.trim().orEmpty()
+                                if (mode != "FIXED" ||
+                                    memberId != runtime.definition.captainTeamMemberId) {
+                                    throw com.mola.cmd.proxy.app.acp.task.model.TaskException(
+                                        "CAPTAIN_ONLY_TASK_TARGET",
+                                        "Captain Team tasks must target the fixed captain",
+                                        400
+                                    )
+                                }
+                            }
+                        }
+                    }
+                taskService = service
+                com.mola.cmd.proxy.app.acp.task.api.TaskApiBridge.install(service)
+                val mcp = com.mola.cmd.proxy.app.acp.task.mcp.TaskMcpServer(
+                    java.net.InetSocketAddress("127.0.0.1", 0), service)
+                mcp.start()
+                taskMcpServer = mcp
+                taskMcpDescriptor =
+                    com.mola.cmd.proxy.app.acp.task.mcp.TaskMcpServer.acpServerDescriptor(
+                        "http://127.0.0.1:${mcp.port}")
+                log.info("Starweave 任务 MCP 已启动, port={}", mcp.port)
+            } catch (e: Exception) {
+                log.error("任务存储初始化失败，任务 API 将返回未就绪", e)
+                taskMcpServer?.close()
+                taskMcpServer = null
+                taskMcpDescriptor = null
+            }
         }
         activeChatterIds = if (chatterIdsJson.isNullOrBlank()) {
             emptyList()
@@ -178,6 +248,7 @@ object AcpProxy {
             it.isEnabled && !it.isOnlyTeamMember && it.name.isNotBlank()
         }.forEach { globalRobotRegistry.putIfAbsent(it.name, it) }
         globalGroupRobotRegistry.putAll(teamSourceGroupRobotMap)
+        taskRobotRegistry.putAll(groupRobotMap)
         registerStarweaveTeamSources(configuredRobots)
         registerSharedTeamSources(configuredRobots)
 
@@ -214,6 +285,7 @@ object AcpProxy {
                     "STARWEAVE:${StarweaveIdentity.ownerId(CmdProxyHome.instanceId())}:${robot.name}"
                 ] = groupId
                 globalGroupRobotRegistry[groupId] = robot
+                taskRobotRegistry[groupId] = robot
             }
         )
         StarweaveSessionApiBridge.install(starweaveSessionManager!!)
@@ -293,6 +365,8 @@ object AcpProxy {
         latch.await()
         executor?.shutdown()
         log.info("所有 ACP client 冷加载完成, 共 {} 个", cmdGroupList.size)
+
+        startTaskExecutionRuntime()
 
         // client 和普通 TalkTo dispatcher 均就绪后再开放外部消息入口。
         channelManager = ChannelManager(
@@ -618,6 +692,14 @@ object AcpProxy {
                     ?: teamUnavailableResult(param.cmdId)
             }
             CmdReceiver.register(
+                TeamTransportProtocol.TALK_TO_CIRCUIT_OPEN_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Close a mixed-Team communication cascade without starting an Agent"
+            ) { param ->
+                teamCommandHandler?.handleTalkToCircuitOpen(param.cmdId, param.cmdArgs)
+                    ?: teamUnavailableResult(param.cmdId)
+            }
+            CmdReceiver.register(
                 StarweaveTeamGateway.RESULT_COMMAND,
                 teamTransportDescriptor.transportGroup,
                 "Complete one authenticated Starweave Team coordinator request"
@@ -694,6 +776,29 @@ object AcpProxy {
             }
         }
 
+        CmdReceiver.register("crossTalkToCircuitOpen", groupIds, "关闭跨 Chatter 通信链（不触发 Agent）") { params ->
+            try {
+                val json = com.alibaba.fastjson.JSON.parseObject(params.cmdArgs[0])
+                val cascadeId = json.getString("cascadeId") ?: throw IllegalArgumentException("cascadeId required")
+                require(cascadeId.matches(Regex("[a-zA-Z0-9._-]{1,128}")))
+                val startedAt = json.getLongValue("cascadeStartedAt")
+                require(startedAt > 0 && startedAt <= System.currentTimeMillis() + 60_000L)
+                val targetGroup = robotToGroupIdMap[json.getString("targetRobotName")]
+                val client = targetGroup?.let { registry.getClient(it) }
+                    ?: throw IllegalArgumentException("target not active")
+                val trace = com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace(
+                    cascadeId, json.getString("messageId"), json.getString("parentMessageId"),
+                    json.getIntValue("depth"), startedAt
+                ).withCascadeIds(json.getString("cascadeIds")?.let {
+                    com.alibaba.fastjson.JSON.parseArray(it, String::class.java)
+                })
+                talkToDispatcher.openRemoteCircuit(client, trace, json.getString("reason") ?: "REMOTE_CIRCUIT_OPEN")
+                mapOf("success" to "true", "result" to "cascade closed without prompt")
+            } catch (e: Exception) {
+                mapOf("success" to "false", "result" to (e.message ?: "invalid circuit control"))
+            }
+        }
+
         // 注册 crossTalkToDeliver 命令处理器（接收 MolaChat 转发的跨 chatter 消息）
         CmdReceiver.register("crossTalkToDeliver", groupIds, "接收跨chatter的talkTo消息") { params ->
             val resultMap = mutableMapOf<String, String>()
@@ -705,6 +810,19 @@ object AcpProxy {
                 val targetRobotName = json.getString("targetRobotName") ?: ""
                 val content = json.getString("content") ?: ""
                 val depth = json.getIntValue("depth")
+                val cascadeId = json.getString("cascadeId")
+                // Legacy gateways forwarded the sender request depth and receivers incremented it.
+                // New gateways forward the server-owned message hop directly.
+                val receivedHop = if (cascadeId.isNullOrBlank()) depth + 1 else depth
+                val trace = com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace(
+                    cascadeId,
+                    json.getString("messageId"),
+                    json.getString("parentMessageId"),
+                    receivedHop,
+                    json.getLongValue("cascadeStartedAt")
+                ).withCascadeIds(json.getString("cascadeIds")?.let {
+                    com.alibaba.fastjson.JSON.parseArray(it, String::class.java)
+                })
                 val authPrincipalId = json.getString("authPrincipalId")
                 val authContext = if (authPrincipalId.isNullOrBlank()) null else
                     com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext(
@@ -726,28 +844,20 @@ object AcpProxy {
 
                 val senderFullName = "$senderChatterId:$senderRobotName"
                 val message = com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage(
-                    senderFullName, content, depth + 1, emptyList(), authContext
+                    senderFullName, content, trace.hopCount, emptyList(), authContext, trace
                 )
 
-                if (targetClient.state == com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient.State.READY) {
-                    talkToDispatcher.pushIncomingMessageCard(targetClient, message)
-                    com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher.sendInboundMessage(
-                        targetClient, message)
-                    log.info("crossTalkToDeliver 直接投递: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
-                    resultMap["result"] = "已直接投递"
-                    resultMap["success"] = "true"
-                } else {
-                    val delivered = talkToDispatcher.offerToInbox(targetRobot.name, message)
-                    if (delivered) {
-                        log.info("crossTalkToDeliver 入队: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
-                        resultMap["result"] = "目标忙碌，已放入 inbox"
-                        resultMap["success"] = "true"
-                    } else {
-                        log.warn("crossTalkToDeliver inbox 已满: {}:{} → {}", senderChatterId, senderRobotName, targetRobot.name)
-                        resultMap["result"] = "目标 inbox 已满"
-                        resultMap["success"] = "false"
-                    }
+                val delivery = talkToDispatcher.deliverInbound(targetGroupId, targetClient, message)
+                resultMap["result"] = when (delivery.status) {
+                    com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher.InboundDeliveryResult.Status.DIRECT -> "已直接投递"
+                    com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher.InboundDeliveryResult.Status.QUEUED -> "目标忙碌，已放入 inbox"
+                    else -> delivery.reason ?: "投递被拒绝"
                 }
+                resultMap["success"] = (delivery.status !=
+                    com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher.InboundDeliveryResult.Status.REJECTED).toString()
+                log.info("crossTalkToDeliver: {}:{} → {}, status={}, cascadeId={}",
+                    senderChatterId, senderRobotName, targetRobot.name, delivery.status,
+                    trace.cascadeId)
             } catch (e: Exception) {
                 log.error("crossTalkToDeliver 处理失败", e)
                 resultMap["result"] = "处理异常: ${e.message}"
@@ -1198,7 +1308,9 @@ object AcpProxy {
                     )
                 }
                 com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.EVENT -> {
-                    // Team ConfigUI projection only; never replay through ordinary ACP callbacks.
+                    if (msg.eventType == "TASK_EVENT" && msg.eventData != null) {
+                        listener.onTaskEvent(msg.eventData)
+                    }
                 }
             }
         }
@@ -1426,6 +1538,14 @@ object AcpProxy {
     private fun createFeatureInitializer(): AcpClientFeatureInitializer {
         return AcpClientFeatureInitializer(
             { context, client, robot ->
+                taskMcpDescriptor?.takeIf {
+                    com.mola.cmd.proxy.app.acp.task.mcp.TaskMcpEligibility.isEligible(
+                        client.clientIdentity)
+                }?.let { descriptor ->
+                    val servers = com.google.gson.JsonArray()
+                    servers.add(descriptor.deepCopy())
+                    client.setAdditionalMcpServers(servers)
+                }
                 initMemoryForClient(context.sourceGroupId, client, robot)
             },
             { context, client, robot ->
@@ -1445,6 +1565,67 @@ object AcpProxy {
                 }
             }
         )
+    }
+
+    /** Starts local durable task admission only after MAIN and Team clients have recovered. */
+    private fun startTaskExecutionRuntime() {
+        if (taskDispatchService != null || taskDeliveryAdapter != null) return
+        val service = taskService ?: return
+        val manager = teamManager ?: return
+        if (taskMcpDescriptor == null) {
+            log.warn("任务 MCP 未就绪，保持 outbox 待处理，不启动任务投递")
+            return
+        }
+        var adapter: com.mola.cmd.proxy.app.acp.task.dispatch.LocalTaskDeliveryAdapter? = null
+        var dispatch: com.mola.cmd.proxy.app.acp.task.dispatch.TaskDispatchService? = null
+        try {
+            val directory = com.mola.cmd.proxy.app.acp.task.dispatch.LocalTaskExecutionDirectory(
+                CmdProxyHome.instanceId(),
+                StarweaveIdentity.ownerId(CmdProxyHome.instanceId()),
+                taskRobotRegistry,
+                manager,
+                null
+            )
+            val projector =
+                com.mola.cmd.proxy.app.acp.task.dispatch.ListenerTaskCardProjector(
+                    registry, manager)
+            val promptSink = com.mola.cmd.proxy.app.acp.task.dispatch.LocalTaskPromptSink(
+                registry, manager, projector) { assignee ->
+                val robotName = assignee.getString("robotNameSnapshot")
+                val expectedGroup = StarweaveIdentity.identity(
+                    CmdProxyHome.instanceId(), robotName).logicalId
+                require(expectedGroup == assignee.getString("groupId")) {
+                    "Task session identity does not match Starweave target"
+                }
+                checkNotNull(starweaveSessionManager).open(robotName)
+            }
+            adapter = com.mola.cmd.proxy.app.acp.task.dispatch.LocalTaskDeliveryAdapter(
+                service, promptSink)
+            val localAdapter = adapter
+            val router = com.mola.cmd.proxy.app.acp.task.dispatch.TaskDeliveryRouter { assignee ->
+                val targetInstance = assignee?.getString("instanceId")?.trim().orEmpty()
+                val placement = assignee?.getString("placement")?.trim().orEmpty()
+                if ((targetInstance.isEmpty() || targetInstance == CmdProxyHome.instanceId())
+                    && (placement.isEmpty() || placement == "LOCAL")) localAdapter else null
+            }
+            dispatch = com.mola.cmd.proxy.app.acp.task.dispatch.TaskDispatchService(
+                service,
+                com.mola.cmd.proxy.app.acp.task.dispatch.TaskTargetResolver(directory),
+                router,
+                "/#tasks/"
+            )
+            taskDeliveryAdapter = adapter
+            taskDispatchService = dispatch
+            adapter.start()
+            dispatch.start()
+            log.info("Starweave 本地任务投递已启动")
+        } catch (e: Exception) {
+            dispatch?.close()
+            adapter?.close()
+            taskDispatchService = null
+            taskDeliveryAdapter = null
+            log.error("Starweave 本地任务投递启动失败，outbox 将保持待处理", e)
+        }
     }
 
     private fun initTeamTalkToExtension(
@@ -1679,6 +1860,21 @@ object AcpProxy {
     fun stop() {
         log.info("正在停止 ACP 服务...")
 
+        // Stop task producers/consumers before revoking the shared service bridge.
+        taskDispatchService?.close()
+        taskDispatchService = null
+        taskDeliveryAdapter?.close()
+        taskDeliveryAdapter = null
+        taskMcpServer?.close()
+        taskMcpServer = null
+        taskMcpDescriptor = null
+
+        val closingTaskService = taskService
+        closingTaskService?.let {
+            com.mola.cmd.proxy.app.acp.task.api.TaskApiBridge.clear(it)
+        }
+        taskService = null
+
         autoNewSessionExecutor?.shutdownNow()
         autoNewSessionExecutor = null
         autoNewSessionLastChecks.clear()
@@ -1734,6 +1930,12 @@ object AcpProxy {
         teamCommandHandler = null
         TeamSharingStatusRegistry.clear()
 
+        try {
+            closingTaskService?.close()
+        } catch (e: Exception) {
+            log.warn("停止任务存储失败", e)
+        }
+
         // 清理内部状态
         memoryManagers.shutdownAllNow()
         pendingMemoryRecoveryClaims.clear()
@@ -1741,6 +1943,7 @@ object AcpProxy {
         globalRobotRegistry.clear()
         configuredRobotRegistry.clear()
         globalGroupRobotRegistry.clear()
+        taskRobotRegistry.clear()
         robotToGroupIdMap.clear()
         activeChatterIds = emptyList()
         configuredRobotNames.clear()
@@ -1771,10 +1974,14 @@ object AcpProxy {
                     "id" to team.teamId,
                     "name" to team.name,
                     "state" to team.state.name,
+                    "mode" to team.mode.name,
+                    "captainTeamMemberId" to (team.captainTeamMemberId ?: ""),
                     "members" to team.members
                         .filter { member ->
                             member.state != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.CLOSING
                                     && member.state != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.CLOSED
+                                    && (!team.isCaptainMode
+                                    || team.isCaptain(member.teamMemberId))
                         }
                         .sortedWith(compareBy({ it.order }, { it.teamMemberId }))
                         .map { member ->
@@ -1910,6 +2117,7 @@ object AcpProxy {
             log.info("robot '{}' 旧 client 已关闭, groupId={}", robotName, groupId)
         }
         globalGroupRobotRegistry.entries.removeIf { it.value.name == robotName }
+        taskRobotRegistry.entries.removeIf { it.value.name == robotName }
         robotToGroupIdMap.remove(robotName)
         robotToGroupIdMap.remove("MOLACHAT:$robotName")
         robotToGroupIdMap.remove("STARWEAVE:$robotName")
@@ -1946,6 +2154,7 @@ object AcpProxy {
             val newGroupIds = sourceGroupIds
 
             for (groupId in newGroupIds) {
+                taskRobotRegistry[groupId] = robot
                 try {
                     mainSessionService.create(groupId, robot.workDir, robot) { created ->
                         featureInitializer.initialize(
@@ -2084,6 +2293,9 @@ object AcpProxy {
                 val groupId = StarweaveIdentity.identity(
                     CmdProxyHome.instanceId(), robot.name).logicalId
                 globalGroupRobotRegistry[groupId] = robot
+                if (!robot.isOnlySubAgent && !robot.isOnlyTeamMember) {
+                    taskRobotRegistry[groupId] = robot
+                }
             }
     }
 

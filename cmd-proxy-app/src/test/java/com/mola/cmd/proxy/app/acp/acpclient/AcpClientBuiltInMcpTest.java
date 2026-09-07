@@ -33,4 +33,32 @@ public class AcpClientBuiltInMcpTest {
     public void refusesSessionWhenControlServerIsUnavailable() {
         AcpClient.appendBuiltInMcpServer(new JsonArray(), "", "auth-1");
     }
+
+    @Test
+    public void appendsRuntimeTaskServerWithoutMutatingCallerSnapshot() {
+        JsonArray configured = new JsonArray();
+        JsonArray additions = new JsonArray();
+        JsonObject task = new JsonObject();
+        task.addProperty("name", "starweave-tasks");
+        task.addProperty("type", "http");
+        task.addProperty("url", "http://127.0.0.1:12346/task-mcp/sse");
+        additions.add(task);
+
+        AcpClient.appendAdditionalMcpServers(configured, additions);
+        task.addProperty("url", "mutated");
+
+        assertEquals("http://127.0.0.1:12346/task-mcp/sse",
+                configured.get(0).getAsJsonObject().get("url").getAsString());
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void rejectsAdditionalServerNameCollision() {
+        JsonArray configured = new JsonArray();
+        JsonObject first = new JsonObject();
+        first.addProperty("name", "starweave-tasks");
+        configured.add(first);
+        JsonArray additions = new JsonArray();
+        additions.add(first.deepCopy());
+        AcpClient.appendAdditionalMcpServers(configured, additions);
+    }
 }

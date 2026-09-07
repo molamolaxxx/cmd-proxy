@@ -84,6 +84,12 @@ public final class StarweaveAcpResponseListener implements AcpResponseListener {
     }
 
     @Override
+    public void onTaskEvent(JsonObject payload) {
+        emit("TASK_EVENT", payload == null
+                ? new JSONObject(true) : JSON.parseObject(payload.toString()));
+    }
+
+    @Override
     public void onComplete(String fullResponse) {
         emitTerminal("TURN_COMPLETED", new JSONObject(true));
     }

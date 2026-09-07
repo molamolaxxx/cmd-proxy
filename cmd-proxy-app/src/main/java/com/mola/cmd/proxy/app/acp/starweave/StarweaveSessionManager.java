@@ -231,7 +231,7 @@ public final class StarweaveSessionManager {
         payload.put("content", content);
         payload.put("source", source == null ? "EXTERNAL" : source);
         eventStore.append(groupId, sessionId, turnTracker(groupId).currentOrBegin(),
-                entry.getGeneration(), "USER_MESSAGE_ACCEPTED", payload);
+                entry.getGeneration(), "CHANNEL_MESSAGE_RECEIVED", payload);
     }
 
     public JSONArray resources(String groupId, String sessionId, long generation) {
@@ -589,6 +589,10 @@ public final class StarweaveSessionManager {
             String turnId = null;
             for (ContextMessage message : history) {
                 if (message.getRole() == ContextMessage.Role.USER) {
+                    if (!message.isVisibleUserMessage()
+                            || isLegacyTaskPrompt(message.getContent())) {
+                        continue;
+                    }
                     if (turnId != null) appendImportedTerminal(
                             groupId, sessionId, turnId, generation);
                     turnId = java.util.UUID.randomUUID().toString();
@@ -624,6 +628,15 @@ public final class StarweaveSessionManager {
             if (turnId != null) appendImportedTerminal(
                     groupId, sessionId, turnId, generation);
         }
+    }
+
+    private static boolean isLegacyTaskPrompt(String content) {
+        if (content == null) return false;
+        String normalized = content.trim();
+        return normalized.startsWith("[Starweave Task]\n")
+                && normalized.contains("\neventId: ")
+                && normalized.contains("\neventType: ")
+                && normalized.contains("\ntaskId: ");
     }
 
     private void appendImportedTerminal(String groupId, String sessionId,

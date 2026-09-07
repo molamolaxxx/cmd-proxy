@@ -10,6 +10,7 @@ import com.mola.cmd.proxy.app.acp.action.CmdProxyControlServer
 import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry
 import com.mola.cmd.proxy.app.acp.configui.ConfigUiServer
+import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity
 import com.mola.cmd.proxy.app.acp.starweave.AcpRuntimePlan
 import com.mola.cmd.proxy.app.acp.team.TeamSourceEligibility
@@ -101,6 +102,7 @@ private fun startAcp() {
         defaultConfig["robots"] = JSON.parseArray("[]")
         defaultConfig["chatterIds"] = JSON.parseArray("[]")
         defaultConfig["channels"] = JSON.parseArray("[]")
+        defaultConfig["externalTaskApis"] = JSON.parseArray("[]")
         defaultConfig["configUi"] = JSON.parseObject("""{"enabled":true}""")
         content = JSON.toJSONString(defaultConfig, SerializerFeature.PrettyFormat)
         file.bufferedWriter().use { writer -> writer.write(content) }
@@ -108,6 +110,9 @@ private fun startAcp() {
         log.info("首次启动，已生成默认配置文件: {}", file.absolutePath)
     }
 
+    if (ChannelConfigFileStore.ensureArchiveIds()) {
+        content = file.readText(Charset.forName("UTF-8"))
+    }
     val config: JSONObject = JSON.parseObject(content)
 
     // 端口自动分配：跳过其它存活实例已登记的端口，再实测 bind

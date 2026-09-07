@@ -8,6 +8,11 @@ import com.mola.cmd.proxy.app.acp.team.MapTeamSourceRobotResolver;
 import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry;
 import com.mola.cmd.proxy.app.acp.team.TeamManager;
 import com.mola.cmd.proxy.app.acp.team.TeamStore;
+import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMemberState;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMode;
+import com.mola.cmd.proxy.app.acp.team.model.TeamState;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamCreateCommand;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCreateSpec;
@@ -25,6 +30,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -141,8 +147,16 @@ public class StarweaveTeamApiBridgeTest {
                     java.util.Collections.singletonMap("content", "done"));
             assertTrue(StarweaveTeamApiBridge.requiresCoordinator(localEvent));
             JSONObject offlineList = StarweaveTeamApiBridge.list();
-            assertTrue(offlineList.getJSONObject("data").getJSONArray("teams")
-                    .getJSONObject(0).getBooleanValue("coordinated"));
+            JSONObject degraded = offlineList.getJSONObject("data").getJSONArray("teams")
+                    .getJSONObject(0);
+            assertTrue(degraded.getBooleanValue("coordinated"));
+            assertTrue(degraded.getBooleanValue("degraded"));
+            assertFalse(degraded.getBooleanValue("coordinatorAvailable"));
+            assertEquals(2, degraded.getJSONArray("members").size());
+            JSONObject unavailableRemote = degraded.getJSONArray("members")
+                    .getJSONObject(1);
+            assertEquals("member-remote", unavailableRemote.getString("teamMemberId"));
+            assertEquals("UNAVAILABLE", unavailableRemote.getString("state"));
 
             JSONObject remoteEvent = new JSONObject(true);
             remoteEvent.put("eventId", "remote-event-1");
@@ -264,6 +278,62 @@ public class StarweaveTeamApiBridgeTest {
             StarweaveTeamApiBridge.clear(manager);
             manager.close();
         }
+    }
+
+    @Test
+    public void captainProductConversationAdmitsCaptainAndOrdinaryMembers()
+            throws Exception {
+        String instanceId = "instance-product-entry";
+        String ownerId = StarweaveIdentity.ownerId(instanceId);
+        TeamStore store = new TeamStore(temporary.newFolder("captain-product-entry").toPath());
+        TeamManager manager = new TeamManager(store, new TeamClientRegistry(),
+                new MapTeamSourceRobotResolver(java.util.Collections.emptyMap()));
+        List<TeamMemberDefinition> members = Arrays.asList(
+                new TeamMemberDefinition("captain", "source-captain", "Captain",
+                        "Captain", "coordinates", "fingerprint-captain")
+                        .withState(TeamMemberState.READY, "session-captain", null),
+                new TeamMemberDefinition("ordinary", "source-ordinary", "Ordinary",
+                        "Ordinary", "implements", "fingerprint-ordinary")
+                        .withState(TeamMemberState.READY, "session-ordinary", null));
+        TeamDefinition creating = TeamDefinition.creating(
+                "team-product-entry", ownerId, "Captain Team",
+                "team-acp-" + instanceId, "create-product-entry", members,
+                false, null, TeamMode.CAPTAIN, "captain", 1L);
+        TeamDefinition ready = creating.transitionTo(TeamState.READY, null, 2L);
+        store.saveTeam(creating);
+        store.saveTeam(ready);
+        java.lang.reflect.Method attach = TeamManager.class.getDeclaredMethod(
+                "attachPersistedDefinition", TeamDefinition.class);
+        attach.setAccessible(true);
+        assertTrue((Boolean) attach.invoke(manager, ready));
+        StarweaveTeamApiBridge.install(manager, instanceId,
+                java.util.Collections::emptyList);
+        try {
+            JSONObject captain = productSend("team-product-entry", "captain",
+                    "session-captain");
+            JSONObject ordinary = productSend("team-product-entry", "ordinary",
+                    "session-ordinary");
+
+            // No clients are attached in this fixture. Reaching CLIENT_CLOSED proves both
+            // product conversation targets passed Team/owner/member/session admission.
+            assertEquals("CLIENT_CLOSED", captain.getString("code"));
+            assertEquals("CLIENT_CLOSED", ordinary.getString("code"));
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
+    }
+
+    private static JSONObject productSend(String teamId, String memberId,
+                                          String sessionId) {
+        JSONObject request = new JSONObject(true);
+        request.put("requestId", "send-" + memberId);
+        request.put("action", "send");
+        request.put("teamId", teamId);
+        request.put("teamMemberId", memberId);
+        request.put("sessionId", sessionId);
+        request.put("message", "hello " + memberId);
+        return StarweaveTeamApiBridge.member(request);
     }
 
     private static AcpRobotParam robot(String name, boolean teamOnly) {

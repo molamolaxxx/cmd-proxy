@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.mola.cmd.proxy.app.acp.channel.ChannelAdapter;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
 import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToBridge;
+import com.mola.cmd.proxy.app.acp.channel.archive.ChannelMessageArchive;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelEvent;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
@@ -57,6 +58,7 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
     private final ExecutorService inboundExecutor;
     private final WeComInboundMessageParser messageParser = new WeComInboundMessageParser();
     private final WeComMediaDownloader mediaDownloader;
+    private final ChannelMessageArchive messageArchive;
     private final AtomicReference<ChannelStatus> status =
             new AtomicReference<>(ChannelStatus.STOPPED);
     private final AtomicBoolean stopped = new AtomicBoolean(true);
@@ -72,8 +74,14 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
     private volatile String subscribeRequestId;
 
     public WeComChannelAdapter(ChannelConfig config, ChannelTalkToBridge bridge) {
+        this(config, bridge, ChannelMessageArchive.getInstance());
+    }
+
+    WeComChannelAdapter(ChannelConfig config, ChannelTalkToBridge bridge,
+                        ChannelMessageArchive messageArchive) {
         this.config = config;
         this.bridge = bridge;
+        this.messageArchive = messageArchive;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -187,26 +195,44 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
     private void handleMessage(WeComFrame frame) {
         JsonObject body = frame.getBody();
         String msgId = WeComProtocol.string(body, "msgid");
+        ChannelMessageArchive.Receipt receipt;
+        try {
+            receipt = messageArchive.receive(config.getArchiveId(), config.getId(),
+                    frame.getRequestId(), body);
+        } catch (RuntimeException e) {
+            logger.error("channel message archive failed before delivery: channelId={}, msgid={}, errorCode=CHANNEL_ARCHIVE_FAILED",
+                    config.getId(), msgId, e);
+            return;
+        }
+        if (!receipt.isFirst()) {
+            logger.info("channel duplicate ignored by archive: channelId={}, msgid={}, errorCode=DUPLICATE_EVENT",
+                    config.getId(), msgId);
+            return;
+        }
         if (!markFirst(msgId)) {
             logger.info("channel duplicate ignored: channelId={}, msgid={}, errorCode=DUPLICATE_EVENT",
                     config.getId(), msgId);
             return;
         }
         try {
-            inboundExecutor.submit(() -> processMessage(frame));
+            inboundExecutor.submit(() -> processMessage(frame, receipt.getId()));
         } catch (RejectedExecutionException e) {
             if (!blank(msgId)) seenMessages.remove(msgId);
+            messageArchive.mark(receipt.getId(), null, "QUEUE_REJECTED",
+                    "CHANNEL_INBOUND_BUSY", "channel inbound queue full");
             logger.warn("channel inbound queue full: channelId={}, msgid={}, errorCode=CHANNEL_INBOUND_BUSY",
                     config.getId(), msgId);
         }
     }
 
-    private void processMessage(WeComFrame frame) {
+    void processMessage(WeComFrame frame, String recordId) {
         JsonObject body = frame.getBody();
         String msgId = WeComProtocol.string(body, "msgid");
         String msgType = WeComProtocol.string(body, "msgtype");
         String chatType = WeComProtocol.string(body, "chattype");
         if (!bridge.isInboundAllowed(config.getId(), chatType)) {
+            messageArchive.mark(recordId, null, "IGNORED_POLICY",
+                    "CHANNEL_INBOUND_DISABLED", "channel inbound disabled by policy");
             logger.info("channel inbound ignored by policy: channelId={}, msgid={}, chatType={}, errorCode=CHANNEL_INBOUND_DISABLED",
                     config.getId(), msgId, chatType);
             return;
@@ -222,6 +248,8 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                         userId, displayName, "WECOM", config.getId()));
         String chatId = WeComProtocol.string(body, "chatid");
         if (blank(msgId) || blank(userId) || blank(frame.getRequestId())) {
+            messageArchive.mark(recordId, "INVALID", "FAILED",
+                    "CHANNEL_FRAME_INVALID", "channel message missing required fields");
             logger.warn("channel message missing fields: channelId={}, msgid={}, errorCode=CHANNEL_FRAME_INVALID",
                     config.getId(), msgId);
             return;
@@ -232,18 +260,35 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
             parsed = messageParser.parse(body, mediaDownloader);
         } catch (Exception e) {
             seenMessages.remove(msgId);
+            messageArchive.mark(recordId, "MEDIA_FAILED", "FAILED",
+                    "CHANNEL_MEDIA_FAILED", e.getMessage());
             logger.warn("channel media processing failed: channelId={}, msgid={}, msgtype={}, errorCode=CHANNEL_MEDIA_FAILED",
                     config.getId(), msgId, msgType, e);
             return;
         }
         if (parsed == null) {
+            messageArchive.mark(recordId, "UNSUPPORTED", "FAILED",
+                    "CHANNEL_MESSAGE_UNSUPPORTED", "unsupported message type: " + msgType);
             logger.info("channel message type ignored: channelId={}, msgid={}, msgtype={}",
                     config.getId(), msgId, msgType);
             return;
         }
         if (blank(parsed.getText()) && parsed.getAttachments().isEmpty()) {
+            messageArchive.mark(recordId, "INVALID", "FAILED",
+                    "CHANNEL_CONTENT_EMPTY", "message has no readable content");
             logger.warn("channel message has no readable content: channelId={}, msgid={}, msgtype={}",
                     config.getId(), msgId, msgType);
+            return;
+        }
+        try {
+            messageArchive.completeParsed(recordId, parsed.getText(), parsed.getQuote(),
+                    parsed.getAttachments());
+        } catch (Exception e) {
+            seenMessages.remove(msgId);
+            messageArchive.mark(recordId, "ARCHIVE_FAILED", "FAILED",
+                    "CHANNEL_ARCHIVE_FAILED", e.getMessage());
+            logger.warn("channel parsed content archive failed: channelId={}, msgid={}, errorCode=CHANNEL_ARCHIVE_FAILED",
+                    config.getId(), msgId, e);
             return;
         }
         ChannelReplyRoute route = new ChannelReplyRoute(
@@ -253,6 +298,7 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
             TalkToDispatcher.InboundDeliveryResult result = bridge.onEvent(new ChannelEvent(
                     config.getId(), msgId, userId, displayName, parsed.getMessageType(),
                     parsed.getText(), parsed.getQuote(), parsed.getAttachments(), route));
+            markDelivery(recordId, result);
             if (result.getStatus() == TalkToDispatcher.InboundDeliveryResult.Status.REJECTED
                     && result.getReason() != null
                     && result.getReason().startsWith("attachment staging failed")) {
@@ -261,8 +307,36 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
             logger.info("channel inbound delivered: channelId={}, msgid={}, delivery={}",
                     config.getId(), msgId, result.getStatus().name().toLowerCase());
         } catch (RuntimeException e) {
+            messageArchive.mark(recordId, null, "FAILED",
+                    "CHANNEL_DELIVERY_FAILED", e.getMessage());
             logger.error("channel inbound failed: channelId={}, msgid={}, errorCode=ACP_BINDING_NOT_FOUND",
                     config.getId(), msgId, e);
+        }
+    }
+
+    private void markDelivery(String recordId,
+                              TalkToDispatcher.InboundDeliveryResult result) {
+        if (result == null) {
+            messageArchive.mark(recordId, null, "FAILED", "CHANNEL_DELIVERY_FAILED",
+                    "delivery returned no result");
+            return;
+        }
+        switch (result.getStatus()) {
+            case DIRECT:
+            case QUEUED:
+                messageArchive.mark(recordId, null, "DELIVERED", null, null);
+                return;
+            case SAVED:
+                messageArchive.mark(recordId, null, "SAVED_ONLY", null, null);
+                return;
+            case REJECTED:
+            default:
+                String reason = result.getReason();
+                String status = reason != null && reason.contains("inbox full")
+                        ? "QUEUE_REJECTED" : reason != null && reason.contains("binding")
+                        ? "BINDING_REJECTED" : "FAILED";
+                messageArchive.mark(recordId, null, status,
+                        "CHANNEL_DELIVERY_REJECTED", reason);
         }
     }
 

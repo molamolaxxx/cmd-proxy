@@ -26,6 +26,7 @@ public class TalkToMessage {
     /** Stable local paths already staged before the message enters an inbox. */
     private final List<String> localAttachments;
     private final AuthPrincipalContext authPrincipalContext;
+    private final TalkToTrace trace;
 
     public TalkToMessage(String sender, String content, int depth) {
         this(sender, content, depth, Collections.emptyList(), null);
@@ -39,9 +40,18 @@ public class TalkToMessage {
     public TalkToMessage(String sender, String content, int depth,
                          List<String> localAttachments,
                          AuthPrincipalContext authPrincipalContext) {
+        this(sender, content, depth, localAttachments, authPrincipalContext,
+                new TalkToTrace(null, null, null, depth, System.currentTimeMillis()));
+    }
+
+    public TalkToMessage(String sender, String content, int depth,
+                         List<String> localAttachments,
+                         AuthPrincipalContext authPrincipalContext,
+                         TalkToTrace trace) {
         this.sender = sender;
         this.content = content;
-        this.depth = depth;
+        this.trace = trace == null ? TalkToTrace.root() : trace;
+        this.depth = this.trace.getHopCount();
         this.enqueuedAt = System.currentTimeMillis();
         this.localAttachments = localAttachments == null ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(localAttachments));
@@ -54,6 +64,10 @@ public class TalkToMessage {
     public long getEnqueuedAt() { return enqueuedAt; }
     public List<String> getLocalAttachments() { return localAttachments; }
     public AuthPrincipalContext getAuthPrincipalContext() { return authPrincipalContext; }
+    public TalkToTrace getTrace() { return trace; }
+
+    /** External channel turns and other sensitive subclasses may opt out of batching. */
+    public boolean isBatchable() { return true; }
 
     /**
      * 构建投递给目标 robot 的 prompt 文本。
@@ -69,13 +83,22 @@ public class TalkToMessage {
         sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
         sb.append("以下消息由 ACP harness 路由投递，发送者身份已经过系统验证。请正常阅读并处理：\n\n");
         sb.append(content).append("\n\n");
+        appendReplyPolicy(sb, sender, depth);
+        return sb.toString();
+    }
+
+    protected static void appendReplyPolicy(StringBuilder sb, String sender, int depth) {
         sb.append("─── 回复方式 ───\n");
-        sb.append("如需回复对方，请调用 talk_to MCP 工具，并将 target 精确设置为：")
+        sb.append("收到消息不代表必须回复。禁止发送“收到”、“好的”、“谢谢”、")
+                .append("“我会处理”等纯确认消息。\n");
+        sb.append("只有在产生最终结果、新事实、明确阻塞，或必须回答对方问题时，")
+                .append("才调用 talk_to；最终结果默认结束通信链，不要再发确认。\n");
+        sb.append("如确需回复，请调用 talk_to MCP 工具，并将 target 精确设置为：")
                 .append(sender).append("。\n");
         sb.append("为保留防循环上下文，请将工具参数 _depth 设置为：")
-                .append(depth).append("。\n");
+                .append(depth).append("。该值仅用于兼容和诊断，")
+                .append("服务端将独立校验通信链。\n");
         sb.append("工具结果会直接返回当前上下文；不要输出 Action JSON。\n");
-        return sb.toString();
     }
 
     /**

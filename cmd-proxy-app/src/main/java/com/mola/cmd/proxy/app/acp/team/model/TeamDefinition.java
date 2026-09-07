@@ -15,6 +15,8 @@ public final class TeamDefinition {
     private String teamId;
     private String ownerChatterId;
     private String name;
+    private String mode;
+    private String captainTeamMemberId;
     private TeamState state;
     private long version;
     private String transportGroup;
@@ -39,7 +41,8 @@ public final class TeamDefinition {
                                           long timestamp) {
         return new TeamDefinition(SCHEMA_VERSION, teamId, ownerChatterId, name,
                 TeamState.CREATING, 1L, transportGroup, createRequestId, members,
-                timestamp, timestamp, null, null, null, false, null);
+                timestamp, timestamp, null, null, null, false, null,
+                TeamMode.NORMAL.name(), null);
     }
 
     public static TeamDefinition creating(String teamId, String ownerChatterId,
@@ -51,7 +54,23 @@ public final class TeamDefinition {
                                           long timestamp) {
         return new TeamDefinition(SCHEMA_VERSION, teamId, ownerChatterId, name,
                 TeamState.CREATING, 1L, transportGroup, createRequestId, members,
-                timestamp, timestamp, null, null, null, mixedPlacement, roster);
+                timestamp, timestamp, null, null, null, mixedPlacement, roster,
+                TeamMode.NORMAL.name(), null);
+    }
+
+    public static TeamDefinition creating(String teamId, String ownerChatterId,
+                                          String name, String transportGroup,
+                                          String createRequestId,
+                                          List<TeamMemberDefinition> members,
+                                          boolean mixedPlacement,
+                                          List<TeamContactRef> roster,
+                                          TeamMode mode,
+                                          String captainTeamMemberId,
+                                          long timestamp) {
+        return new TeamDefinition(SCHEMA_VERSION, teamId, ownerChatterId, name,
+                TeamState.CREATING, 1L, transportGroup, createRequestId, members,
+                timestamp, timestamp, null, null, null, mixedPlacement, roster,
+                Objects.requireNonNull(mode, "mode").name(), captainTeamMemberId);
     }
 
     private TeamDefinition(String schemaVersion, String teamId, String ownerChatterId,
@@ -60,7 +79,8 @@ public final class TeamDefinition {
                            List<TeamMemberDefinition> members, long createdAt,
                            long updatedAt, Long deletedAt, TeamError lastError,
                            String deleteRequestId, boolean mixedPlacement,
-                           List<TeamContactRef> roster) {
+                           List<TeamContactRef> roster, String mode,
+                           String captainTeamMemberId) {
         this.schemaVersion = TeamError.requireText(schemaVersion, "schemaVersion");
         this.teamId = TeamError.requireText(teamId, "teamId");
         this.ownerChatterId = TeamError.requireText(ownerChatterId, "ownerChatterId");
@@ -80,6 +100,9 @@ public final class TeamDefinition {
         this.deleteRequestId = deleteRequestId;
         this.mixedPlacement = mixedPlacement;
         this.roster = copyRoster(roster, this.members);
+        this.mode = TeamMode.fromWire(mode).name();
+        this.captainTeamMemberId = normalizeCaptain(captainTeamMemberId);
+        validateTopology();
     }
 
     public TeamDefinition transitionTo(TeamState newState, TeamError error, long timestamp) {
@@ -94,7 +117,7 @@ public final class TeamDefinition {
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 newState, version + 1L, transportGroup, createRequestId, members,
                 createdAt, timestamp, newDeletedAt, error, deleteRequestId,
-                mixedPlacement, roster);
+                mixedPlacement, roster, mode, captainTeamMemberId);
     }
 
     public TeamDefinition withMembers(List<TeamMemberDefinition> newMembers, long timestamp) {
@@ -104,7 +127,7 @@ public final class TeamDefinition {
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 state, version + 1L, transportGroup, createRequestId, newMembers,
                 createdAt, timestamp, deletedAt, lastError, deleteRequestId,
-                mixedPlacement, roster);
+                mixedPlacement, roster, mode, captainTeamMemberId);
     }
 
     public TeamDefinition withTransportGroup(String newTransportGroup, long timestamp) {
@@ -114,7 +137,7 @@ public final class TeamDefinition {
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 state, version + 1L, newTransportGroup, createRequestId, members,
                 createdAt, timestamp, deletedAt, lastError, deleteRequestId,
-                mixedPlacement, roster);
+                mixedPlacement, roster, mode, captainTeamMemberId);
     }
 
     public TeamDefinition transitionWithMembers(TeamState newState,
@@ -128,7 +151,7 @@ public final class TeamDefinition {
         return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
                 newState, version + 1L, transportGroup, createRequestId, newMembers,
                 createdAt, timestamp, newDeletedAt, error, deleteRequestId,
-                mixedPlacement, roster);
+                mixedPlacement, roster, mode, captainTeamMemberId);
     }
 
     public TeamDefinition beginDeleting(String requestId, long timestamp) {
@@ -139,7 +162,7 @@ public final class TeamDefinition {
                 TeamState.DELETING, version + 1L, transportGroup, createRequestId,
                 members, createdAt, timestamp, deletedAt, null,
                 TeamError.requireText(requestId, "deleteRequestId"),
-                mixedPlacement, roster);
+                mixedPlacement, roster, mode, captainTeamMemberId);
     }
 
     private static List<TeamMemberDefinition> copyAndValidateMembers(
@@ -204,6 +227,65 @@ public final class TeamDefinition {
 
     public String getName() {
         return name;
+    }
+
+    public TeamMode getMode() { return TeamMode.fromWire(mode); }
+
+    public String getCaptainTeamMemberId() { return captainTeamMemberId; }
+
+    public boolean isCaptainMode() { return getMode() == TeamMode.CAPTAIN; }
+
+    public boolean isCaptain(String teamMemberId) {
+        return isCaptainMode() && captainTeamMemberId != null
+                && captainTeamMemberId.equals(teamMemberId);
+    }
+
+    public boolean canCommunicate(String senderTeamMemberId,
+                                  String targetTeamMemberId) {
+        if (senderTeamMemberId == null || targetTeamMemberId == null
+                || senderTeamMemberId.equals(targetTeamMemberId)) return false;
+        if (!isCaptainMode()) return true;
+        return isCaptain(senderTeamMemberId) || isCaptain(targetTeamMemberId);
+    }
+
+    /** External channels and task systems enter a captain Team through its captain. */
+    public boolean isBusinessEntryMember(String teamMemberId) {
+        return !isCaptainMode() || isCaptain(teamMemberId);
+    }
+
+    /** Re-validates Gson-restored definitions before they become authoritative. */
+    public void validateTopology() {
+        TeamMode effectiveMode = TeamMode.fromWire(mode);
+        String captain = normalizeCaptain(captainTeamMemberId);
+        // Gson bypasses constructors when restoring legacy data; normalize once so every
+        // subsequent list/get/event projection explicitly carries the compatibility mode.
+        this.mode = effectiveMode.name();
+        this.captainTeamMemberId = captain;
+        if (effectiveMode == TeamMode.NORMAL) {
+            if (captain != null) {
+                throw new IllegalArgumentException(
+                        "NORMAL Team must not define captainTeamMemberId");
+            }
+            return;
+        }
+        List<TeamContactRef> globalRoster = getRoster();
+        if (captain == null) {
+            throw new IllegalArgumentException("CAPTAIN_REQUIRED: captainTeamMemberId is required");
+        }
+        if (globalRoster.size() < 2) {
+            throw new IllegalArgumentException(
+                    "CAPTAIN Team must contain a captain and at least one member");
+        }
+        for (TeamContactRef contact : globalRoster) {
+            if (captain.equals(contact.getTargetTeamMemberId())) return;
+        }
+        throw new IllegalArgumentException(
+                "CAPTAIN_REQUIRED: captainTeamMemberId must belong to Team roster");
+    }
+
+    private static String normalizeCaptain(String value) {
+        if (value == null || value.trim().isEmpty()) return null;
+        return value.trim();
     }
 
     public TeamState getState() {

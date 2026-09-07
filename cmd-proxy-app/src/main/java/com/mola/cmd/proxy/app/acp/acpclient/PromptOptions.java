@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,6 +29,17 @@ public class PromptOptions {
     private final AtomicBoolean channelTurnClosed = new AtomicBoolean(false);
     /** True when an internal TalkTo return restored a previously suspended channel origin. */
     private boolean restoredChannelContinuation;
+    /** True only for an internal TalkTo mailbox turn, never for an external user channel turn. */
+    private boolean inboundTalkTo;
+    /** All sends in a logical turn share a cascade, including forwards to a third member. */
+    private TalkToTrace talkToParent;
+    /** Stable Starweave task identity for precise suspend/cancel handling. */
+    private String taskId;
+    private String taskEventId;
+    private Long taskEventSeq;
+    private Long taskRevision;
+    private Long taskContentVersion;
+    private boolean taskControl;
 
     public PromptOptions() {
     }
@@ -89,6 +101,58 @@ public class PromptOptions {
         return restoredChannelContinuation;
     }
 
+    public boolean isInboundTalkTo() { return inboundTalkTo; }
+
+    public PromptOptions setInboundTalkTo(boolean inboundTalkTo) {
+        this.inboundTalkTo = inboundTalkTo;
+        return this;
+    }
+
+    public synchronized PromptOptions addTalkToParent(String target, TalkToTrace trace) {
+        if (trace != null) {
+            if (talkToParent != null
+                    && !talkToParent.getCascadeId().equals(trace.getCascadeId())) {
+                throw new IllegalArgumentException("A turn cannot discard a distinct TalkTo cascade");
+            }
+            if (talkToParent == null || trace.getHopCount() > talkToParent.getHopCount()) {
+                talkToParent = trace;
+            }
+        }
+        return this;
+    }
+
+    public synchronized TalkToTrace talkToParentFor(String target) {
+        if (talkToParent == null) {
+            // Root at hop zero: the first outbound message is hop one. Reuse this root
+            // for every tool call in this turn so changing targets cannot reset budgets.
+            talkToParent = new TalkToTrace(null, null, null, 0, System.currentTimeMillis());
+        }
+        return talkToParent;
+    }
+
+    public boolean isTaskTurn() { return taskId != null && !taskId.trim().isEmpty(); }
+    public String getTaskId() { return taskId; }
+    public String getTaskEventId() { return taskEventId; }
+    public Long getTaskEventSeq() { return taskEventSeq; }
+    public Long getTaskRevision() { return taskRevision; }
+    public Long getTaskContentVersion() { return taskContentVersion; }
+    public boolean isTaskControl() { return taskControl; }
+
+    public PromptOptions setTaskContext(String taskId, String eventId, Long eventSeq,
+                                        Long revision, Long contentVersion,
+                                        boolean taskControl) {
+        if (taskId == null || taskId.trim().isEmpty()) {
+            throw new IllegalArgumentException("taskId must not be blank");
+        }
+        this.taskId = taskId.trim();
+        this.taskEventId = eventId;
+        this.taskEventSeq = eventSeq;
+        this.taskRevision = revision;
+        this.taskContentVersion = contentVersion;
+        this.taskControl = taskControl;
+        return this;
+    }
+
     /** 默认选项（普通用户对话） */
     public static PromptOptions defaults() {
         return new PromptOptions();
@@ -113,6 +177,13 @@ public class PromptOptions {
 
     public static PromptOptions forDerivedWork(AuthPrincipalContext context) {
         return new PromptOptions().setAuthPrincipalContext(context);
+    }
+
+    public static PromptOptions forTask(String taskId, String eventId, Long eventSeq,
+                                        Long revision, Long contentVersion,
+                                        boolean taskControl) {
+        return new PromptOptions().setTaskContext(taskId, eventId, eventSeq,
+                revision, contentVersion, taskControl);
     }
 
     public static PromptOptions forChannelReply(ChannelTurnContext context) {

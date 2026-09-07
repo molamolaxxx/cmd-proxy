@@ -10,9 +10,33 @@ import java.nio.file.Path;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 public class ChannelConfigFileStoreTest {
+
+    @Test
+    public void addsStableArchiveIdsToLegacyChannelsIdempotently() throws Exception {
+        Path file = Files.createTempFile("channel-archive-id-", ".json");
+        Files.write(file, "{\"channels\":[{\"id\":\"wecom-1\",\"secret\":\"s\"}]}"
+                .getBytes(StandardCharsets.UTF_8));
+
+        assertTrue(ChannelConfigFileStore.ensureArchiveIds(file));
+        JSONObject first = JSON.parseObject(new String(Files.readAllBytes(file),
+                StandardCharsets.UTF_8));
+        String archiveId = first.getJSONArray("channels").getJSONObject(0)
+                .getString("archiveId");
+        assertNotNull(archiveId);
+        assertFalse(archiveId.trim().isEmpty());
+        assertEquals("s", first.getJSONArray("channels").getJSONObject(0)
+                .getString("secret"));
+
+        assertFalse(ChannelConfigFileStore.ensureArchiveIds(file));
+        JSONObject second = JSON.parseObject(new String(Files.readAllBytes(file),
+                StandardCharsets.UTF_8));
+        assertEquals(archiveId, second.getJSONArray("channels").getJSONObject(0)
+                .getString("archiveId"));
+    }
     @Test
     public void inboundConversationsBecomeOptionsWithoutSelectingDefault() throws Exception {
         Path file = Files.createTempFile("channel-config", ".json");
@@ -109,6 +133,27 @@ public class ChannelConfigFileStoreTest {
             assertFalse(channel.getBooleanValue("privateChatEnabled"));
             assertEquals("sensitive", channel.getString("secret"));
             assertEquals("kept", saved.getString("other"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    public void uiSaveKeepsMaskedExternalTaskAuthCode() throws Exception {
+        Path file = Files.createTempFile("external-task-config", ".json");
+        try {
+            Files.write(file, ("{\"channels\":[],\"externalTaskApis\":[{"
+                    + "\"id\":\"orders\",\"authCode\":\"orders-secret-code-123456\"}]}"
+            ).getBytes(StandardCharsets.UTF_8));
+            JSONObject submitted = JSON.parseObject("{\"channels\":[],"
+                    + "\"externalTaskApis\":[{\"id\":\"orders\","
+                    + "\"authCode\":\"********\"}]}");
+
+            ChannelConfigFileStore.saveUiConfig(file, submitted, "********");
+
+            assertEquals("orders-secret-code-123456", read(file)
+                    .getJSONArray("externalTaskApis").getJSONObject(0)
+                    .getString("authCode"));
         } finally {
             Files.deleteIfExists(file);
         }

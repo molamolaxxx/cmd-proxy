@@ -20,6 +20,32 @@ public final class ChannelConfigFileStore {
 
     private ChannelConfigFileStore() { }
 
+    /** Adds stable archive identities to legacy channel configs without touching secrets. */
+    public static boolean ensureArchiveIds() throws IOException {
+        return ensureArchiveIds(CmdProxyHome.resolve("acpConfig.json"));
+    }
+
+    static boolean ensureArchiveIds(Path path) throws IOException {
+        synchronized (LOCK) {
+            if (!Files.exists(path)) return false;
+            JSONObject root = JSON.parseObject(new String(Files.readAllBytes(path), StandardCharsets.UTF_8));
+            JSONArray channels = root.getJSONArray("channels");
+            boolean changed = false;
+            if (channels != null) {
+                for (int i = 0; i < channels.size(); i++) {
+                    JSONObject channel = channels.getJSONObject(i);
+                    if (channel != null && isBlank(channel.getString("archiveId"))) {
+                        channel.put("archiveId", java.util.UUID.randomUUID().toString());
+                        changed = true;
+                    }
+                }
+            }
+            if (changed) writeAtomically(path, JSON.toJSONString(root,
+                    SerializerFeature.PrettyFormat, SerializerFeature.SortField));
+            return changed;
+        }
+    }
+
     /** Persists an inbound gate change without rewriting secrets from a masked UI model. */
     public static void setInboundEnabled(String channelId, boolean enabled) throws IOException {
         setInboundEnabled(CmdProxyHome.resolve("acpConfig.json"), channelId, enabled);
@@ -110,6 +136,11 @@ public final class ChannelConfigFileStore {
                     JSONObject channel = channels.getJSONObject(i);
                     if (channel == null) continue;
                     JSONObject old = findChannelOrNull(oldChannels, channel.getString("id"));
+                    if (isBlank(channel.getString("archiveId"))) {
+                        String oldArchiveId = old == null ? null : old.getString("archiveId");
+                        channel.put("archiveId", isBlank(oldArchiveId)
+                                ? java.util.UUID.randomUUID().toString() : oldArchiveId);
+                    }
                     String secret = channel.getString("secret");
                     if (isBlank(secret) || secretMask.equals(secret)) {
                         String oldSecret = old == null ? null : old.getString("secret");
@@ -122,9 +153,44 @@ public final class ChannelConfigFileStore {
                     else channel.put("knownChatTargets", targets);
                 }
             }
+            preserveExternalTaskAuthCodes(submitted.getJSONArray("externalTaskApis"),
+                    previous.getJSONArray("externalTaskApis"), secretMask);
             writeAtomically(configPath, JSON.toJSONString(submitted,
                     SerializerFeature.PrettyFormat, SerializerFeature.SortField));
         }
+    }
+
+    private static void preserveExternalTaskAuthCodes(JSONArray submitted, JSONArray previous,
+                                                      String secretMask) {
+        if (submitted == null) return;
+        java.util.Set<String> authCodes = new java.util.HashSet<>();
+        for (int i = 0; i < submitted.size(); i++) {
+            JSONObject endpoint = submitted.getJSONObject(i);
+            if (endpoint == null) continue;
+            JSONObject old = findById(previous, endpoint.getString("id"));
+            String authCode = endpoint.getString("authCode");
+            if (isBlank(authCode) || secretMask.equals(authCode)) {
+                String prior = old == null ? null : old.getString("authCode");
+                if (isBlank(prior)) endpoint.remove("authCode");
+                else endpoint.put("authCode", prior);
+            }
+            String resolved = endpoint.getString("authCode");
+            if (isBlank(resolved)) {
+                throw new IllegalArgumentException("external task endpoint auth code is required");
+            }
+            if (!authCodes.add(resolved)) {
+                throw new IllegalArgumentException("duplicate external task endpoint auth code");
+            }
+        }
+    }
+
+    private static JSONObject findById(JSONArray items, String id) {
+        if (items == null || isBlank(id)) return null;
+        for (int i = 0; i < items.size(); i++) {
+            JSONObject item = items.getJSONObject(i);
+            if (item != null && id.equals(item.getString("id"))) return item;
+        }
+        return null;
     }
 
     private static void setChannelBoolean(Path configPath, String channelId,

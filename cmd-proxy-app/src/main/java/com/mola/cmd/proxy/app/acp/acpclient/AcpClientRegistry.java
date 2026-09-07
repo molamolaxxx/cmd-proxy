@@ -238,6 +238,14 @@ public class AcpClientRegistry {
     public PromptCommandResult sendMessageWithResult(String groupId, String message,
                                                      List<Map<String, String>> files,
                                                      String busyPolicy) {
+        return sendMessageWithResult(groupId, message, files, busyPolicy,
+                PromptOptions.defaults());
+    }
+
+    public PromptCommandResult sendMessageWithResult(String groupId, String message,
+                                                     List<Map<String, String>> files,
+                                                     String busyPolicy,
+                                                     PromptOptions options) {
         synchronized (sessionLock(groupId)) {
             AcpClient client = clients.get(groupId);
             if (client == null) {
@@ -245,7 +253,31 @@ public class AcpClientRegistry {
                         "REJECTED_STATE", "groupId=" + groupId + " 的会话不存在，请先调用 createSession");
             }
             return promptCoordinator.send(groupId, port(client), message, files,
-                    MainAcpPromptCoordinator.BusyPolicy.from(busyPolicy));
+                    MainAcpPromptCoordinator.BusyPolicy.from(busyPolicy),
+                    options == null ? PromptOptions.defaults() : options);
+        }
+    }
+
+    /** Task control may interrupt only the currently running turn for the same task. */
+    public PromptCommandResult sendTaskMessageWithResult(String groupId, String message,
+                                                         PromptOptions options) {
+        synchronized (sessionLock(groupId)) {
+            AcpClient client = clients.get(groupId);
+            if (client == null) {
+                return PromptCommandResult.rejected("REJECTED_STATE",
+                        "groupId=" + groupId + " task session does not exist");
+            }
+            if (client.getState() == AbstractAcpClient.State.BUSY) {
+                if (options == null || !options.isTaskControl()
+                        || !client.isActiveTask(options.getTaskId())) {
+                    return PromptCommandResult.rejected("UNRELATED_BUSY_TURN",
+                            "Busy turn does not belong to this task");
+                }
+                return promptCoordinator.send(groupId, port(client), message, null,
+                        MainAcpPromptCoordinator.BusyPolicy.INTERRUPT, options);
+            }
+            return promptCoordinator.send(groupId, port(client), message, null,
+                    MainAcpPromptCoordinator.BusyPolicy.REJECT, options);
         }
     }
 
@@ -452,6 +484,14 @@ public class AcpClientRegistry {
             @Override public AbstractAcpClient.State state() { return client.getState(); }
             @Override public void send(String message, List<Map<String, String>> files) {
                 client.send(message, files);
+            }
+            @Override public void send(String message, List<Map<String, String>> files,
+                                       PromptOptions options) {
+                if (options == null || !options.isTaskTurn()) {
+                    client.send(message, files);
+                    return;
+                }
+                client.send(message, files, options);
             }
             @Override public void cancel() throws IOException { client.cancel(); }
             @Override public void markNextTermination(String termination) {

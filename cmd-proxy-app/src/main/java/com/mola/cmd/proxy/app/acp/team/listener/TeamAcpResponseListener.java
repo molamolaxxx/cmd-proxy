@@ -144,6 +144,14 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
     }
 
     @Override
+    public void onTaskEvent(JsonObject payload) {
+        Map<String, Object> data = new com.google.gson.Gson().fromJson(
+                payload == null ? new JsonObject() : payload, Map.class);
+        persist(TeamEventType.TASK_EVENT, data);
+        publish(TeamEventType.TASK_EVENT, data);
+    }
+
+    @Override
     public void onComplete(String fullResponse) {
         renderer.onComplete();
     }

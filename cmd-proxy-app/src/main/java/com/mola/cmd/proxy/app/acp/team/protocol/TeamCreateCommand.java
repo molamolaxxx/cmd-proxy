@@ -11,6 +11,8 @@ public final class TeamCreateCommand {
     private String teamId;
     private String ownerChatterId;
     private String name;
+    private String mode;
+    private String captainTeamMemberId;
     private List<TeamMemberCreateSpec> members;
     private boolean mixedPlacement;
     private List<TeamRosterMemberSpec> roster;
@@ -32,12 +34,33 @@ public final class TeamCreateCommand {
 
     public TeamCreateCommand(String schemaVersion, String requestId, String teamId,
                              String ownerChatterId, String name,
+                             List<TeamMemberCreateSpec> members, String mode,
+                             String captainTeamMemberId) {
+        this(schemaVersion, requestId, teamId, ownerChatterId, name, members);
+        this.mode = mode;
+        this.captainTeamMemberId = captainTeamMemberId;
+    }
+
+    public TeamCreateCommand(String schemaVersion, String requestId, String teamId,
+                             String ownerChatterId, String name,
                              List<TeamMemberCreateSpec> members,
                              boolean mixedPlacement,
                              List<TeamRosterMemberSpec> roster) {
         this(schemaVersion, requestId, teamId, ownerChatterId, name, members);
         this.mixedPlacement = mixedPlacement;
         this.roster = roster == null ? null : new ArrayList<>(roster);
+    }
+
+    public TeamCreateCommand(String schemaVersion, String requestId, String teamId,
+                             String ownerChatterId, String name,
+                             List<TeamMemberCreateSpec> members,
+                             boolean mixedPlacement,
+                             List<TeamRosterMemberSpec> roster,
+                             String mode, String captainTeamMemberId) {
+        this(schemaVersion, requestId, teamId, ownerChatterId, name, members,
+                mixedPlacement, roster);
+        this.mode = mode;
+        this.captainTeamMemberId = captainTeamMemberId;
     }
 
     public String getSchemaVersion() {
@@ -59,6 +82,10 @@ public final class TeamCreateCommand {
     public String getName() {
         return name;
     }
+
+    public String getMode() { return mode; }
+
+    public String getCaptainTeamMemberId() { return captainTeamMemberId; }
 
     public List<TeamMemberCreateSpec> getMembers() {
         return members == null ? null : Collections.unmodifiableList(members);

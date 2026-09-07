@@ -71,6 +71,11 @@ public final class ChannelTalkToMessage extends TalkToMessage {
     public ChannelTurnContext getTurnContext() { return turnContext; }
 
     @Override
+    public boolean isBatchable() {
+        return false;
+    }
+
+    @Override
     public String buildPrompt() {
         StringBuilder body = new StringBuilder();
         body.append("当前消息类型: ").append(safe(messageType)).append("\n");

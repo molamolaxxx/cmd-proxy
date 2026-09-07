@@ -168,7 +168,9 @@ public final class AcpResponseContentRenderer {
         String safeName = escapeSummaryText(robotName);
         String safeContent = sanitizeCodeFences(messageContent);
         String summary;
-        if ("TALK_TO_SEND".equals(eventType)) {
+        if ("TALK_TO_CIRCUIT_OPENED".equals(eventType)) {
+            summary = "🛑 通信链已终止 · " + safeName;
+        } else if ("TALK_TO_SEND".equals(eventType)) {
             summary = "📤 发送消息给 " + safeName;
         } else if ("TALK_TO_RECEIVE".equals(eventType)) {
             summary = "📨 收到来自 " + safeName + " 的消息";

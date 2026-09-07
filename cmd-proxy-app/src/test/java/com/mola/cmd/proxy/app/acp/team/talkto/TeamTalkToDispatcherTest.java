@@ -4,8 +4,10 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
+import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToBatchMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
@@ -17,6 +19,7 @@ import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamContactRef;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberState;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMode;
 import com.mola.cmd.proxy.app.acp.team.model.TeamState;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 import org.junit.Test;
@@ -37,6 +40,34 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.Assert.*;
 
 public class TeamTalkToDispatcherTest {
+
+    @Test
+    public void captainModeRejectsOrdinaryMemberToMemberBeforeInboxAdmission() {
+        List<TeamMemberDefinition> members = Arrays.asList(
+                member("captain", 0).withState(TeamMemberState.READY, "s1", null),
+                member("member-2", 1).withState(TeamMemberState.READY, "s2", null),
+                member("member-3", 2).withState(TeamMemberState.READY, "s3", null));
+        TeamDefinition creating = TeamDefinition.creating(
+                "team-1", "owner-1", "Captain", "team-acp-instance", "request-1",
+                members, false, null, TeamMode.CAPTAIN, "captain", 100L);
+        TeamRuntime runtime = new TeamRuntime(creating.transitionWithMembers(
+                TeamState.READY, members, null, 101L));
+        List<TeamEventEnvelope> events = new ArrayList<>();
+        TeamTalkToDispatcher dispatcher = new TeamTalkToDispatcher(
+                runtime, new TeamClientRegistry(), events::add);
+
+        String forbidden = dispatcher.deliver(new TalkToRequest(
+                "member-3", "bypass", 0), "member-2", "", null);
+        String toCaptain = dispatcher.deliver(new TalkToRequest(
+                "captain", "allowed edge", 0), "member-2", "", null);
+
+        assertTrue(forbidden.contains("TEAM_COMMUNICATION_FORBIDDEN"));
+        assertTrue(toCaptain.contains("TARGET_NOT_READY"));
+        assertTrue(events.stream().anyMatch(event -> event.getType()
+                == TeamEventType.TALK_TO_REJECTED));
+        assertFalse(events.stream().anyMatch(event -> event.getType()
+                == TeamEventType.TALK_TO_SEND));
+    }
 
     @Test
     public void mixedRosterTargetEmitsRouteRequestInsteadOfUsingLocalRegistry() {
@@ -136,6 +167,28 @@ public class TeamTalkToDispatcherTest {
         assertEquals("RECEIVE", card.get("direction"));
         assertEquals("member-remote", card.get("cardTargetTeamMemberId"));
         assertEquals("DELIVERED_FROM_INBOX", card.get("delivery"));
+    }
+
+    @Test
+    public void remoteCircuitControlDropsQueuedTeamWorkWithoutStartingPrompt() {
+        Fixture fixture = mixedInboundFixture(true);
+        long startedAt = System.currentTimeMillis();
+        assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.QUEUED,
+                fixture.dispatcher.deliverRemoteInbound(
+                        "message-queued", "member-remote", "member-2",
+                        "queued remote hello", 1, "cascade-1", null,
+                        startedAt, null).getStatus());
+
+        fixture.dispatcher.openRemoteCircuit(
+                "member-2", "member-remote",
+                new com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace(
+                        "cascade-1", "control-1", "message-queued", 2,
+                        startedAt), "REMOTE_LIMIT");
+
+        assertNull(fixture.dispatcher.pollInbox("member-2"));
+        assertNull(fixture.target.lastPrompt);
+        assertEquals(1, Collections.frequency(types(fixture.events),
+                TeamEventType.TALK_TO_CIRCUIT_OPENED));
     }
 
     @Test
@@ -287,7 +340,30 @@ public class TeamTalkToDispatcherTest {
     }
 
     @Test
-    public void rejectsCrossTeamOrdinarySelfDuplicateAndDepthRoutes() {
+    public void runtimeBatchDrainPublishesEveryReceiveEventButUsesOneMessage() {
+        Fixture fixture = fixture();
+        fixture.target.setClientState(AbstractAcpClient.State.BUSY);
+        setMemberState(fixture.runtime, "member-2", TeamMemberState.BUSY);
+        com.mola.cmd.proxy.app.acp.acpclient.PromptOptions options =
+                com.mola.cmd.proxy.app.acp.acpclient.PromptOptions.defaults();
+        for (int i = 0; i < 2; i++) {
+            assertTrue(fixture.dispatcher.deliver(new TalkToRequest(
+                    "member-2", "batch-" + i, 0).withParentTrace(options.talkToParentFor("member-2")), "member-1", "", null)
+                    .contains("Team inbox"));
+        }
+
+        TalkToMessage drained = fixture.dispatcher.pollInboxBatch(
+                "member-2", "ignored", TalkToDispatcher.INBOX_BATCH_SIZE);
+
+        assertTrue(drained instanceof TalkToBatchMessage);
+        assertEquals(2, ((TalkToBatchMessage) drained).getMessages().size());
+        assertEquals(0, fixture.dispatcher.inboxSize("member-2"));
+        assertEquals(2, Collections.frequency(
+                types(fixture.events), TeamEventType.TALK_TO_RECEIVE));
+    }
+
+    @Test
+    public void rejectsCrossTeamOrdinarySelfAndDuplicateRoutesButIgnoresModelDepth() {
         Fixture fixture = fixture();
 
         assertTrue(fixture.dispatcher.deliver(new TalkToRequest(
@@ -315,10 +391,10 @@ public class TeamTalkToDispatcherTest {
                 .contains("相同消息"));
         assertTrue(fixture.dispatcher.deliver(new TalkToRequest(
                 "member-2", "deep", TeamTalkToDispatcher.MAX_DEPTH),
-                "member-1", "", null).contains("深度"));
+                "member-1", "", null).contains("已成功"));
 
         assertTrue(types(fixture.events).contains(TeamEventType.TALK_TO_REJECTED));
-        assertEquals(1, fixture.target.sendCount);
+        assertEquals(2, fixture.target.sendCount);
     }
 
     @Test
@@ -555,6 +631,13 @@ public class TeamTalkToDispatcherTest {
 
         @Override
         public void send(String input, List<Map<String, String>> files) {
+            lastPrompt = input;
+            sendCount++;
+        }
+
+        @Override
+        public void send(String input, List<Map<String, String>> files,
+                         PromptOptions options) {
             lastPrompt = input;
             sendCount++;
         }

@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
+import com.mola.cmd.proxy.app.acp.channel.archive.ChannelMessageArchive;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderType;
@@ -13,6 +14,11 @@ import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveRequestDeduplicator;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveResourcePayload;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamApiBridge;
+import com.mola.cmd.proxy.app.acp.task.api.TaskApiBridge;
+import com.mola.cmd.proxy.app.acp.task.api.ExternalTaskApiHandler;
+import com.mola.cmd.proxy.app.acp.task.api.ExternalTaskApiService;
+import com.mola.cmd.proxy.app.acp.task.api.TaskRestHandler;
+import com.mola.cmd.proxy.app.acp.task.model.TaskException;
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
 import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
@@ -183,6 +189,12 @@ public class ConfigUiServer {
         server.createContext("/", this::handleIndex);
         // 环境列表（不代理，始终由本进程扫描主机级注册表）
         server.createContext("/api/instances", this::handleInstances);
+        // Public endpoint: authentication is handled by its configured Bearer code.
+        // Deliberately do not proxy by ConfigUI's instance query parameter.
+        server.createContext(ExternalTaskApiHandler.PREFIX,
+                new ExternalTaskApiHandler(new ExternalTaskApiService(
+                        Paths.get(CONFIG_PATH), TaskApiBridge::getService)));
+        server.createContext(TaskRestHandler.PREFIX, proxied(this::handleTasks));
         // REST API：带 instance 参数且非本环境时，转发到目标环境的 ConfigUI
         server.createContext("/api/config", proxied(this::handleConfig));
         server.createContext("/api/channels/status", proxied(this::handleChannelStatus));
@@ -191,6 +203,10 @@ public class ConfigUiServer {
                 proxied(this::handleChannelPrivateChat));
         server.createContext("/api/channels/binding-targets",
                 proxied(this::handleChannelBindingTargets));
+        server.createContext("/api/channels/v1/messages",
+                proxied(this::handleChannelMessages));
+        server.createContext("/api/external-task-apis/auth-code",
+                proxied(this::handleExternalTaskApiAuthCode));
         server.createContext("/api/team/sharing-status",
                 proxied(this::handleTeamSharingStatus));
         server.createContext("/api/mcp-auth/v1/servers", proxied(this::handleMcpServers));
@@ -367,6 +383,20 @@ public class ConfigUiServer {
             }
             forward(exchange, target);
         };
+    }
+
+    /** Resolve the current service for each request so reload never retains a closed database. */
+    private void handleTasks(HttpExchange exchange) throws IOException {
+        com.mola.cmd.proxy.app.acp.task.service.TaskService service;
+        try {
+            service = TaskApiBridge.getService();
+        } catch (TaskException unavailable) {
+            sendResponse(exchange, unavailable.getHttpStatus(), "application/json",
+                    TaskRestHandler.envelope(false, unavailable.getCode(),
+                            unavailable.getMessage(), unavailable.getData()).toJSONString());
+            return;
+        }
+        new TaskRestHandler(service).handle(exchange);
     }
 
     /** 环境列表：主机上所有存活环境，供前端渲染环境页签 */
@@ -599,7 +629,28 @@ public class ConfigUiServer {
         }
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。
         json.remove("globalProxyEnabled");
-        ChannelConfigFileStore.saveUiConfig(json, SECRET_MASK);
+        String externalTaskApiError = validateExternalTaskApis(json);
+        if (externalTaskApiError != null) {
+            JSONObject error = new JSONObject(true);
+            error.put("error", externalTaskApiError);
+            sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
+            return;
+        }
+        String captainEntryError = validateCaptainTeamEntrypoints(json);
+        if (captainEntryError != null) {
+            JSONObject error = new JSONObject(true);
+            error.put("error", captainEntryError);
+            sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
+            return;
+        }
+        try {
+            ChannelConfigFileStore.saveUiConfig(json, SECRET_MASK);
+        } catch (IllegalArgumentException e) {
+            JSONObject error = new JSONObject(true);
+            error.put("error", e.getMessage());
+            sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
+            return;
+        }
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
     }
 
@@ -768,6 +819,99 @@ public class ConfigUiServer {
         result.put("statuses", channelStatusSupplier.get());
         result.put("errors", channelErrorSupplier.get());
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleChannelMessages(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "application/json",
+                    "{\"ok\":false,\"code\":\"METHOD_NOT_ALLOWED\"}");
+            return;
+        }
+        String base = "/api/channels/v1/messages";
+        String path = exchange.getRequestURI().getPath();
+        String suffix = path.length() <= base.length() ? "" : path.substring(base.length());
+        String archiveId = param(exchange, "archiveId");
+        if (isBlank(archiveId)) {
+            sendResponse(exchange, 400, "application/json",
+                    "{\"ok\":false,\"code\":\"ARCHIVE_ID_REQUIRED\",\"message\":\"archiveId is required\"}");
+            return;
+        }
+        try {
+            ChannelMessageArchive archive = ChannelMessageArchive.getInstance();
+            if (suffix.isEmpty() || "/".equals(suffix)) {
+                int page = (int) parseLong(param(exchange, "page"), 1L);
+                int pageSize = (int) parseLong(param(exchange, "pageSize"), 20L);
+                if (page < 1 || page > 1000000
+                        || !java.util.Arrays.asList(10, 20, 50, 100).contains(pageSize)) {
+                    sendResponse(exchange, 400, "application/json",
+                            "{\"ok\":false,\"code\":\"INVALID_PAGINATION\",\"message\":\"invalid page or pageSize\"}");
+                    return;
+                }
+                java.util.Map<String, String> filters = new java.util.LinkedHashMap<>();
+                for (String name : java.util.Arrays.asList("keyword", "messageId", "senderId",
+                        "senderName", "chatType", "chatId", "chatName", "messageType",
+                        "deliveryStatus", "content", "quote", "attachmentName", "mimeType",
+                        "receivedFrom", "receivedTo")) {
+                    filters.put(name, param(exchange, name));
+                }
+                JSONObject envelope = new JSONObject(true); envelope.put("ok", true);
+                envelope.put("data", archive.list(archiveId, filters, page, pageSize));
+                sendResponse(exchange, 200, "application/json", JSON.toJSONString(envelope));
+                return;
+            }
+            String[] segments = suffix.substring(1).split("/");
+            String messageId = java.net.URLDecoder.decode(segments[0], "UTF-8");
+            if (segments.length == 1) {
+                JSONObject item = archive.detail(archiveId, messageId);
+                if (item == null) {
+                    sendResponse(exchange, 404, "application/json",
+                            "{\"ok\":false,\"code\":\"MESSAGE_NOT_FOUND\",\"message\":\"消息不存在\"}");
+                    return;
+                }
+                JSONObject envelope = new JSONObject(true); envelope.put("ok", true);
+                envelope.put("data", item);
+                sendResponse(exchange, 200, "application/json", JSON.toJSONString(envelope));
+                return;
+            }
+            if (segments.length == 3 && "attachments".equals(segments[1])) {
+                String attachmentId = java.net.URLDecoder.decode(segments[2], "UTF-8");
+                ChannelMessageArchive.AttachmentResource resource =
+                        archive.attachment(archiveId, messageId, attachmentId);
+                if (resource == null) {
+                    sendResponse(exchange, 404, "application/json",
+                            "{\"ok\":false,\"code\":\"ATTACHMENT_NOT_FOUND\",\"message\":\"附件不存在\"}");
+                    return;
+                }
+                String mime = resource.getMimeType() == null
+                        ? "application/octet-stream" : resource.getMimeType();
+                boolean inline = "inline".equals(param(exchange, "disposition"))
+                        && java.util.Arrays.asList("image/png", "image/jpeg", "image/gif",
+                        "image/webp").contains(mime.toLowerCase(java.util.Locale.ROOT));
+                String encoded = java.net.URLEncoder.encode(resource.getFileName(), "UTF-8")
+                        .replace("+", "%20");
+                exchange.getResponseHeaders().set("Content-Type", mime);
+                exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+                exchange.getResponseHeaders().set("Content-Disposition",
+                        (inline ? "inline" : "attachment") + "; filename*=UTF-8''" + encoded);
+                exchange.sendResponseHeaders(200, resource.getSize());
+                try (InputStream input = resource.open();
+                     OutputStream output = exchange.getResponseBody()) {
+                    byte[] buffer = new byte[8192]; int read;
+                    while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
+                }
+                return;
+            }
+            sendResponse(exchange, 404, "application/json",
+                    "{\"ok\":false,\"code\":\"NOT_FOUND\"}");
+        } catch (IllegalArgumentException e) {
+            JSONObject error = new JSONObject(true); error.put("ok", false);
+            error.put("code", "INVALID_REQUEST"); error.put("message", e.getMessage());
+            sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
+        } catch (Exception e) {
+            logger.error("读取信道消息档案失败", e);
+            sendResponse(exchange, 503, "application/json",
+                    "{\"ok\":false,\"code\":\"CHANNEL_ARCHIVE_UNAVAILABLE\",\"message\":\"消息记录暂不可用\"}");
+        }
     }
 
     private void handleStarweaveSessions(HttpExchange exchange) throws IOException {
@@ -1472,15 +1616,196 @@ public class ConfigUiServer {
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
+    private void handleExternalTaskApiAuthCode(HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String id = param(exchange, "id");
+        if (isBlank(id)) {
+            sendResponse(exchange, 400, "application/json",
+                    "{\"error\":\"id is required\"}");
+            return;
+        }
+        try {
+            JSONObject root = JSON.parseObject(new String(Files.readAllBytes(
+                    Paths.get(CONFIG_PATH)), StandardCharsets.UTF_8));
+            com.alibaba.fastjson.JSONArray apis = root.getJSONArray("externalTaskApis");
+            if (apis != null) {
+                for (int i = 0; i < apis.size(); i++) {
+                    JSONObject item = apis.getJSONObject(i);
+                    if (item != null && id.equals(item.getString("id"))) {
+                        JSONObject result = new JSONObject(true);
+                        result.put("authCode", item.getString("authCode"));
+                        sendResponse(exchange, 200, "application/json",
+                                JSON.toJSONString(result));
+                        return;
+                    }
+                }
+            }
+            sendResponse(exchange, 404, "application/json",
+                    "{\"error\":\"external task endpoint not found\"}");
+        } catch (Exception e) {
+            sendResponse(exchange, 503, "application/json",
+                    "{\"error\":\"external task configuration unavailable\"}");
+        }
+    }
+
     private void maskChannelSecrets(JSONObject json) {
         com.alibaba.fastjson.JSONArray channels = json.getJSONArray("channels");
-        if (channels == null) return;
-        for (int i = 0; i < channels.size(); i++) {
-            JSONObject channel = channels.getJSONObject(i);
-            if (channel != null && !isBlank(channel.getString("secret"))) {
-                channel.put("secret", SECRET_MASK);
+        if (channels != null) {
+            for (int i = 0; i < channels.size(); i++) {
+                JSONObject channel = channels.getJSONObject(i);
+                if (channel != null && !isBlank(channel.getString("secret"))) {
+                    channel.put("secret", SECRET_MASK);
+                }
             }
         }
+        com.alibaba.fastjson.JSONArray apis = json.getJSONArray("externalTaskApis");
+        if (apis != null) {
+            for (int i = 0; i < apis.size(); i++) {
+                JSONObject item = apis.getJSONObject(i);
+                if (item != null && !isBlank(item.getString("authCode"))) {
+                    item.put("authCode", SECRET_MASK);
+                }
+            }
+        }
+    }
+
+    private String validateExternalTaskApis(JSONObject root) {
+        com.alibaba.fastjson.JSONArray apis = root.getJSONArray("externalTaskApis");
+        if (apis == null) return null;
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        java.util.Set<String> authCodes = new java.util.HashSet<>();
+        for (int i = 0; i < apis.size(); i++) {
+            JSONObject item = apis.getJSONObject(i);
+            if (item == null) return "externalTaskApis[" + i + "] must be an object";
+            String id = trimmed(item.getString("id"));
+            String name = trimmed(item.getString("name"));
+            String authCode = item.getString("authCode");
+            if (id.isEmpty() || id.length() > 120) return "external task endpoint id is invalid";
+            if (!ids.add(id)) return "duplicate external task endpoint id: " + id;
+            if (name.isEmpty() || name.length() > 200) return "external task endpoint name is invalid";
+            if (!SECRET_MASK.equals(authCode)) {
+                if (authCode == null || authCode.trim().length() < 16
+                        || authCode.length() > 512) {
+                    return "external task endpoint auth code must contain 16-512 characters";
+                }
+                authCode = authCode.trim();
+                item.put("authCode", authCode);
+                if (!authCodes.add(authCode)) return "duplicate external task endpoint auth code";
+            }
+            String defaultName = item.getString("defaultTaskName");
+            String defaultContent = item.getString("defaultTaskContent");
+            if (defaultName != null && defaultName.length() > 200) {
+                return "external task default name is too long";
+            }
+            if (defaultContent != null && defaultContent.length() > 1024 * 1024) {
+                return "external task default content is too long";
+            }
+            JSONObject target = item.getJSONObject("target");
+            if (target == null) return "external task endpoint target is required";
+            String instanceId = trimmed(target.getString("instanceId"));
+            if (instanceId.isEmpty()) target.put("instanceId", CmdProxyHome.instanceId());
+            else if (!CmdProxyHome.instanceId().equals(instanceId)) {
+                return "external task endpoint target belongs to another instance";
+            }
+            String type = trimmed(target.getString("type")).toUpperCase();
+            if ("AGENT".equals(type)) {
+                if (trimmed(target.getString("agentId")).isEmpty()
+                        && trimmed(target.getString("groupId")).isEmpty()) {
+                    return "external task Agent target is required";
+                }
+            } else if ("TEAM".equals(type)) {
+                if (trimmed(target.getString("teamId")).isEmpty()) {
+                    return "external task Team target is required";
+                }
+                String mode = trimmed(target.getString("mode")).toUpperCase();
+                if (mode.isEmpty()) mode = "FIXED";
+                if (!java.util.Arrays.asList("FIXED", "RANDOM", "AFFINITY").contains(mode)) {
+                    return "external task Team assignment mode is invalid";
+                }
+                target.put("mode", mode);
+                if ("FIXED".equals(mode)
+                        && trimmed(target.getString("teamMemberId")).isEmpty()) {
+                    return "external task fixed Team member is required";
+                }
+            } else {
+                return "external task endpoint target type must be AGENT or TEAM";
+            }
+            item.put("id", id);
+            item.put("name", name);
+        }
+        return null;
+    }
+
+    /** Re-validates captain-only entrypoints against the current authoritative Team view. */
+    String validateCaptainTeamEntrypoints(JSONObject root) {
+        List<Map<String, Object>> targets;
+        try {
+            targets = channelBindingTargetSupplier.get();
+        } catch (RuntimeException e) {
+            logger.warn("保存配置时读取 Team 绑定目标失败", e);
+            return "Team binding targets are unavailable";
+        }
+        if (targets == null || targets.isEmpty()) return null;
+        Map<String, Map<String, Object>> captainTeams = new java.util.HashMap<>();
+        for (Map<String, Object> target : targets) {
+            if (target == null || !"CAPTAIN".equals(String.valueOf(target.get("mode")))) continue;
+            String teamId = trimmed(String.valueOf(target.get("id")));
+            if (!teamId.isEmpty()) captainTeams.put(teamId, target);
+        }
+        if (captainTeams.isEmpty()) return null;
+
+        com.alibaba.fastjson.JSONArray channels = root.getJSONArray("channels");
+        if (channels != null) {
+            for (int i = 0; i < channels.size(); i++) {
+                JSONObject channel = channels.getJSONObject(i);
+                JSONObject binding = channel == null ? null : channel.getJSONObject("binding");
+                if (binding == null || !"TEAM_MEMBER".equals(
+                        trimmed(binding.getString("type")).toUpperCase())) continue;
+                String error = captainTargetError(binding, captainTeams,
+                        "teamMemberSelection", "CAPTAIN_ONLY_BINDING");
+                if (error != null) return error;
+            }
+        }
+
+        com.alibaba.fastjson.JSONArray apis = root.getJSONArray("externalTaskApis");
+        if (apis != null) {
+            for (int i = 0; i < apis.size(); i++) {
+                JSONObject item = apis.getJSONObject(i);
+                JSONObject target = item == null ? null : item.getJSONObject("target");
+                if (target == null || !"TEAM".equals(
+                        trimmed(target.getString("type")).toUpperCase())) continue;
+                String error = captainTargetError(target, captainTeams,
+                        "mode", "CAPTAIN_ONLY_TASK_TARGET");
+                if (error != null) return error;
+            }
+        }
+        return null;
+    }
+
+    private static String captainTargetError(JSONObject target,
+                                             Map<String, Map<String, Object>> captainTeams,
+                                             String selectionField,
+                                             String errorCode) {
+        Map<String, Object> team = captainTeams.get(trimmed(target.getString("teamId")));
+        if (team == null) return null;
+        String selection = trimmed(target.getString(selectionField)).toUpperCase();
+        if (selection.isEmpty()) selection = "FIXED";
+        String captainId = trimmed(String.valueOf(team.get("captainTeamMemberId")));
+        String memberId = trimmed(target.getString("teamMemberId"));
+        if (!"FIXED".equals(selection) || captainId.isEmpty()
+                || !captainId.equals(memberId)) {
+            return errorCode + ": captain Team must use the fixed captain member";
+        }
+        return null;
+    }
+
+    private static String trimmed(String value) {
+        return value == null ? "" : value.trim();
     }
 
     /** Mask or blank means keep the prior secret for the same channel id. */

@@ -89,6 +89,14 @@ public interface AcpResponseListener {
     }
 
     /**
+     * UI-only Starweave task business event. Implementations must preserve the payload eventId
+     * so live and historical projections can deduplicate the same task notification.
+     */
+    default void onTaskEvent(com.google.gson.JsonObject payload) {
+        // Optional structured projection for transports that expose task cards.
+    }
+
+    /**
      * agent 回答完成时回调
      *
      * @param fullResponse 完整的回答文本

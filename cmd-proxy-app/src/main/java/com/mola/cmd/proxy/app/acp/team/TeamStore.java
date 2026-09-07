@@ -54,6 +54,7 @@ public final class TeamStore {
      * 新建要求 version=1 且文件不存在；更新要求 version 恰好比持久版本大 1。
      */
     public void saveTeam(TeamDefinition definition) throws IOException {
+        definition.validateTopology();
         String teamId = requireSafeSegment(definition.getTeamId(), "teamId");
         synchronized (lock("team:" + teamId)) {
             Optional<TeamDefinition> existing = loadTeamUnlocked(teamId);
@@ -186,6 +187,9 @@ public final class TeamStore {
             T value = gson.fromJson(content, type);
             if (value == null) {
                 throw new IOException("empty JSON object: " + file);
+            }
+            if (value instanceof TeamDefinition) {
+                ((TeamDefinition) value).validateTopology();
             }
             return value;
         } catch (RuntimeException e) {

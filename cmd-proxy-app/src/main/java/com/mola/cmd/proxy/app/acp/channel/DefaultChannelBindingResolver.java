@@ -75,15 +75,21 @@ public final class DefaultChannelBindingResolver implements ChannelBindingResolv
     }
 
     private String selectTeamMember(ChannelBinding binding, ChannelEvent event, String teamId) {
-        String mode = binding.effectiveTeamMemberSelection();
-        if (ChannelBinding.MEMBER_SELECTION_FIXED.equals(mode)) {
-            String fixed = trim(binding.getTeamMemberId());
-            return fixed.isEmpty() ? null : fixed;
-        }
         TeamRuntime runtime = teamManager.getRuntime(teamId).orElse(null);
         if (runtime == null || !runtime.isAcceptingRequests()) return null;
         TeamDefinition team = runtime.getDefinition();
         if (team.getState() != TeamState.READY) return null;
+        String mode = binding.effectiveTeamMemberSelection();
+        if (team.isCaptainMode()) {
+            if (!ChannelBinding.MEMBER_SELECTION_FIXED.equals(mode)
+                    || !team.getCaptainTeamMemberId().equals(
+                    trim(binding.getTeamMemberId()))) return null;
+            return team.getCaptainTeamMemberId();
+        }
+        if (ChannelBinding.MEMBER_SELECTION_FIXED.equals(mode)) {
+            String fixed = trim(binding.getTeamMemberId());
+            return fixed.isEmpty() ? null : fixed;
+        }
         List<String> stable = new ArrayList<>();
         List<String> selectable = new ArrayList<>();
         for (TeamMemberDefinition member : team.getMembers()) {

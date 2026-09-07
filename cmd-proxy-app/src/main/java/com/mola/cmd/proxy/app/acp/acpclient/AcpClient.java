@@ -39,7 +39,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -59,6 +62,14 @@ public class AcpClient extends AbstractAcpClient {
     private static final String CHANNEL_REPLY_TARGET = "回复";
     private static final long CHANNEL_REPLY_CONTINUATION_TTL_MS = 10L * 60L * 1000L;
     private static final AtomicLong LEGACY_ACTION_JSON_HIT_COUNT = new AtomicLong();
+    private static final int MAX_CONSECUTIVE_INBOX_TURNS = 2;
+    private static final long INBOX_FAIRNESS_DELAY_MS = 250L;
+    private static final ScheduledExecutorService INBOX_SCHEDULER =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "acp-inbox-scheduler");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     /**
      * Pending channel origins keyed by the internal contact expected to answer this client.
@@ -75,10 +86,18 @@ public class AcpClient extends AbstractAcpClient {
 
     /** MCP 配置文件路径列表，按优先级从低到高排列 */
     private final List<Path> mcpConfigPaths;
+    /** Composition-root supplied runtime MCP servers, snapshotted before session start. */
+    private volatile JsonArray additionalMcpServers = new JsonArray();
     private final String authSessionId;
     /** Active logical turn exposed to the built-in cmd-proxy MCP server. */
     private final AtomicReference<AcpResponseListener> activeMcpListener = new AtomicReference<>();
     private final AtomicReference<PromptOptions> activeMcpOptions = new AtomicReference<>();
+    /** Set before executor admission so task cancellation cannot race the worker startup gap. */
+    private final AtomicReference<PromptOptions> acceptedPromptOptions = new AtomicReference<>();
+    /** Allows a task-control cancellation to recover provider cancel errors back to READY. */
+    private final AtomicBoolean queuedWorkCancellationPending = new AtomicBoolean(false);
+    private final AtomicInteger consecutiveInboxTurns = new AtomicInteger();
+    private final AtomicBoolean deferredInboxScheduled = new AtomicBoolean();
     private final ActionToolService actionToolService;
 
     /** 会话上下文管理器 */
@@ -303,6 +322,18 @@ public class AcpClient extends AbstractAcpClient {
         this.talkToRobotRegistry = robotRegistry;
     }
 
+    /**
+     * Adds process-local MCP endpoints such as starweave-tasks. Call before {@link #start()} so
+     * both session/new and session/load observe the same immutable snapshot.
+     */
+    public void setAdditionalMcpServers(JsonArray servers) {
+        JsonArray snapshot = new JsonArray();
+        if (servers != null) {
+            for (JsonElement server : servers) snapshot.add(server.deepCopy());
+        }
+        this.additionalMcpServers = snapshot;
+    }
+
     // ==================== 生命周期 ====================
 
 
@@ -446,6 +477,30 @@ public class AcpClient extends AbstractAcpClient {
         sendInternal(userInput, files, Collections.emptyList(), options);
     }
 
+    public boolean isActiveTask(String taskId) {
+        PromptOptions options = acceptedPromptOptions.get();
+        return taskId != null && getState() == State.BUSY && options != null
+                && options.isTaskTurn() && taskId.equals(options.getTaskId());
+    }
+
+    public PromptOptions getActiveTaskOptions() {
+        PromptOptions options = acceptedPromptOptions.get();
+        return options != null && options.isTaskTurn() ? options : null;
+    }
+
+    /** Cancel matching work while preserving a durable caller-owned pending notification. */
+    public void cancelForQueuedWork() throws IOException {
+        queuedWorkCancellationPending.set(true);
+        try {
+            globalListener.markNextTermination("TASK_CONTROL_INTERRUPTED");
+            cancel();
+        } catch (IOException | RuntimeException failure) {
+            globalListener.clearNextTermination();
+            queuedWorkCancellationPending.set(false);
+            throw failure;
+        }
+    }
+
     public void sendLocalFiles(String userInput, List<String> localFiles) {
         sendInternal(userInput, null, localFiles, PromptOptions.defaults());
     }
@@ -462,6 +517,7 @@ public class AcpClient extends AbstractAcpClient {
         }
 
         final PromptOptions effectiveOptions = options == null ? PromptOptions.defaults() : options;
+        if (!effectiveOptions.isInboundTalkTo()) consecutiveInboxTurns.set(0);
         long generation = currentLifecycleGeneration();
         if (!compareAndSetStateIfActive(generation, State.READY, State.BUSY)) {
             releaseChannelTurn(effectiveOptions);
@@ -469,6 +525,7 @@ public class AcpClient extends AbstractAcpClient {
                     "当前 client 状态不允许发送消息: " + state.get()));
             return;
         }
+        acceptedPromptOptions.set(effectiveOptions);
         lastMessageAt.set(System.currentTimeMillis());
 
         // 记录本轮新上传的图片路径（用于 inline image block）
@@ -505,7 +562,9 @@ public class AcpClient extends AbstractAcpClient {
                     if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
                         notifyAfterTurnReady();
                         // 中断式 pending 优先；仍为 READY 时才检查 inbox。
-                        if (getState() == State.READY) checkAndDeliverInbox();
+                        if (getState() == State.READY) {
+                            deliverInboxAfterTurn(generation, effectiveOptions);
+                        }
                     }
                 } catch (Exception e) {
                     releaseMcpAuthBinding(effectiveOptions);
@@ -519,9 +578,13 @@ public class AcpClient extends AbstractAcpClient {
                 } finally {
                     activeMcpOptions.compareAndSet(effectiveOptions, null);
                     activeMcpListener.compareAndSet(guardedListener, null);
+                    acceptedPromptOptions.compareAndSet(effectiveOptions, null);
+                    queuedWorkCancellationPending.set(false);
                 }
             });
         } catch (RejectedExecutionException e) {
+            acceptedPromptOptions.compareAndSet(effectiveOptions, null);
+            queuedWorkCancellationPending.set(false);
             releaseMcpAuthBinding(effectiveOptions);
             releaseChannelTurn(effectiveOptions);
             if (setStateIfActive(generation, State.ERROR)) {
@@ -552,6 +615,7 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     private boolean shouldRecoverTurnFailureToReady() {
+        if (queuedWorkCancellationPending.get()) return true;
         BooleanSupplier callback = recoverTurnFailureToReady;
         if (callback == null) return false;
         try {
@@ -568,7 +632,11 @@ public class AcpClient extends AbstractAcpClient {
                                           Exception error) {
         if (!shouldRecoverTurnFailureToReady()) return false;
         // 仍为 BUSY 时先终止旧流，避免新请求抢入后才收到旧 turn error。
-        listener.onError(error);
+        if (queuedWorkCancellationPending.get()) {
+            listener.onComplete("");
+        } else {
+            listener.onError(error);
+        }
         if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
             notifyAfterTurnReady();
             if (getState() == State.READY) checkAndDeliverInbox();
@@ -694,8 +762,30 @@ public class AcpClient extends AbstractAcpClient {
         String baseUrl = McpAuthManager.getInstance().getBaseUrl();
         JsonArray servers = McpConfigLoader.loadFromPaths(mcpConfigPaths, authSessionId,
                 baseUrl, workspacePath);
+        appendAdditionalMcpServers(servers, additionalMcpServers);
         appendBuiltInMcpServer(servers, baseUrl, authSessionId);
         return servers;
+    }
+
+    static void appendAdditionalMcpServers(JsonArray servers, JsonArray additions) {
+        if (additions == null) return;
+        Set<String> names = new HashSet<>();
+        for (JsonElement element : servers) {
+            if (element.isJsonObject() && element.getAsJsonObject().has("name")) {
+                names.add(element.getAsJsonObject().get("name").getAsString());
+            }
+        }
+        for (JsonElement element : additions) {
+            if (!element.isJsonObject() || !element.getAsJsonObject().has("name")) {
+                throw new IllegalArgumentException("Additional MCP server requires a name");
+            }
+            JsonObject server = element.getAsJsonObject();
+            String name = server.get("name").getAsString();
+            if (name == null || name.trim().isEmpty() || !names.add(name)) {
+                throw new IllegalStateException("Duplicate MCP server name: " + name);
+            }
+            servers.add(server.deepCopy());
+        }
     }
 
     static void appendBuiltInMcpServer(JsonArray servers, String baseUrl,
@@ -795,6 +885,7 @@ public class AcpClient extends AbstractAcpClient {
         TalkToRequest request = new TalkToRequest(displayTarget,
                 requiredString(arguments, "content"),
                 arguments.has("_depth") ? arguments.get("_depth").getAsInt() : 0);
+        request = request.withParentTrace(options.talkToParentFor(displayTarget));
         request = resolveChannelReplyTarget(request, options);
         if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
             return unresolvedChannelReplyResult();
@@ -804,9 +895,7 @@ public class AcpClient extends AbstractAcpClient {
         String result = talkToDispatcher.deliver(request, talkToRoutingName(),
                 extractChatterId(), groupId, contacts, options.getAuthPrincipalContext());
         recordPendingChannelReply(request, options, result);
-        if (!talkToDispatcher.managesTalkToEvents()) {
-            listener.onTalkToEvent("TALK_TO_SEND", displayTarget, request.getContent());
-        }
+        publishOrdinaryTalkToResult(listener, displayTarget, request.getContent(), result);
         return result;
     }
 
@@ -971,7 +1060,7 @@ public class AcpClient extends AbstractAcpClient {
         AtomicReference<IOException> stdinWriteError = new AtomicReference<>();
         sendJsonInBackground(request, stdinWriteError);
 
-        historyManager.addUserMessage(userInput);
+        historyManager.addUserMessage(userInput, historyOrigin(options));
 
         // 流式读取
         StringBuilder fullResponse = new StringBuilder();
@@ -1076,6 +1165,26 @@ public class AcpClient extends AbstractAcpClient {
                 }
             }
         }
+    }
+
+    static com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin
+    historyOrigin(PromptOptions options) {
+        if (options == null) {
+            return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.USER;
+        }
+        if (options.isTaskTurn()) {
+            return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.TASK;
+        }
+        if (options.isInboundTalkTo()) {
+            return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.TALK_TO;
+        }
+        if (options.hasChannelTurnContext()) {
+            return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.CHANNEL;
+        }
+        if (options.isScheduleExecution()) {
+            return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.SCHEDULE;
+        }
+        return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.USER;
     }
 
     void requestActionTurnStop(AtomicBoolean promptResponseReceived,
@@ -1451,6 +1560,21 @@ public class AcpClient extends AbstractAcpClient {
         TalkToRequest request =
                 talkToDispatcher.detectTalkTo(fullResponse);
         if (request == null) return false;
+        PromptOptions options = activeMcpOptions.get();
+        String displayTarget = request.getTarget();
+        request = request.withParentTrace(options == null ? null
+                : options.talkToParentFor(displayTarget));
+        request = resolveChannelReplyTarget(request, options);
+        if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
+            try {
+                sendPrompt(unresolvedChannelReplyResult(), null, Collections.emptySet(),
+                        listener, options);
+            } catch (IOException e) {
+                releaseChannelTurn(options);
+                listener.onError(e);
+            }
+            return true;
+        }
 
         String senderName = talkToRoutingName();
         // 从 groupId 中提取 chatterId（groupId = sort(chatterId, acpId).join("")）
@@ -1461,19 +1585,27 @@ public class AcpClient extends AbstractAcpClient {
             java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
                     robotParam != null ? robotParam.getContacts() : null;
             String resultText = talkToDispatcher.deliver(
-                    request, senderName, senderChatterId, groupId, contacts, null);
+                    request, senderName, senderChatterId, groupId, contacts,
+                    options == null ? null : options.getAuthPrincipalContext());
+            recordPendingChannelReply(request, options, resultText);
             // 在发送方前端推送 talkTo 卡片
-            if (!talkToDispatcher.managesTalkToEvents()) {
-                listener.onTalkToEvent("TALK_TO_SEND", request.getTarget(), request.getContent());
+            publishOrdinaryTalkToResult(
+                    listener, displayTarget, request.getContent(), resultText);
+            if (isTalkToCircuitOpen(resultText)) {
+                releaseChannelTurn(options);
+                listener.onComplete(resultText);
+                return true;
             }
-            sendPrompt(resultText, null, listener);
+            sendPrompt(resultText, null, Collections.emptySet(), listener, options);
             return true;
         } catch (Exception e) {
             logger.error("talkTo 处理失败", e);
             try {
-                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null, listener);
+                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null,
+                        Collections.emptySet(), listener, options);
             } catch (IOException ioe) {
                 logger.error("发送 talkTo 错误结果失败", ioe);
+                releaseChannelTurn(options);
                 listener.onComplete(fullResponse);
             }
             return true;
@@ -1504,6 +1636,11 @@ public class AcpClient extends AbstractAcpClient {
             logger.info("旧 Action JSON 兼容路径命中，将通过 ActionToolService 执行, action={}, totalHits={}",
                     action, hitCount);
             String result = actionToolService.execute(action, arguments);
+            if ("talk_to".equals(action) && isTalkToCircuitOpen(result)) {
+                releaseChannelTurn(options);
+                listener.onComplete(result);
+                return;
+            }
             sendPrompt(result, null, Collections.emptySet(), listener, options);
         } catch (Exception e) {
             logger.error("旧 Action JSON 兼容执行失败, action={}", action, e);
@@ -1544,6 +1681,8 @@ public class AcpClient extends AbstractAcpClient {
             return false;
         }
         String displayTarget = request.getTarget();
+        request = request.withParentTrace(options == null ? null
+                : options.talkToParentFor(displayTarget));
         request = resolveChannelReplyTarget(request, options);
         if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
             try {
@@ -1567,8 +1706,12 @@ public class AcpClient extends AbstractAcpClient {
                     request, senderName, senderChatterId, groupId, contacts,
                     options == null ? null : options.getAuthPrincipalContext());
             recordPendingChannelReply(request, options, resultText);
-            if (!talkToDispatcher.managesTalkToEvents()) {
-                listener.onTalkToEvent("TALK_TO_SEND", displayTarget, request.getContent());
+            publishOrdinaryTalkToResult(
+                    listener, displayTarget, request.getContent(), resultText);
+            if (isTalkToCircuitOpen(resultText)) {
+                releaseChannelTurn(options);
+                listener.onComplete(resultText);
+                return true;
             }
             sendPrompt(resultText, null, Collections.emptySet(), listener, options);
             return true;
@@ -1597,12 +1740,39 @@ public class AcpClient extends AbstractAcpClient {
         }
         options.markChannelReplyAttempt();
         return new TalkToRequest(context.getReplyTarget(), request.getContent(),
-                request.getDepth());
+                request.getDepth(), request.getParentTrace());
     }
 
     private static String unresolvedChannelReplyResult() {
         return "[talkTo 结果]\n发送失败：当前 turn 没有可唯一恢复的原始信道会话，"
                 + "已拒绝按最近对象或 defaultChatId 猜测发送。";
+    }
+
+    public void onTalkToCircuitOpened(String result) {
+        if (globalListener != null) publishOrdinaryTalkToResult(globalListener,
+                "智能体通讯", result, result);
+    }
+
+    private void publishOrdinaryTalkToResult(AcpResponseListener listener,
+                                             String target, String content,
+                                             String result) {
+        if (talkToDispatcher == null || talkToDispatcher.managesTalkToEvents()) return;
+        if (isTalkToCircuitOpen(result)) {
+            if (talkToDispatcher.claimCircuitNotification(result)) {
+                JsonObject data = new JsonObject();
+                data.addProperty("eventType", "TALK_TO_CIRCUIT_OPENED");
+                data.addProperty("robotName", target);
+                data.addProperty("content", result);
+                historyManager.addEventMessage("TALK_TO_CIRCUIT_OPENED", data);
+                listener.onTalkToEvent("TALK_TO_CIRCUIT_OPENED", target, result);
+            }
+        } else if (result != null && !result.contains("发送失败")) {
+            listener.onTalkToEvent("TALK_TO_SEND", target, content);
+        }
+    }
+
+    private static boolean isTalkToCircuitOpen(String result) {
+        return result != null && result.startsWith("[TALK_TO_CIRCUIT_OPENED]");
     }
 
     private boolean deliverAutomaticChannelReply(String content, AcpResponseListener listener,
@@ -1652,14 +1822,38 @@ public class AcpClient extends AbstractAcpClient {
         String robotName = talkToRoutingName();
         if (robotName == null || robotName.isEmpty()) return;
 
-        TalkToMessage pending = talkToDispatcher.pollInbox(robotName, groupId);
-        if (pending != null) {
-            logger.info("从 inbox 投递消息: from={}, to={}", pending.getSender(), robotName);
+        TalkToMessage pending = talkToDispatcher.pollInboxBatch(
+                robotName, groupId, TalkToDispatcher.INBOX_BATCH_SIZE);
+        if (pending != null && talkToDispatcher.canDeliverMessage(pending)) {
+            int batchSize = pending instanceof
+                    com.mola.cmd.proxy.app.acp.talkto.model.TalkToBatchMessage
+                    ? ((com.mola.cmd.proxy.app.acp.talkto.model.TalkToBatchMessage) pending)
+                    .getMessages().size() : 1;
+            logger.info("从 inbox 投递消息: from={}, to={}, batchSize={}",
+                    pending.getSender(), robotName, batchSize);
             // 先推送来信卡片到前端
             talkToDispatcher.pushIncomingMessageCard(this, pending);
             // 再发送消息，会再次进入 BUSY 状态
             TalkToDispatcher.sendInboundMessage(this, pending);
         }
+    }
+
+    private void deliverInboxAfterTurn(long generation, PromptOptions options) {
+        int consecutive = options != null && options.isInboundTalkTo()
+                ? consecutiveInboxTurns.incrementAndGet() : 0;
+        if (consecutive < MAX_CONSECUTIVE_INBOX_TURNS) {
+            checkAndDeliverInbox();
+            return;
+        }
+        if (!deferredInboxScheduled.compareAndSet(false, true)) return;
+        logger.info("TalkTo inbox fairness delay scheduled: sessionId={}, consecutiveTurns={}",
+                sessionId, consecutive);
+        INBOX_SCHEDULER.schedule(() -> {
+            deferredInboxScheduled.set(false);
+            if (!isLifecycleGenerationActive(generation) || getState() != State.READY) return;
+            consecutiveInboxTurns.set(0);
+            checkAndDeliverInbox();
+        }, INBOX_FAIRNESS_DELAY_MS, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -1689,9 +1883,9 @@ public class AcpClient extends AbstractAcpClient {
     /** Returns channel options only when the verified sender maps to one unique live origin. */
     public PromptOptions promptOptionsForInboundTalkTo(TalkToMessage message) {
         if (message instanceof com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage) {
-            return PromptOptions.forChannelReply(
+            return withTalkToParent(PromptOptions.forChannelReply(
                     ((com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage) message)
-                            .getTurnContext());
+                            .getTurnContext()), message);
         }
         cleanupExpiredPendingChannelReplies();
         if (message == null || message.getSender() == null) return PromptOptions.defaults();
@@ -1715,26 +1909,38 @@ public class AcpClient extends AbstractAcpClient {
                 }
             }
         }
-        if (liveByTurn.isEmpty()) return PromptOptions.defaults();
+        if (liveByTurn.isEmpty()) return withTalkToParent(PromptOptions.defaults(), message);
         if (liveByTurn.size() != 1) {
             logger.warn("channel TalkTo continuation is ambiguous: responder={}, candidates={}",
                     responder, liveByTurn.size());
-            return PromptOptions.defaults();
+            return withTalkToParent(PromptOptions.defaults(), message);
         }
 
         PendingChannelReply resolved = liveByTurn.values().iterator().next();
         ConcurrentHashMap<String, PendingChannelReply> candidates =
                 pendingChannelReplies.get(resolved.responderKey);
-        if (candidates == null) return PromptOptions.defaults();
+        if (candidates == null) return withTalkToParent(PromptOptions.defaults(), message);
         if (!candidates.remove(resolved.context.getTurnId(), resolved)) {
-            return PromptOptions.defaults();
+            return withTalkToParent(PromptOptions.defaults(), message);
         }
         if (candidates.isEmpty()) {
             pendingChannelReplies.remove(resolved.responderKey, candidates);
         }
         logger.info("channel TalkTo continuation restored: turnId={}, responder={}",
                 resolved.context.getTurnId(), responder);
-        return PromptOptions.forRestoredChannelReply(resolved.context);
+        return withTalkToParent(
+                PromptOptions.forRestoredChannelReply(resolved.context), message);
+    }
+
+    private static PromptOptions withTalkToParent(PromptOptions options,
+                                                   TalkToMessage message) {
+        if (message != null) {
+            options.addTalkToParent(message.getSender(), message.getTrace());
+            if (!(message instanceof com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage)) {
+                options.setInboundTalkTo(true);
+            }
+        }
+        return options;
     }
 
     private boolean hasPendingChannelReply(ChannelTurnContext context) {

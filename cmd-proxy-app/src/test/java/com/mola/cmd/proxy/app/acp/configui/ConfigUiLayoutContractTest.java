@@ -11,6 +11,26 @@ import static org.junit.Assert.assertTrue;
 
 public class ConfigUiLayoutContractTest {
     @Test
+    public void exposesSearchablePaginatedChannelMessageArchiveDialog() throws Exception {
+        String html = loadConfigUi();
+
+        assertTrue(html.contains("id=\"channelMessagesDialog\""));
+        assertTrue(html.contains("title=\"查看消息记录\""));
+        assertTrue(html.contains("function openChannelMessages("));
+        assertTrue(html.contains("function loadChannelMessages("));
+        assertTrue(html.contains("/api/channels/v1/messages?archiveId="));
+        assertTrue(html.contains("id=\"channelMessageKeyword\""));
+        assertTrue(html.contains("id=\"channelMessageSenderId\""));
+        assertTrue(html.contains("id=\"channelMessageChatId\""));
+        assertTrue(html.contains("id=\"channelMessageContent\""));
+        assertTrue(html.contains("id=\"channelMessageQuote\""));
+        assertTrue(html.contains("id=\"channelMessageAttachment\""));
+        assertTrue(html.contains("request:0,timer:0"));
+        assertTrue(html.contains("token!==channelMessages.request"));
+        assertTrue(html.contains("channel-message-results"));
+        assertTrue(html.contains("overscroll-behavior:contain"));
+    }
+    @Test
     public void separatesConfigurationIntoSearchablePaginatedPages() throws Exception {
         String html = loadConfigUi();
 
@@ -47,7 +67,7 @@ public class ConfigUiLayoutContractTest {
     public void keepsChannelSaveAndSingleRefreshActionsExplicitlySeparated() throws Exception {
         String html = loadConfigUi();
 
-        assertTrue(html.contains("保存不会中断连接，卡片上的应用按钮只重新加载当前渠道"));
+        assertTrue(html.contains("onclick=\"saveConfig(false)\""));
         assertTrue(html.contains("保存并应用到此渠道"));
         assertTrue(html.contains("previousChannelId:previousId,channelId:channelId"));
         assertTrue(html.contains("/api/refresh-channel"));
@@ -108,7 +128,7 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("channelBindingTargets={instanceId:id,sessions:[],teams:[]}"));
         assertTrue(html.contains("await loadStarweaveTeams(false);await refreshChannelBindingTargets(false)"));
         assertTrue(html.contains("if(b.groupId&&!selectedGroup)groupOpts+="));
-        assertTrue(html.contains("b.groupId+' · 当前不可用'"));
+        assertTrue(html.contains("当前智能体（不可用）"));
         assertTrue(html.contains("channelBindingTargetFingerprint(channelBindingTargets)"));
         assertTrue(html.contains("/api/starweave/v1/sessions/stream"));
         assertTrue(html.contains("new EventSource(url)"));
@@ -174,16 +194,21 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains(".team-member-chip .star-team-member{position:absolute;width:1px;height:1px;opacity:0"));
         assertTrue(html.contains("source.onlyTeamMember?'<span class=\"team-member-role\">仅 Team</span>'"));
         assertTrue(html.contains("id=\"starTeamSelectedMembers\""));
-        assertTrue(html.contains("已选成员备注（可选）"));
+        assertTrue(html.contains("class=\"star-team-basics\""));
+        assertTrue(html.contains("成员职责与队长"));
         assertTrue(html.contains("function renderStarTeamSelectedMembers("));
         assertTrue(html.contains("function updateStarTeamMemberRemark("));
-        assertTrue(html.contains("starTeamDraft={sources:[],remarks:Object.create(null)}"));
+        assertTrue(html.contains("starTeamDraft={sources:[],remarks:Object.create(null),memberIds:Object.create(null),mode:'NORMAL',captainKey:''}"));
+        assertTrue(html.contains("id=\"starTeamMode\""));
+        assertTrue(html.contains("class=\"star-team-captain-choice\""));
+        assertTrue(html.contains("class=\"star-team-captain-radio\""));
+        assertTrue(html.contains("captainTeamMemberId:captainId"));
         assertTrue(html.contains("data-source-key=\"'+esc(key)+'\""));
         assertTrue(html.contains("function starTeamSourceKey("));
         assertTrue(html.contains("coordinated:!!source.coordinated"));
         assertTrue(html.contains("remark:starTeamDraft.remarks[input.value]||''"));
         assertTrue(html.contains(".star-team-selected-members{display:grid;gap:8px;max-height:"));
-        assertTrue(html.contains(".star-team-selected-member{grid-template-columns:1fr;gap:7px}"));
+        assertTrue(html.contains(".star-team-basics,.star-team-selected-member{grid-template-columns:1fr;gap:7px}"));
         assertFalse(html.contains("value=\"'+esc(source.remark"));
         assertFalse(html.contains("选择已开启的会话（1–6 个）"));
         assertFalse(html.contains("var active=starSessions.items.filter(function(s){return s.active&&s.groupId})"));
@@ -202,6 +227,12 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("function loadTeamSessionSnapshot("));
         assertTrue(html.contains("function mergeTeamSessionMembers("));
         assertTrue(html.contains("function sendTeamSessionMessage("));
+        assertTrue(html.contains("var ready=member.state==='READY',busy=member.state==='BUSY',canSend=ready"));
+        assertTrue(html.contains("队长模式：用户可选择任意成员继续其独立 ACP 会话"));
+        assertFalse(html.contains("队长模式下普通队员会话仅供查看"));
+        assertFalse(html.contains("队长模式下附件只能发送给队长"));
+        assertFalse(html.contains("队长模式下新消息只能发送给队长"));
+        assertFalse(html.contains("只读查看，业务消息由队长承接"));
         assertTrue(html.contains("if(!member.sessionId){showSnackbar('成员会话正在同步，请稍候');return}"));
         assertTrue(html.contains("function restoreTeamSession("));
         assertTrue(html.contains("function uploadTeamSessionFiles("));
@@ -335,7 +366,7 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("layout.classList.add('sidebar-collapsed');layout.classList.remove('sidebar-fading')"));
         assertTrue(html.contains("transition:grid-template-columns .28s ease"));
         assertTrue(html.contains("starweave-sidebar-collapsed"));
-        assertTrue(html.contains("await Promise.all([loadStarweaveSessions(false),loadStarweaveTeams(false)])"));
+        assertTrue(html.contains("await Promise.all([loadStarweaveSessions(false),loadStarweaveTeams(false),loadTaskCount()])"));
         assertTrue(html.contains("document.getElementById('sessionCount').textContent='0'"));
         assertTrue(html.contains("document.getElementById('teamCount').textContent='0'"));
     }
@@ -374,6 +405,8 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("需要 Node.js 22+"));
         assertTrue(html.contains("permissionPolicy:provider==='DEEPSEEK_HARNESS_ACP'"));
         assertTrue(html.contains("dshAgentPreset:provider==='DEEPSEEK_HARNESS_ACP'"));
+        assertTrue(html.contains("+esc(p.name)+'</option>'"));
+        assertFalse(html.contains("p.name+' ('+p.id+')'"));
     }
 
     @Test

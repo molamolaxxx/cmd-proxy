@@ -18,9 +18,12 @@ import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -82,6 +85,7 @@ public final class StarweaveTeamApiBridge {
                     // A persisted local fragment is not an ordinary local Team. Keep all
                     // mutations fail-closed through the coordinator while it reconnects.
                     team.put("coordinated", true);
+                    projectDegradedRoster(team);
                 }
             }
         }
@@ -185,7 +189,8 @@ public final class StarweaveTeamApiBridge {
         String name = textOr(request.getString("name"), "Starweave Team");
         TeamCreateCommand command = new TeamCreateCommand(
                 TeamDefinition.SCHEMA_VERSION, requestId, teamId,
-                current.ownerId, name, members);
+                current.ownerId, name, members, request.getString("mode"),
+                request.getString("captainTeamMemberId"));
         return result(current.manager.create(command, current.transportGroup));
     }
 
@@ -216,6 +221,13 @@ public final class StarweaveTeamApiBridge {
         if ("send".equals(request.getString("action"))) {
             String teamId = required(request.getString("teamId"), "teamId");
             String memberId = required(request.getString("teamMemberId"), "teamMemberId");
+            java.util.Optional<com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime> local =
+                    current.manager.getRuntime(teamId);
+            if (!request.getBooleanValue("coordinated") || local.isPresent()) {
+                local.orElseThrow(
+                        () -> new IllegalArgumentException("Team not found"))
+                        .getDefinition();
+            }
             String sessionId = request.getBooleanValue("coordinated")
                     ? required(request.getString("sessionId"), "sessionId")
                     : currentSessionId(current, teamId, memberId,
@@ -243,7 +255,10 @@ public final class StarweaveTeamApiBridge {
             if (current.gateway == null) {
                 throw new IllegalStateException("Starweave Team coordinator is unavailable");
             }
-            JSONObject data = current.gateway.mutate("member", commandValue);
+            String action = required(request.getString("action"), "action");
+            JSONObject data = isReadOnlyMemberAction(action)
+                    ? current.gateway.query("member", commandValue)
+                    : current.gateway.mutate("member", commandValue);
             for (StarweaveUploadStore.ResolvedUpload upload : resolvedUploads) {
                 UPLOADS.delete(upload.uploadId);
             }
@@ -529,6 +544,53 @@ public final class StarweaveTeamApiBridge {
         return textOr(source.getString("cmdProxyInstanceId"), "") + "\n"
                 + textOr(source.getString("sourceGroupId"), "") + "\n"
                 + textOr(source.getString("sourceRobotId"), "");
+    }
+
+    private static boolean isReadOnlyMemberAction(String action) {
+        return "listSessions".equals(action) || "status".equals(action)
+                || "context".equals(action) || "history".equals(action);
+    }
+
+    /**
+     * A mixed-Team fragment contains only members hosted by this instance, while its
+     * roster contains the complete cross-instance identity set. Preserve those remote
+     * identities in the degraded UI projection so a coordinator outage is shown as an
+     * availability problem instead of making Agents silently disappear.
+     */
+    private static void projectDegradedRoster(JSONObject team) {
+        JSONArray members = team.getJSONArray("members");
+        if (members == null) {
+            members = new JSONArray();
+            team.put("members", members);
+        }
+        Set<String> memberIds = new HashSet<>();
+        for (int i = 0; i < members.size(); i++) {
+            memberIds.add(members.getJSONObject(i).getString("teamMemberId"));
+        }
+        JSONArray roster = team.getJSONArray("roster");
+        if (roster != null) {
+            for (int i = 0; i < roster.size(); i++) {
+                JSONObject contact = roster.getJSONObject(i);
+                String memberId = contact.getString("targetTeamMemberId");
+                if (memberId == null || !memberIds.add(memberId)) continue;
+                JSONObject remote = new JSONObject(true);
+                remote.put("teamMemberId", memberId);
+                remote.put("acpClientId", contact.getString("targetAcpClientId"));
+                remote.put("displayName", contact.getString("displayName"));
+                remote.put("sourceRobotName", contact.getString("displayName"));
+                remote.put("remark", contact.getString("remark"));
+                remote.put("order", contact.getIntValue("order"));
+                remote.put("state", "UNAVAILABLE");
+                remote.put("remote", true);
+                remote.put("coordinated", true);
+                members.add(remote);
+            }
+        }
+        members.sort(Comparator.comparingInt(value ->
+                ((JSONObject) value).getIntValue("order")));
+        team.put("coordinatorAvailable", false);
+        team.put("degraded", true);
+        team.put("degradedReason", "Starweave Team coordinator is unavailable");
     }
 
     private static int indexOfSource(JSONArray values, String identity) {

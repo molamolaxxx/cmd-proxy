@@ -8,6 +8,9 @@ import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.team.TeamManager;
+import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
+import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -247,6 +250,10 @@ public final class ChannelManager implements AutoCloseable {
                 return "TEAM_MEMBER binding cannot contain groupId";
             }
             if (trim(binding.getTeamId()).isEmpty()) return "binding.teamId is required";
+            TeamRuntime runtime = teamManager == null ? null
+                    : teamManager.getRuntime(trim(binding.getTeamId())).orElse(null);
+            if (teamManager != null && runtime == null) return "binding Team not found";
+            TeamDefinition team = runtime == null ? null : runtime.getDefinition();
             String selection = binding.effectiveTeamMemberSelection();
             if (!ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)
                     && !ChannelBinding.MEMBER_SELECTION_RANDOM.equals(selection)
@@ -259,6 +266,20 @@ public final class ChannelManager implements AutoCloseable {
                 }
             } else if (!trim(binding.getTeamMemberId()).isEmpty()) {
                 return "automatic TEAM_MEMBER binding cannot contain teamMemberId";
+            }
+            if (team != null && team.isCaptainMode()
+                    && (!ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)
+                    || !team.getCaptainTeamMemberId().equals(
+                    trim(binding.getTeamMemberId())))) {
+                return "CAPTAIN_ONLY_BINDING: captain Team must use FIXED captain member";
+            }
+            if (team != null && ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)) {
+                boolean memberFound = false;
+                for (TeamMemberDefinition member : team.getMembers()) {
+                    if (member.getTeamMemberId().equals(
+                            trim(binding.getTeamMemberId()))) memberFound = true;
+                }
+                if (!memberFound) return "binding Team member not found locally";
             }
         } else {
             return "unsupported binding.type";

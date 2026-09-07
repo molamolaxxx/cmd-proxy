@@ -62,6 +62,19 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
         StringBuilder sb = new StringBuilder();
         sb.append("\n<agent-team>\n");
         sb.append("你处于 Fast Team「").append(team.getName()).append("」中。\n");
+        if (team.isCaptainMode()) {
+            boolean captain = selfTeamMemberId.equals(team.getCaptainTeamMemberId());
+            sb.append("当前团队使用队长模式；当前成员是")
+                    .append(captain ? "该团队唯一队长" : "普通队员")
+                    .append("。\n");
+            if (captain) {
+                sb.append("你负责协调、拆分、派发与汇总工作，可以联系所有普通队员。\n");
+            } else {
+                sb.append("队内消息只能发送给队长；不得猜测、查找或尝试联系其他普通队员。\n");
+            }
+        } else {
+            sb.append("当前团队使用普通模式，成员之间可以直接协作。\n");
+        }
         Map<String, String> selfCard = new LinkedHashMap<>();
         selfCard.put("teamMemberId", self.getTargetTeamMemberId());
         selfCard.put("displayName", self.getDisplayName());
@@ -78,6 +91,8 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
         sb.append("除下方明确列出的外部信道 target 外，禁止使用来源 robotName、displayName、");
         sb.append("acpClientId、chatterId:robotName 或未列出的名称路由。\n");
         sb.append("消息为异步投递：目标忙碌时进入该成员的 Team 专属 inbox。\n\n");
+        sb.append("同一发送者的兼容队列消息可能合并为一个批量 turn；")
+                .append("请统一处理，不要逐条发送确认。\n\n");
         appendRuntimeConstraints(sb);
         sb.append("同队联系人卡片（target 是唯一可用于路由的值）：\n");
         for (TeamContactRef contact : contacts) {
@@ -87,7 +102,7 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
             card.put("remark", contact.getRemark());
             sb.append("- ").append(GSON.toJson(card)).append("\n");
         }
-        List<ExternalTalkToContact> externalContacts = externalContacts();
+        List<ExternalTalkToContact> externalContacts = externalContacts(team);
         if (!externalContacts.isEmpty()) {
             sb.append("\n绑定的外部信道联系人：\n");
             for (ExternalTalkToContact contact : externalContacts) {
@@ -108,19 +123,26 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
     }
 
     public List<TeamContactRef> contacts() {
-        List<TeamContactRef> members =
-                new ArrayList<>(runtime.getDefinition().getRoster());
+        TeamDefinition team = runtime.getDefinition();
+        List<TeamContactRef> members = new ArrayList<>(team.getRoster());
         members.sort(Comparator.comparingInt(TeamContactRef::getOrder));
         List<TeamContactRef> result = new ArrayList<>();
         for (TeamContactRef member : members) {
-            if (!selfTeamMemberId.equals(member.getTargetTeamMemberId())) {
-                result.add(member);
-            }
+            if (selfTeamMemberId.equals(member.getTargetTeamMemberId())) continue;
+            if (team.isCaptainMode()
+                    && !selfTeamMemberId.equals(team.getCaptainTeamMemberId())
+                    && !member.getTargetTeamMemberId().equals(
+                    team.getCaptainTeamMemberId())) continue;
+            result.add(member);
         }
         return Collections.unmodifiableList(result);
     }
 
-    private List<ExternalTalkToContact> externalContacts() {
+    private List<ExternalTalkToContact> externalContacts(TeamDefinition team) {
+        if (team.isCaptainMode()
+                && !selfTeamMemberId.equals(team.getCaptainTeamMemberId())) {
+            return Collections.emptyList();
+        }
         if (externalContactProvider == null) return Collections.emptyList();
         List<ExternalTalkToContact> provided =
                 externalContactProvider.contactsForGroup(externalOwnerKey);

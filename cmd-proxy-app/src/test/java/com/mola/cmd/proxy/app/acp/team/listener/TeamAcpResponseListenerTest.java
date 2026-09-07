@@ -101,13 +101,20 @@ public class TeamAcpResponseListenerTest {
         listener.onScheduleEvent("SCHEDULE_CREATE", "created", true);
         listener.onCompactionEvent("COMPACTION_COMPLETED", "codex");
         listener.onError(new IllegalStateException("failed"));
+        JsonObject taskCard = new JsonObject();
+        taskCard.addProperty("cardType", "STARWEAVE_TASK");
+        taskCard.addProperty("eventId", "task-event-1");
+        listener.onTaskEvent(taskCard);
 
-        assertEquals(4, history.getCurrentTurn().size());
+        assertEquals(5, history.getCurrentTurn().size());
         for (ContextMessage message : history.getCurrentTurn()) {
             assertEquals(ContextMessage.Role.EVENT, message.getRole());
         }
         assertEquals("SUB_AGENT_EVENT", history.getCurrentTurn().get(0).getEventType());
         assertEquals("MESSAGE_ERROR", history.getCurrentTurn().get(3).getEventType());
+        assertEquals("TASK_EVENT", history.getCurrentTurn().get(4).getEventType());
+        assertEquals("task-event-1", history.getCurrentTurn().get(4).getEventData()
+                .get("eventId").getAsString());
     }
 
     @Test

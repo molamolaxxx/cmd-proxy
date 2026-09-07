@@ -77,6 +77,25 @@ public class TeamModelTest {
         assertEquals(2, definition.getRoster().size());
     }
 
+    @Test
+    public void captainTopologyUsesGlobalRosterAndSurvivesTransitions() {
+        TeamMemberDefinition local = member("member-local", "Local");
+        TeamDefinition captain = TeamDefinition.creating(
+                "team-1", "owner-1", "Captain", "team-acp-instance", "request-1",
+                Collections.singletonList(local), true,
+                Arrays.asList(TeamContactRef.from(local),
+                        new TeamContactRef("member-captain", "team-acp-member-captain",
+                                "Captain", "coordinates", 1)),
+                TeamMode.CAPTAIN, "member-captain", 100L);
+
+        TeamDefinition ready = captain.transitionTo(TeamState.READY, null, 200L);
+
+        assertTrue(ready.isCaptainMode());
+        assertEquals("member-captain", ready.getCaptainTeamMemberId());
+        assertTrue(ready.canCommunicate("member-local", "member-captain"));
+        assertFalse(ready.canCommunicate("member-local", "another-member"));
+    }
+
     @Test(expected = IllegalStateException.class)
     public void terminalDefinitionCannotTransition() {
         definition()

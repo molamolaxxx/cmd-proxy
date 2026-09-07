@@ -75,6 +75,42 @@ public class TeamCommandHandlerTest {
     }
 
     @Test
+    public void captainModeRequiresExplicitCaptainAndPersistsIt() throws Exception {
+        Fixture fixture = fixture();
+        String base = createJson("request-1", "Captain Team")
+                .replace("\"members\":", "\"mode\":\"CAPTAIN\",\"members\":");
+
+        Map<String, String> missing = fixture.handler.handleCreate("rpc-1", one(base));
+        assertEquals("false", missing.get("accepted"));
+        assertEquals("CAPTAIN_REQUIRED", missing.get("code"));
+
+        String valid = base.replace("\"members\":",
+                "\"captainTeamMemberId\":\"member-2\",\"members\":");
+        Map<String, String> created = fixture.handler.handleCreate("rpc-2", one(valid));
+
+        assertEquals("true", created.get("accepted"));
+        assertTrue(fixture.store.loadTeam("team-1").get().isCaptainMode());
+        assertEquals("member-2", fixture.store.loadTeam("team-1").get()
+                .getCaptainTeamMemberId());
+    }
+
+    @Test
+    public void normalModeRejectsCaptainAndCaptainRejectsSingleMember() throws Exception {
+        Fixture fixture = fixture();
+        String normalWithCaptain = createJson("request-1", "Normal")
+                .replace("\"members\":",
+                        "\"mode\":\"NORMAL\",\"captainTeamMemberId\":\"member-1\",\"members\":");
+        assertEquals("VALIDATION_ERROR", fixture.handler.handleCreate(
+                "rpc-1", one(normalWithCaptain)).get("code"));
+
+        String soloCaptain = createSingleMemberJson("request-2", "Solo")
+                .replace("\"members\":",
+                        "\"mode\":\"CAPTAIN\",\"captainTeamMemberId\":\"member-1\",\"members\":");
+        assertEquals("CAPTAIN_REQUIRED", fixture.handler.handleCreate(
+                "rpc-2", one(soloCaptain)).get("code"));
+    }
+
+    @Test
     public void listAndGetReturnOwnerScopedAuthoritativeProjection() throws Exception {
         Fixture fixture = fixture();
         fixture.handler.handleCreate("rpc-1", one(createJson("request-1", "Team")));

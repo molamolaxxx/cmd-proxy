@@ -125,6 +125,36 @@ public class StarweaveSessionManagerTest {
     }
 
     @Test
+    public void externalChannelInboundUsesDedicatedCardEventInsteadOfUserMessage()
+            throws Exception {
+        FakeFactory factory = new FakeFactory();
+        AcpClientRegistry registry = registry(factory);
+        StarweaveSessionManager manager = manager(registry);
+        JSONObject opened = manager.open("Robot");
+        JSONObject metadata = new JSONObject(true);
+        metadata.put("senderDisplayName", "小王");
+
+        manager.publishInbound(opened.getString("groupId"),
+                opened.getString("sessionId"), "请确认报价", "CHANNEL", metadata);
+
+        JSONObject batch = manager.eventBatch(opened.getString("groupId"),
+                opened.getString("sessionId"), 0L, opened.getLong("generation"));
+        JSONObject event = null;
+        for (int i = 0; i < batch.getJSONArray("events").size(); i++) {
+            JSONObject candidate = batch.getJSONArray("events").getJSONObject(i);
+            if ("CHANNEL_MESSAGE_RECEIVED".equals(candidate.getString("type"))) {
+                event = candidate;
+                break;
+            }
+        }
+        assertNotNull(event);
+        assertEquals("CHANNEL_MESSAGE_RECEIVED", event.getString("type"));
+        assertEquals("CHANNEL", event.getJSONObject("payload").getString("source"));
+        assertEquals("请确认报价", event.getJSONObject("payload").getString("content"));
+        registry.closeAllForShutdown();
+    }
+
+    @Test
     public void stagedUploadIsDeliveredToAcpSendAsSessionBoundFileContent()
             throws Exception {
         FakeFactory factory = new FakeFactory();

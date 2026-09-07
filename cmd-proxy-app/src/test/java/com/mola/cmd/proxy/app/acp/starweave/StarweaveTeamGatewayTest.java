@@ -89,7 +89,7 @@ public class StarweaveTeamGatewayTest {
     }
 
     @Test
-    public void timeoutFailsClosedUntilAReplacementReadyHandshakeArrives() {
+    public void timeoutFailsOnlyCurrentRequestAndNextRequestCanRecover() {
         AtomicInteger calls = new AtomicInteger();
         final StarweaveTeamGateway[] holder = new StarweaveTeamGateway[1];
         holder[0] = new StarweaveTeamGateway("instance-b", "team-acp-instance-b",
@@ -107,16 +107,6 @@ public class StarweaveTeamGatewayTest {
         } catch (IllegalStateException expected) {
             assertTrue(expected.getMessage().contains("unavailable"));
         }
-        try {
-            holder[0].query("sources", new JSONObject(true));
-            fail("timed-out gateway must stay unavailable");
-        } catch (IllegalStateException expected) {
-            assertEquals("Starweave Team coordinator is unavailable",
-                    expected.getMessage());
-        }
-        assertEquals(1, calls.get());
-
-        ready(holder[0]);
         holder[0].query("sources", new JSONObject(true));
         assertEquals(2, calls.get());
     }

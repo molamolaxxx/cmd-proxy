@@ -4,6 +4,8 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.mola.cmd.proxy.client.provider.CmdReceiver;
 import com.mola.cmd.proxy.client.resp.CmdResponseContent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -18,6 +20,8 @@ import java.util.concurrent.TimeUnit;
  * transport callback; replies return to the same instance-scoped transport.
  */
 public final class StarweaveTeamGateway {
+    private static final Logger logger =
+            LoggerFactory.getLogger(StarweaveTeamGateway.class);
     public static final String REQUEST_COMMAND = "starweaveTeamGateway";
     public static final String RESULT_COMMAND = "starweaveTeamGatewayResult";
     public static final String EVENT_COMMAND = "starweaveTeamGatewayEvent";
@@ -120,7 +124,14 @@ public final class StarweaveTeamGateway {
             throw new IllegalStateException("Starweave Team coordinator request interrupted",
                     interrupted);
         } catch (java.util.concurrent.TimeoutException timeout) {
-            available = false;
+            // A request timeout is not proof that the authenticated coordinator has
+            // disappeared. In particular, a late reply or a short RPC reconnect used to
+            // poison this gateway permanently: every later request failed before it had a
+            // chance to probe the recovered route. Keep the READY lease and fail only the
+            // request that actually timed out.
+            logger.warn("Starweave Team coordinator request timed out: operation={},"
+                            + " requestId={}, timeoutMillis={}",
+                    operation, requestId, timeoutMillis);
             throw new IllegalStateException("Starweave Team coordinator is unavailable", timeout);
         } catch (java.util.concurrent.ExecutionException failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();

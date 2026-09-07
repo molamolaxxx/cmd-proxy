@@ -121,10 +121,19 @@ public final class TeamCommandHandler {
     }
 
     public Map<String, String> handleTalkToDeliver(String rpcRequestId, String[] args) {
+        return handleTalkTo(rpcRequestId, args, false);
+    }
+
+    public Map<String, String> handleTalkToCircuitOpen(String rpcRequestId, String[] args) {
+        return handleTalkTo(rpcRequestId, args, true);
+    }
+
+    private Map<String, String> handleTalkTo(String rpcRequestId, String[] args, boolean control) {
         try {
             TeamTalkToDeliverCommand command = parseSingleArg(
                     args, TeamTalkToDeliverCommand.class);
-            return manager.deliverTalkTo(command).withRequestId(rpcRequestId).toResultMap();
+            return (control ? manager.openTalkToCircuit(command) : manager.deliverTalkTo(command))
+                    .withRequestId(rpcRequestId).toResultMap();
         } catch (IllegalArgumentException e) {
             return validationError(rpcRequestId, e).toResultMap();
         } catch (RuntimeException e) {

@@ -7,6 +7,7 @@ import com.mola.cmd.proxy.app.acp.channel.ChannelTalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToMessage;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace;
 import org.junit.Test;
 
 import java.nio.file.Path;
@@ -41,6 +42,22 @@ public class ChannelInboundDeliveryTest {
         assertEquals("channel:wecom:r1",
                 client.lastOptions.getChannelTurnContext().getReplyTarget());
         assertEquals(sessionBefore, client.getSessionId());
+    }
+
+    @Test
+    public void internalTalkToCarriesServerTraceIntoReplyTurnOptions() {
+        FakeClient client = new FakeClient("bound-group");
+        client.setReady();
+        TalkToTrace trace = new TalkToTrace(
+                "cascade-1", "message-1", null, 3, 100L);
+        TalkToMessage message = new TalkToMessage(
+                "reviewer", "result", 0, Collections.emptyList(), null, trace);
+
+        TalkToDispatcher.sendInboundMessage(client, message);
+
+        assertNotNull(client.lastOptions);
+        assertTrue(client.lastOptions.isInboundTalkTo());
+        assertSame(trace, client.lastOptions.talkToParentFor("reviewer"));
     }
 
     @Test
