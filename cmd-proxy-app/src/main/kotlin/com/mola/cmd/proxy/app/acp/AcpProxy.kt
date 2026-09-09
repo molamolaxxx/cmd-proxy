@@ -28,6 +28,14 @@ import com.mola.cmd.proxy.app.acp.channel.ChannelManager
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus
 import com.mola.cmd.proxy.app.acp.channel.wecom.WeComChannelAdapter
+import com.mola.cmd.proxy.app.acp.gateway.AgentGatewayManager
+import com.mola.cmd.proxy.app.acp.gateway.AgentGatewayAdminBridge
+import com.mola.cmd.proxy.app.acp.gateway.AgentGatewayServer
+import com.mola.cmd.proxy.app.acp.gateway.GatewayEventBridge
+import com.mola.cmd.proxy.app.acp.gateway.GatewayRuntime
+import com.mola.cmd.proxy.app.acp.gateway.model.AgentGatewayConfig
+import com.mola.cmd.proxy.app.acp.gateway.model.AgentGatewayServerConfig
+import com.mola.cmd.proxy.app.acp.gateway.model.GatewayTarget
 import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry
 import com.mola.cmd.proxy.app.acp.team.TeamCommandHandler
 import com.mola.cmd.proxy.app.acp.team.TeamManager
@@ -45,6 +53,8 @@ import com.mola.cmd.proxy.app.acp.team.protocol.RemoteTeamMemberSourceDescriptor
 import com.mola.cmd.proxy.app.acp.talkto.ContactRemarkResolver
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportDescriptor
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamTransportProtocol
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCommand
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamCommandResult
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToContextInjector
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionManager
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge
@@ -104,6 +114,10 @@ object AcpProxy {
     /** 当前实例的外部信道生命周期；只绑定普通 MAIN client。 */
     private var channelManager: ChannelManager? = null
 
+    /** Authenticated external Agent transport and shared HTTP/WebSocket listener. */
+    private var agentGatewayManager: AgentGatewayManager? = null
+    private var agentGatewayServer: AgentGatewayServer? = null
+
     /** 普通与 Team client 共用的完整能力挂点编排器。 */
     private lateinit var featureInitializer: AcpClientFeatureInitializer
 
@@ -154,9 +168,14 @@ object AcpProxy {
         groupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
         teamSourceGroupRobotMap: Map<String, AcpRobotParam> = emptyMap(),
         configuredRobots: Collection<AcpRobotParam> = emptyList(),
-        channels: List<ChannelConfig> = emptyList()
+        channels: List<ChannelConfig> = emptyList(),
+        agentGatewayServerConfig: AgentGatewayServerConfig = AgentGatewayServerConfig(),
+        agentGateways: List<AgentGatewayConfig> = emptyList()
     ) {
         ensureShutdownHook()
+        AgentGatewayAdminBridge.install(
+            { createAgentGatewayRuntime().targets() },
+            { agentGatewayManager?.adminStatus() ?: JSONObject(true).also { it["status"] = "STOPPED" } })
         if (teamManager != null) {
             throw IllegalStateException(
                 "AcpProxy is already started; stop it before starting a new generation")
@@ -382,6 +401,26 @@ object AcpProxy {
         log.info("外部信道启动完成, configured={}, statuses={}",
             channels.size, channelManager?.statuses ?: emptyMap<String, ChannelStatus>())
 
+        if (agentGatewayServerConfig.isEnabled && agentGateways.any { it.isEnabled }) {
+            try {
+                val manager = AgentGatewayManager(
+                    agentGatewayServerConfig, agentGateways, createAgentGatewayRuntime())
+                GatewayEventBridge.install(manager)
+                val server = AgentGatewayServer(manager)
+                server.start()
+                agentGatewayManager = manager
+                agentGatewayServer = server
+                log.info("智能体网关已启动, bind={}:{}, configured={}",
+                    agentGatewayServerConfig.bindHost, server.port, agentGateways.size)
+            } catch (e: Exception) {
+                agentGatewayServer?.close()
+                agentGatewayServer = null
+                agentGatewayManager?.close()
+                agentGatewayManager = null
+                log.error("智能体网关启动失败", e)
+            }
+        }
+
         // 启动定时任务调度器
         startScheduler(groupRobotMap)
         startAutoNewSession()
@@ -440,6 +479,7 @@ object AcpProxy {
             override fun tryPublish(
                 event: com.mola.cmd.proxy.app.acp.team.event.TeamEventEnvelope
             ): Boolean {
+                GatewayEventBridge.publishTeam(event)
                 val publishedLocally = StarweaveTeamApiBridge.publishIfOwned(event)
                 return if (publishedLocally) {
                     if (StarweaveTeamApiBridge.requiresCoordinator(event)) {
@@ -1877,6 +1917,14 @@ object AcpProxy {
 
         // 先关闭外部入口、心跳和重连，避免 ACP client 关闭后仍收到新事件。
         try {
+            agentGatewayServer?.close()
+            agentGatewayManager?.close()
+        } catch (e: Exception) {
+            log.warn("停止智能体网关失败", e)
+        }
+        agentGatewayServer = null
+        agentGatewayManager = null
+        try {
             channelManager?.close()
         } catch (e: Exception) {
             log.warn("停止外部信道失败", e)
@@ -1989,6 +2037,171 @@ object AcpProxy {
                         }
                 )
             }
+    }
+
+    @JvmStatic
+    fun agentGatewayTargets(): com.alibaba.fastjson.JSONArray =
+        agentGatewayManager?.targetCatalog() ?: createAgentGatewayRuntime().targets()
+
+    @JvmStatic
+    fun agentGatewayStatus(): JSONObject =
+        agentGatewayManager?.adminStatus() ?: JSONObject(true).also {
+            it["status"] = "STOPPED"
+        }
+
+    private fun createAgentGatewayRuntime(): GatewayRuntime = object : GatewayRuntime {
+        override fun targets(): com.alibaba.fastjson.JSONArray {
+            val result = com.alibaba.fastjson.JSONArray()
+            registry.snapshotClients().values
+                .filter { it.clientIdentity.scope == AcpClientIdentity.Scope.MAIN }
+                .sortedBy { it.clientIdentity.logicalId }
+                .forEach { client ->
+                    val identity = client.clientIdentity
+                    result.add(JSONObject(true).also { value ->
+                        value["type"] = if (identity.isStarweave)
+                            GatewayTarget.STARWEAVE_MAIN else GatewayTarget.MOLACHAT_MAIN
+                        value["instanceId"] = CmdProxyHome.instanceId()
+                        value["ownerId"] = identity.ownerId ?: identity.ownerChatterId
+                        value["groupId"] = identity.logicalId
+                        value["robotId"] = identity.sourceRobotName
+                        value["displayName"] = identity.sourceRobotName ?: identity.logicalId
+                        value["surface"] = identity.surface.name
+                        value["sessionId"] = client.sessionId
+                        value["state"] = client.state.name
+                    })
+                }
+            val manager = teamManager
+            manager?.snapshotDefinitions()?.sortedBy { it.teamId }?.forEach { team ->
+                team.members
+                    .filter { member ->
+                        (!team.isCaptainMode || team.isCaptain(member.teamMemberId)) &&
+                            manager.clientRegistry.get(team.teamId, member.teamMemberId).isPresent
+                    }
+                    .sortedWith(compareBy({ it.order }, { it.teamMemberId }))
+                    .forEach { member ->
+                        val client = manager.clientRegistry.get(
+                            team.teamId, member.teamMemberId).orElse(null)
+                        result.add(JSONObject(true).also { value ->
+                            value["type"] = GatewayTarget.TEAM_MEMBER
+                            value["instanceId"] = CmdProxyHome.instanceId()
+                            value["ownerId"] = team.ownerChatterId
+                            value["teamId"] = team.teamId
+                            value["teamName"] = team.name
+                            value["teamMemberId"] = member.teamMemberId
+                            value["acpClientId"] = member.acpClientId
+                            value["robotId"] = member.sourceRobotName
+                            value["displayName"] = "${team.name} · ${member.displayName}"
+                            value["surface"] = "TEAM"
+                            value["sessionId"] = client?.sessionId ?: member.sessionId
+                            value["state"] = client?.state?.name ?: member.state.name
+                            value["captain"] = team.isCaptain(member.teamMemberId)
+                        })
+                    }
+            }
+            return result
+        }
+
+        override fun status(target: GatewayTarget): JSONObject {
+            if (target.type == GatewayTarget.TEAM_MEMBER) {
+                return teamStatus(target, requireTeamManager().getStatus(
+                    UUID.randomUUID().toString(), teamCommand(target, null, null)))
+            }
+            val client = registry.getClient(target.groupId)
+                ?: throw IllegalStateException("Agent target is unavailable")
+            require(target.matches(client.clientIdentity)) { "Agent target identity mismatch" }
+            return JSONObject(true).also {
+                it["sessionId"] = client.sessionId
+                it["state"] = client.state.name
+                it["contextUsagePercentage"] = client.contextUsagePercentage
+                it["displayName"] = client.clientIdentity.sourceRobotName ?: target.robotId
+                it["surface"] = client.clientIdentity.surface.name
+            }
+        }
+
+        override fun send(target: GatewayTarget, message: String,
+                          files: List<Map<String, String>>?, busyPolicy: String?): JSONObject {
+            if (target.type == GatewayTarget.TEAM_MEMBER) {
+                return teamResult(requireTeamManager().send(
+                    UUID.randomUUID().toString(), teamCommand(target, message, files)))
+            }
+            return promptResult(mainSessionService.send(target.groupId, message, files, busyPolicy))
+        }
+
+        override fun cancel(target: GatewayTarget): JSONObject {
+            if (target.type == GatewayTarget.TEAM_MEMBER) {
+                return teamResult(requireTeamManager().cancel(
+                    UUID.randomUUID().toString(), teamCommand(target, null, null)))
+            }
+            return promptResult(mainSessionService.cancel(target.groupId))
+        }
+
+        override fun newSession(target: GatewayTarget): JSONObject {
+            if (target.type == GatewayTarget.TEAM_MEMBER) {
+                return teamResult(requireTeamManager().newSession(
+                    UUID.randomUUID().toString(), teamCommand(target, null, null)))
+            }
+            val current = registry.getClient(target.groupId)
+                ?: return rejectedGatewayResult("TARGET_UNAVAILABLE", "Agent target is unavailable")
+            if (!target.matches(current.clientIdentity) ||
+                current.state != AbstractAcpClient.State.READY) {
+                return rejectedGatewayResult("REJECTED_STATE", "Agent target is not READY")
+            }
+            val replacement = replaceMainSession(target.groupId, current, null)
+                ?: return rejectedGatewayResult("SESSION_CONFLICT", "Agent session changed")
+            notifyMainSessionChanged(
+                target.groupId, current.sessionId, replacement.sessionId, "AGENT_GATEWAY")
+            return acceptedGatewayResult("SESSION_CREATED", "New session created")
+        }
+    }
+
+    private fun requireTeamManager(): TeamManager = teamManager
+        ?: throw IllegalStateException("Team service is not running")
+
+    private fun teamCommand(target: GatewayTarget, message: String?,
+                            files: List<Map<String, String>>?): TeamMemberCommand {
+        val value = JSONObject(true)
+        value["schemaVersion"] = com.mola.cmd.proxy.app.acp.team.model.TeamDefinition.SCHEMA_VERSION
+        value["ownerChatterId"] = target.ownerId
+        value["teamId"] = target.teamId
+        value["teamMemberId"] = target.teamMemberId
+        value["acpClientId"] = target.acpClientId
+        value["message"] = message
+        value["files"] = files
+        return com.google.gson.Gson().fromJson(value.toJSONString(), TeamMemberCommand::class.java)
+    }
+
+    private fun teamStatus(target: GatewayTarget, result: TeamCommandResult): JSONObject {
+        if (!result.isAccepted) throw IllegalStateException(result.message)
+        val data = JSON.parseObject(JSON.toJSONString(result.data))
+        return JSONObject(true).also {
+            it["sessionId"] = data.getString("sessionId")
+            it["state"] = data.getString("clientState") ?: data.getString("memberState")
+            it["contextUsagePercentage"] = data.getDoubleValue("contextUsagePercentage")
+            it["displayName"] = data.getString("displayName") ?: target.teamMemberId
+            it["surface"] = "TEAM"
+            it["teamVersion"] = result.teamVersion
+        }
+    }
+
+    private fun teamResult(result: TeamCommandResult): JSONObject = JSONObject(true).also {
+        it["accepted"] = result.isAccepted
+        it["code"] = result.code
+        it["message"] = result.message
+        it["data"] = result.data
+    }
+
+    private fun promptResult(result: PromptCommandResult): JSONObject = JSONObject(true).also {
+        it["accepted"] = result.isAccepted
+        it["code"] = result.code
+        it["message"] = result.result
+    }
+
+    private fun acceptedGatewayResult(code: String, message: String) = JSONObject(true).also {
+        it["accepted"] = true; it["code"] = code; it["message"] = message
+    }
+
+    private fun rejectedGatewayResult(code: String, message: String) = JSONObject(true).also {
+        it["accepted"] = false; it["code"] = code; it["message"] = message
     }
 
     @JvmStatic

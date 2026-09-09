@@ -14,6 +14,8 @@ import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveRequestDeduplicator;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveResourcePayload;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamApiBridge;
+import com.mola.cmd.proxy.app.acp.gateway.AgentGatewayAdminBridge;
+import com.mola.cmd.proxy.app.acp.gateway.model.AgentGatewayConfig;
 import com.mola.cmd.proxy.app.acp.task.api.TaskApiBridge;
 import com.mola.cmd.proxy.app.acp.task.api.ExternalTaskApiHandler;
 import com.mola.cmd.proxy.app.acp.task.api.ExternalTaskApiService;
@@ -203,6 +205,12 @@ public class ConfigUiServer {
                 proxied(this::handleChannelPrivateChat));
         server.createContext("/api/channels/binding-targets",
                 proxied(this::handleChannelBindingTargets));
+        server.createContext("/api/agent-gateways/targets",
+                proxied(this::handleAgentGatewayTargets));
+        server.createContext("/api/agent-gateways/status",
+                proxied(this::handleAgentGatewayStatus));
+        server.createContext("/api/agent-gateways/auth-code",
+                proxied(this::handleAgentGatewayAuthCode));
         server.createContext("/api/channels/v1/messages",
                 proxied(this::handleChannelMessages));
         server.createContext("/api/external-task-apis/auth-code",
@@ -633,6 +641,13 @@ public class ConfigUiServer {
         if (externalTaskApiError != null) {
             JSONObject error = new JSONObject(true);
             error.put("error", externalTaskApiError);
+            sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
+            return;
+        }
+        String agentGatewayError = validateAgentGateways(json);
+        if (agentGatewayError != null) {
+            JSONObject error = new JSONObject(true);
+            error.put("error", agentGatewayError);
             sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
             return;
         }
@@ -1616,6 +1631,60 @@ public class ConfigUiServer {
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
+    private void handleAgentGatewayTargets(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        JSONObject result = new JSONObject(true);
+        result.put("instanceId", CmdProxyHome.instanceId());
+        result.put("targets", AgentGatewayAdminBridge.targets());
+        sendResponse(exchange, 200, "application/json", result.toJSONString());
+    }
+
+    private void handleAgentGatewayStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        sendResponse(exchange, 200, "application/json",
+                AgentGatewayAdminBridge.status().toJSONString());
+    }
+
+    private void handleAgentGatewayAuthCode(HttpExchange exchange) throws IOException {
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String id = param(exchange, "id");
+        if (isBlank(id)) {
+            sendResponse(exchange, 400, "application/json", "{\"error\":\"id is required\"}");
+            return;
+        }
+        try {
+            JSONObject root = JSON.parseObject(new String(Files.readAllBytes(
+                    Paths.get(CONFIG_PATH)), StandardCharsets.UTF_8));
+            com.alibaba.fastjson.JSONArray gateways = root.getJSONArray("agentGateways");
+            if (gateways != null) {
+                for (int i = 0; i < gateways.size(); i++) {
+                    JSONObject item = gateways.getJSONObject(i);
+                    if (item != null && id.equals(item.getString("id"))) {
+                        JSONObject result = new JSONObject(true);
+                        result.put("authCode", item.getString("authCode"));
+                        sendResponse(exchange, 200, "application/json", result.toJSONString());
+                        return;
+                    }
+                }
+            }
+            sendResponse(exchange, 404, "application/json",
+                    "{\"error\":\"Agent gateway not found\"}");
+        } catch (Exception e) {
+            sendResponse(exchange, 503, "application/json",
+                    "{\"error\":\"Agent gateway configuration unavailable\"}");
+        }
+    }
+
     private void handleExternalTaskApiAuthCode(HttpExchange exchange) throws IOException {
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
@@ -1667,6 +1736,15 @@ public class ConfigUiServer {
         if (apis != null) {
             for (int i = 0; i < apis.size(); i++) {
                 JSONObject item = apis.getJSONObject(i);
+                if (item != null && !isBlank(item.getString("authCode"))) {
+                    item.put("authCode", SECRET_MASK);
+                }
+            }
+        }
+        com.alibaba.fastjson.JSONArray gateways = json.getJSONArray("agentGateways");
+        if (gateways != null) {
+            for (int i = 0; i < gateways.size(); i++) {
+                JSONObject item = gateways.getJSONObject(i);
                 if (item != null && !isBlank(item.getString("authCode"))) {
                     item.put("authCode", SECRET_MASK);
                 }
@@ -1741,6 +1819,63 @@ public class ConfigUiServer {
         return null;
     }
 
+    private String validateAgentGateways(JSONObject root) {
+        JSONObject server = root.getJSONObject("agentGatewayServer");
+        if (server != null) {
+            int port = server.getIntValue("port");
+            if (port < 0 || port > 65535
+                    || (server.getBooleanValue("enabled") && port == 0)) {
+                return "Agent gateway server port is invalid";
+            }
+            String host = trimmed(server.getString("bindHost"));
+            if (server.getBooleanValue("enabled") && host.isEmpty()) {
+                return "Agent gateway bindHost is required";
+            }
+        }
+        com.alibaba.fastjson.JSONArray values = root.getJSONArray("agentGateways");
+        if (values == null) return null;
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        java.util.Set<String> authCodes = new java.util.HashSet<>();
+        java.util.Set<String> enabledTargets = new java.util.HashSet<>();
+        for (int i = 0; i < values.size(); i++) {
+            JSONObject value = values.getJSONObject(i);
+            if (value == null) return "agentGateways[" + i + "] must be an object";
+            String id = trimmed(value.getString("id"));
+            String name = trimmed(value.getString("name"));
+            if (id.isEmpty() || id.length() > 120) return "Agent gateway id is invalid";
+            if (!ids.add(id)) return "duplicate Agent gateway id: " + id;
+            if (name.isEmpty() || name.length() > 200) return "Agent gateway name is invalid";
+            String authCode = value.getString("authCode");
+            if (!SECRET_MASK.equals(authCode)) {
+                authCode = trimmed(authCode);
+                if (authCode.length() < 32 || authCode.length() > 512) {
+                    return "Agent gateway auth code must contain 32-512 characters";
+                }
+                value.put("authCode", authCode);
+                if (!authCodes.add(authCode)) return "duplicate Agent gateway auth code";
+            }
+            JSONObject targetValue = value.getJSONObject("target");
+            if (targetValue == null) return "Agent gateway target is required";
+            if (trimmed(targetValue.getString("instanceId")).isEmpty()) {
+                targetValue.put("instanceId", CmdProxyHome.instanceId());
+            }
+            try {
+                com.mola.cmd.proxy.app.acp.gateway.model.GatewayTarget target =
+                        targetValue.toJavaObject(
+                                com.mola.cmd.proxy.app.acp.gateway.model.GatewayTarget.class);
+                target.validate(CmdProxyHome.instanceId());
+                if (value.getBooleanValue("enabled") && !enabledTargets.add(target.key())) {
+                    return "only one enabled Agent gateway may bind the same target";
+                }
+            } catch (IllegalArgumentException error) {
+                return error.getMessage();
+            }
+            value.put("id", id);
+            value.put("name", name);
+        }
+        return null;
+    }
+
     /** Re-validates captain-only entrypoints against the current authoritative Team view. */
     String validateCaptainTeamEntrypoints(JSONObject root) {
         List<Map<String, Object>> targets;
@@ -1782,6 +1917,23 @@ public class ConfigUiServer {
                 String error = captainTargetError(target, captainTeams,
                         "mode", "CAPTAIN_ONLY_TASK_TARGET");
                 if (error != null) return error;
+            }
+        }
+        com.alibaba.fastjson.JSONArray gateways = root.getJSONArray("agentGateways");
+        if (gateways != null) {
+            for (int i = 0; i < gateways.size(); i++) {
+                JSONObject item = gateways.getJSONObject(i);
+                JSONObject target = item == null ? null : item.getJSONObject("target");
+                if (target == null || !"TEAM_MEMBER".equals(
+                        trimmed(target.getString("type")).toUpperCase())) continue;
+                Map<String, Object> team = captainTeams.get(
+                        trimmed(target.getString("teamId")));
+                if (team == null) continue;
+                String captainId = trimmed(String.valueOf(team.get("captainTeamMemberId")));
+                if (captainId.isEmpty() || !captainId.equals(
+                        trimmed(target.getString("teamMemberId")))) {
+                    return "CAPTAIN_ONLY_GATEWAY_TARGET: captain Team gateway must target the captain";
+                }
             }
         }
         return null;

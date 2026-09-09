@@ -159,6 +159,28 @@ public class ChannelConfigFileStoreTest {
         }
     }
 
+    @Test
+    public void uiSaveKeepsMaskedAgentGatewayAuthCode() throws Exception {
+        Path file = Files.createTempFile("agent-gateway-config", ".json");
+        try {
+            Files.write(file, ("{\"channels\":[],\"agentGateways\":[{"
+                    + "\"id\":\"gateway-1\","
+                    + "\"authCode\":\"0123456789abcdef0123456789abcdef\"}]}"
+            ).getBytes(StandardCharsets.UTF_8));
+            JSONObject submitted = JSON.parseObject("{\"channels\":[],"
+                    + "\"agentGateways\":[{\"id\":\"gateway-1\","
+                    + "\"authCode\":\"********\"}]}");
+
+            ChannelConfigFileStore.saveUiConfig(file, submitted, "********");
+
+            assertEquals("0123456789abcdef0123456789abcdef", read(file)
+                    .getJSONArray("agentGateways").getJSONObject(0)
+                    .getString("authCode"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
     private static JSONObject read(Path file) throws Exception {
         return JSON.parseObject(new String(Files.readAllBytes(file), StandardCharsets.UTF_8));
     }

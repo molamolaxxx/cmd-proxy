@@ -160,7 +160,10 @@ object CmdReceiver {
     ) : CmdProxyInvokeService {
 
         override fun invoke(param: CmdInvokeParam): CmdInvokeResponse<CmdResponseContent?> {
+            val startedAt = System.nanoTime()
             val funcKey = "${param.cmdName}${cmdGroup}"
+            log.info("cmd invoke entered, cmdId={}, command={}, group={}",
+                param.cmdId, param.cmdName, cmdGroup)
             if (!receiverFuncMap.containsKey(funcKey)) {
                 return CmdInvokeResponse.error("not available cmd ${param.cmdName} " +
                         "in group $cmdGroup")
@@ -170,6 +173,9 @@ object CmdReceiver {
                         param.cmdName, JSON.toJSONString(param))
             }
             val resultMap = receiverFuncMap[funcKey]?.invoke(param)!!
+            log.info("cmd invoke completed, cmdId={}, command={}, group={}, elapsedMs={}",
+                param.cmdId, param.cmdName, cmdGroup,
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt))
             return CmdInvokeResponse.success(CmdResponseContent(param.cmdId, resultMap))
         }
 

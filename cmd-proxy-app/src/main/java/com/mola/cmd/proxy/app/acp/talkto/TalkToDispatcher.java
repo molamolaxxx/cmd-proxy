@@ -747,7 +747,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
      * 向目标 client 的前端推送"来信卡片"，让用户知道即将收到的消息来自哪个 robot。
      */
     private void pushIncomingMessageCard(AcpClient targetClient, String senderName, String content) {
-        AcpResponseListener listener = targetClient.getGlobalListener();
+        AcpResponseListener listener = targetClient.getLiveOutputListener();
         if (listener == null) return;
         listener.onTalkToEvent("TALK_TO_RECEIVE", senderName, content);
     }

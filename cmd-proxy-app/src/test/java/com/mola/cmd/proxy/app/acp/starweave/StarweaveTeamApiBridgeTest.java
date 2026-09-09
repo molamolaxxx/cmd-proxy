@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -156,7 +157,8 @@ public class StarweaveTeamApiBridgeTest {
             JSONObject unavailableRemote = degraded.getJSONArray("members")
                     .getJSONObject(1);
             assertEquals("member-remote", unavailableRemote.getString("teamMemberId"));
-            assertEquals("UNAVAILABLE", unavailableRemote.getString("state"));
+            assertEquals("UNKNOWN", unavailableRemote.getString("state"));
+            assertTrue(degraded.getBooleanValue("coordinatorStateUnknown"));
 
             JSONObject remoteEvent = new JSONObject(true);
             remoteEvent.put("eventId", "remote-event-1");
@@ -240,6 +242,58 @@ public class StarweaveTeamApiBridgeTest {
             assertEquals("team-local", teams.getJSONObject(0).getString("teamId"));
             assertEquals("team-mixed", teams.getJSONObject(1).getString("teamId"));
             assertTrue(teams.getJSONObject(1).getBooleanValue("coordinated"));
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
+    }
+
+    @Test
+    public void coordinatorTimeoutKeepsLastReadyRosterAndMarksItStale() throws Exception {
+        String instanceId = "instance-home";
+        TeamManager manager = new TeamManager(
+                new TeamStore(temporary.newFolder("stale-cache").toPath()),
+                new TeamClientRegistry(), new MapTeamSourceRobotResolver(
+                java.util.Collections.emptyMap()));
+        AtomicInteger calls = new AtomicInteger();
+        final StarweaveTeamGateway[] holder = new StarweaveTeamGateway[1];
+        holder[0] = new StarweaveTeamGateway(instanceId, "team-acp-" + instanceId,
+                20L, 20L, (command, group, callback) -> {
+            if (calls.incrementAndGet() != 1) return;
+            JSONObject member = new JSONObject(true);
+            member.put("teamMemberId", "member-remote");
+            member.put("state", "READY");
+            JSONObject team = new JSONObject(true);
+            team.put("teamId", "team-mixed");
+            team.put("state", "READY");
+            team.put("members", new JSONArray(
+                    java.util.Collections.singletonList(member)));
+            JSONObject data = new JSONObject(true);
+            data.put("teams", new JSONArray(
+                    java.util.Collections.singletonList(team)));
+            JSONObject response = new JSONObject(true);
+            response.put("requestId", callback.getCmdId());
+            response.put("accepted", true);
+            response.put("data", data);
+            holder[0].acceptResult("rpc-result",
+                    new String[]{response.toJSONString()});
+        });
+        JSONObject ready = new JSONObject(true);
+        ready.put("instanceId", instanceId);
+        ready.put("ownerChatterId", StarweaveIdentity.ownerId(instanceId));
+        holder[0].acceptReady("ready", new String[]{ready.toJSONString()});
+        StarweaveTeamApiBridge.install(manager, instanceId,
+                java.util.Collections::emptyList, holder[0]);
+        try {
+            StarweaveTeamApiBridge.list();
+            JSONObject stale = StarweaveTeamApiBridge.list().getJSONObject("data")
+                    .getJSONArray("teams").getJSONObject(0);
+            assertEquals("READY", stale.getString("state"));
+            assertEquals("READY", stale.getJSONArray("members")
+                    .getJSONObject(0).getString("state"));
+            assertTrue(stale.getBooleanValue("coordinatorDelayed"));
+            assertTrue(stale.getBooleanValue("stale"));
+            assertFalse(stale.getBooleanValue("coordinatorAvailable"));
         } finally {
             StarweaveTeamApiBridge.clear(manager);
             manager.close();

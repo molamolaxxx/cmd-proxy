@@ -5,6 +5,11 @@ import com.mola.cmd.proxy.client.resp.CmdResponseContent;
 import org.junit.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -109,6 +114,42 @@ public class StarweaveTeamGatewayTest {
         }
         holder[0].query("sources", new JSONObject(true));
         assertEquals(2, calls.get());
+    }
+
+    @Test
+    public void concurrentIdenticalQueriesShareOneCoordinatorRequest() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        CountDownLatch sent = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        final StarweaveTeamGateway[] holder = new StarweaveTeamGateway[1];
+        holder[0] = new StarweaveTeamGateway("instance-b", "team-acp-instance-b",
+                1_000L, 1_000L, (command, group, request) -> {
+            calls.incrementAndGet();
+            sent.countDown();
+            try {
+                assertTrue(release.await(1, TimeUnit.SECONDS));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            holder[0].acceptResult("rpc-result", new String[]{
+                    accepted(request.getCmdId()).toJSONString()});
+        });
+        ready(holder[0]);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<JSONObject> first = executor.submit(() ->
+                    holder[0].query("list", new JSONObject(true)));
+            assertTrue(sent.await(1, TimeUnit.SECONDS));
+            Future<JSONObject> second = executor.submit(() ->
+                    holder[0].query("list", new JSONObject(true)));
+            release.countDown();
+            first.get(1, TimeUnit.SECONDS);
+            second.get(1, TimeUnit.SECONDS);
+            assertEquals(1, calls.get());
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private static StarweaveTeamGateway gateway(

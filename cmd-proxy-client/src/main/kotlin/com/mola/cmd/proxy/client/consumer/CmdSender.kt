@@ -30,6 +30,8 @@ object CmdSender {
 
     private val sendConsumerMapByGroup: MutableMap<String, CmdProxyInvokeService> = mutableMapOf()
 
+    private val timedSendConsumerMap: MutableMap<String, CmdProxyInvokeService> = mutableMapOf()
+
     private val callbackProviderMapByGroup: MutableMap<String, CmdProxyCallbackService> = mutableMapOf()
 
     private val callbackFuncMap: MutableMap<String, (response:CmdResponseContent) -> Unit> = mutableMapOf()
@@ -103,7 +105,39 @@ object CmdSender {
 
         // 路由分组tag，使用命令名称
         InvokeContext.routeTag(cmdName)
+        log.info("cmd send started, cmdId={}, command={}, group={}, timeoutMs={}",
+            param.cmdId, cmdName, cmdGroup, 60 * 1000 * 10)
         return cmdProxyInvokeService.invoke(param)
+    }
+
+    fun sendWithTimeout(cmdName: String, cmdGroup: String, cmdArgs: Array<String>,
+                        timeoutMillis: Long): CmdInvokeResponse<CmdResponseContent?>? {
+        require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
+        init(CmdProxyConf.serverPort)
+        val key = "$cmdGroup#$timeoutMillis"
+        val consumer = synchronized(timedSendConsumerMap) {
+            timedSendConsumerMap[key] ?: run {
+                val rpcMetaData = RpcMetaData()
+                rpcMetaData.reverseMode = true
+                rpcMetaData.group = cmdGroup
+                rpcMetaData.clientTimeout = timeoutMillis
+                val created = RpcInvoker.consumer(
+                    CmdProxyInvokeService::class.java,
+                    rpcMetaData,
+                    "cmdProxyInvokeService#$cmdGroup#timeout-$timeoutMillis"
+                )
+                timedSendConsumerMap[key] = created
+                created
+            }
+        }
+        val param = CmdInvokeParam()
+        param.cmdId = UUID.randomUUID().toString()
+        param.cmdArgs = cmdArgs
+        param.cmdName = cmdName
+        InvokeContext.routeTag(cmdName)
+        log.info("cmd send started, cmdId={}, command={}, group={}, timeoutMs={}",
+            param.cmdId, cmdName, cmdGroup, timeoutMillis)
+        return consumer.invoke(param)
     }
 
     /**

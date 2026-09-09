@@ -29,7 +29,7 @@ public final class ListenerTaskCardProjector implements TaskCardProjector {
                 && !client.getClientIdentity().isTeam()) {
             client.getHistoryManager().addEventMessage("TASK_EVENT", payload);
         }
-        client.getGlobalListener().onTaskEvent(payload);
+        client.getLiveOutputListener().onTaskEvent(payload);
     }
 
     private AcpClient client(JSONObject assignee) {

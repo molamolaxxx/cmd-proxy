@@ -77,6 +77,7 @@ public final class StarweaveTeamApiBridge {
                 JSONObject data = current.gateway.query("list", new JSONObject(true));
                 JSONArray teams = data.getJSONArray("teams");
                 if (teams != null) {
+                    current.lastCoordinatedTeams = copyArray(teams);
                     for (int i = 0; i < teams.size(); i++) {
                         JSONObject coordinated = teams.getJSONObject(i);
                         coordinated.put("coordinated", true);
@@ -90,6 +91,10 @@ public final class StarweaveTeamApiBridge {
             } catch (IllegalStateException ignored) {
                 // Starweave remains fully usable in local-only deployments.
             }
+        }
+        if (current.lastCoordinatedTeams != null) {
+            mergeStaleTeams(localTeams, current.lastCoordinatedTeams);
+            return local;
         }
         if (localTeams != null) {
             for (int i = 0; i < localTeams.size(); i++) {
@@ -115,6 +120,7 @@ public final class StarweaveTeamApiBridge {
 
     public static JSONObject sources() {
         Runtime current = requireRuntime();
+        boolean coordinatorFailed = false;
         JSONArray values = new JSONArray();
         for (TeamMemberSourceDescriptor source : current.sources.get()) {
             JSONObject value = new JSONObject(true);
@@ -138,6 +144,7 @@ public final class StarweaveTeamApiBridge {
                 JSONArray coordinated = current.gateway.query(
                         "sources", new JSONObject(true)).getJSONArray("sources");
                 if (coordinated != null) {
+                    current.lastCoordinatedSources = copyArray(coordinated);
                     java.util.Set<String> identities = new java.util.HashSet<>();
                     for (Object item : values) {
                         JSONObject source = (JSONObject) item;
@@ -154,10 +161,25 @@ public final class StarweaveTeamApiBridge {
                 }
             } catch (IllegalStateException ignored) {
                 // No coordinator is a supported Starweave-only deployment mode.
+                coordinatorFailed = true;
             }
+        }
+        boolean coordinatorDelayed = false;
+        if (current.lastCoordinatedSources != null) {
+            mergeStaleSources(values, current.lastCoordinatedSources);
+            coordinatorDelayed = true;
         }
         JSONObject result = new JSONObject(true);
         result.put("sources", values);
+        if (coordinatorDelayed) {
+            markCoordinatorDelayed(result);
+        } else if (coordinatorFailed) {
+            result.put("coordinatorAvailable", false);
+            result.put("coordinatorDelayed", true);
+            result.put("coordinatorStateUnknown", true);
+            result.put("degraded", true);
+            result.put("degradedReason", "协调器暂不可达，远程来源状态未知");
+        }
         return result;
     }
 
@@ -601,7 +623,7 @@ public final class StarweaveTeamApiBridge {
                 remote.put("sourceRobotName", contact.getString("displayName"));
                 remote.put("remark", contact.getString("remark"));
                 remote.put("order", contact.getIntValue("order"));
-                remote.put("state", "UNAVAILABLE");
+                remote.put("state", "UNKNOWN");
                 remote.put("remote", true);
                 remote.put("coordinated", true);
                 members.add(remote);
@@ -611,7 +633,44 @@ public final class StarweaveTeamApiBridge {
                 ((JSONObject) value).getIntValue("order")));
         team.put("coordinatorAvailable", false);
         team.put("degraded", true);
-        team.put("degradedReason", "Starweave Team coordinator is unavailable");
+        team.put("coordinatorDelayed", true);
+        team.put("coordinatorStateUnknown", true);
+        team.put("degradedReason", "协调器暂不可达，成员状态未知");
+    }
+
+    private static JSONArray copyArray(JSONArray source) {
+        return JSON.parseArray(source.toJSONString());
+    }
+
+    private static void mergeStaleTeams(JSONArray localTeams, JSONArray cachedTeams) {
+        for (int i = 0; i < cachedTeams.size(); i++) {
+            JSONObject stale = JSON.parseObject(cachedTeams.getJSONObject(i).toJSONString());
+            stale.put("coordinated", true);
+            markCoordinatorDelayed(stale);
+            int localIndex = indexOfTeam(localTeams, stale.getString("teamId"));
+            if (localIndex >= 0) localTeams.set(localIndex, stale);
+            else localTeams.add(stale);
+        }
+    }
+
+    private static void mergeStaleSources(JSONArray values, JSONArray cachedSources) {
+        for (int i = 0; i < cachedSources.size(); i++) {
+            JSONObject stale = JSON.parseObject(cachedSources.getJSONObject(i).toJSONString());
+            stale.put("coordinated", true);
+            stale.put("stale", true);
+            String identity = sourceIdentity(stale);
+            int existingIndex = indexOfSource(values, identity);
+            if (existingIndex >= 0) values.set(existingIndex, stale);
+            else values.add(stale);
+        }
+    }
+
+    private static void markCoordinatorDelayed(JSONObject value) {
+        value.put("coordinatorAvailable", false);
+        value.put("coordinatorDelayed", true);
+        value.put("stale", true);
+        value.put("degraded", true);
+        value.put("degradedReason", "协调器延迟，状态可能过期");
     }
 
     private static int indexOfSource(JSONArray values, String identity) {
@@ -654,6 +713,8 @@ public final class StarweaveTeamApiBridge {
         final String transportGroup;
         final Supplier<List<TeamMemberSourceDescriptor>> sources;
         final StarweaveTeamGateway gateway;
+        volatile JSONArray lastCoordinatedTeams;
+        volatile JSONArray lastCoordinatedSources;
 
         Runtime(TeamManager manager, String instanceId,
                 Supplier<List<TeamMemberSourceDescriptor>> sources,

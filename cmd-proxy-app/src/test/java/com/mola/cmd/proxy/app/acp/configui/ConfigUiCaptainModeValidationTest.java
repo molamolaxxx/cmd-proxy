@@ -50,6 +50,16 @@ public class ConfigUiCaptainModeValidationTest {
         assertNull(server.validateCaptainTeamEntrypoints(root));
     }
 
+    @Test
+    public void rejectsAgentGatewayBoundToNonCaptainMember() {
+        JSONObject root = JSON.parseObject("{\"agentGateways\":[{\"target\":{"
+                + "\"type\":\"TEAM_MEMBER\",\"teamId\":\"team-1\","
+                + "\"teamMemberId\":\"member-2\"}}]}");
+
+        assertEquals("CAPTAIN_ONLY_GATEWAY_TARGET: captain Team gateway must target the captain",
+                server.validateCaptainTeamEntrypoints(root));
+    }
+
     private static Map<String, Object> captainTeam() {
         Map<String, Object> team = new LinkedHashMap<>();
         team.put("id", "team-1");

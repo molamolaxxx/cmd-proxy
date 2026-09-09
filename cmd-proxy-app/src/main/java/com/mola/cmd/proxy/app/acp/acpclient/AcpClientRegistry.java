@@ -495,10 +495,10 @@ public class AcpClientRegistry {
             }
             @Override public void cancel() throws IOException { client.cancel(); }
             @Override public void markNextTermination(String termination) {
-                client.getGlobalListener().markNextTermination(termination);
+                client.getLiveOutputListener().markNextTermination(termination);
             }
             @Override public void clearNextTermination() {
-                client.getGlobalListener().clearNextTermination();
+                client.getLiveOutputListener().clearNextTermination();
             }
         };
     }

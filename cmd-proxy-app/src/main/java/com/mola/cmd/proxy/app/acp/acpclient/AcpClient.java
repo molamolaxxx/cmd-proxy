@@ -12,6 +12,8 @@ import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.DefaultAcpResponseListener;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.LifecycleGuardedAcpResponseListener;
+import com.mola.cmd.proxy.app.acp.gateway.CompositeAcpResponseListener;
+import com.mola.cmd.proxy.app.acp.gateway.GatewayAcpResponseListener;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
@@ -104,6 +106,8 @@ public class AcpClient extends AbstractAcpClient {
     private final ConversationHistoryManager historyManager;
 
     private AcpResponseListener globalListener;
+    /** External gateway projection is composed per callback without replacing the owning surface listener. */
+    private final AcpResponseListener gatewayProjection;
 
     /** 记忆管理器，通过 setter 注入，未启用时为 null */
     private MemoryManagerBridge memoryManager;
@@ -201,6 +205,7 @@ public class AcpClient extends AbstractAcpClient {
         this.robotParam = robotParam;
         this.historyManager = Objects.requireNonNull(historyManager, "historyManager");
         this.globalListener = new DefaultAcpResponseListener(clientIdentity.getTransportGroup());
+        this.gatewayProjection = new GatewayAcpResponseListener(this);
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath, robotParam);
         this.authSessionId = McpAuthManager.getInstance().createSession(
                 clientIdentity.getTransportGroup());
@@ -491,11 +496,12 @@ public class AcpClient extends AbstractAcpClient {
     /** Cancel matching work while preserving a durable caller-owned pending notification. */
     public void cancelForQueuedWork() throws IOException {
         queuedWorkCancellationPending.set(true);
+        AcpResponseListener listener = executionListener();
         try {
-            globalListener.markNextTermination("TASK_CONTROL_INTERRUPTED");
+            listener.markNextTermination("TASK_CONTROL_INTERRUPTED");
             cancel();
         } catch (IOException | RuntimeException failure) {
-            globalListener.clearNextTermination();
+            listener.clearNextTermination();
             queuedWorkCancellationPending.set(false);
             throw failure;
         }
@@ -511,8 +517,9 @@ public class AcpClient extends AbstractAcpClient {
 
     private void sendInternal(String userInput, List<Map<String, String>> files,
                               Collection<String> localFiles, PromptOptions options) {
+        AcpResponseListener outputListener = executionListener();
         if (userInput == null || userInput.trim().isEmpty()) {
-            globalListener.onError(new IllegalArgumentException("用户输入不能为空"));
+            outputListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
 
@@ -521,7 +528,7 @@ public class AcpClient extends AbstractAcpClient {
         long generation = currentLifecycleGeneration();
         if (!compareAndSetStateIfActive(generation, State.READY, State.BUSY)) {
             releaseChannelTurn(effectiveOptions);
-            globalListener.onError(new IllegalStateException(
+            outputListener.onError(new IllegalStateException(
                     "当前 client 状态不允许发送消息: " + state.get()));
             return;
         }
@@ -540,7 +547,7 @@ public class AcpClient extends AbstractAcpClient {
         }
 
         AcpResponseListener guardedListener = new LifecycleGuardedAcpResponseListener(
-                globalListener, () -> isLifecycleGenerationActive(generation));
+                outputListener, () -> isLifecycleGenerationActive(generation));
         notifyScheduleExecutionStarted(
                 guardedListener, userInput, effectiveOptions);
         try {
@@ -1749,7 +1756,7 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     public void onTalkToCircuitOpened(String result) {
-        if (globalListener != null) publishOrdinaryTalkToResult(globalListener,
+        if (globalListener != null) publishOrdinaryTalkToResult(executionListener(),
                 "智能体通讯", result, result);
     }
 
@@ -2107,6 +2114,15 @@ public class AcpClient extends AbstractAcpClient {
 
     public AcpResponseListener getGlobalListener() {
         return globalListener;
+    }
+
+    /** Live callback fan-out for out-of-band cards; history replay must keep using globalListener. */
+    public AcpResponseListener getLiveOutputListener() {
+        return executionListener();
+    }
+
+    private AcpResponseListener executionListener() {
+        return new CompositeAcpResponseListener(globalListener, gatewayProjection);
     }
 
     public ConversationHistoryManager getHistoryManager() {

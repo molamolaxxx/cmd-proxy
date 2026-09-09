@@ -13,6 +13,8 @@ import com.mola.cmd.proxy.app.acp.configui.ConfigUiServer
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity
 import com.mola.cmd.proxy.app.acp.starweave.AcpRuntimePlan
+import com.mola.cmd.proxy.app.acp.gateway.model.AgentGatewayConfig
+import com.mola.cmd.proxy.app.acp.gateway.model.AgentGatewayServerConfig
 import com.mola.cmd.proxy.app.acp.team.TeamSourceEligibility
 import com.mola.cmd.proxy.app.mcp.McpProxy
 import com.mola.cmd.proxy.app.utils.CmdProxyHome
@@ -103,6 +105,9 @@ private fun startAcp() {
         defaultConfig["chatterIds"] = JSON.parseArray("[]")
         defaultConfig["channels"] = JSON.parseArray("[]")
         defaultConfig["externalTaskApis"] = JSON.parseArray("[]")
+        defaultConfig["agentGateways"] = JSON.parseArray("[]")
+        defaultConfig["agentGatewayServer"] = JSON.parseObject(
+            """{"enabled":false,"bindHost":"127.0.0.1","port":10529}""")
         defaultConfig["configUi"] = JSON.parseObject("""{"enabled":true}""")
         content = JSON.toJSONString(defaultConfig, SerializerFeature.PrettyFormat)
         file.bufferedWriter().use { writer -> writer.write(content) }
@@ -254,6 +259,10 @@ private fun startAcpServices(config: JSONObject) {
     val channels = config.getJSONArray("channels")
         ?.toJavaList(com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig::class.java)
         ?: emptyList()
+    val agentGateways = config.getJSONArray("agentGateways")
+        ?.toJavaList(AgentGatewayConfig::class.java) ?: emptyList()
+    val agentGatewayServerConfig = config.getJSONObject("agentGatewayServer")
+        ?.toJavaObject(AgentGatewayServerConfig::class.java) ?: AgentGatewayServerConfig()
 
     val runtimePlan = AcpRuntimePlan.build(chatterIds, allRobots, channels)
     if (!runtimePlan.shouldStartCoreRuntime()) {
@@ -314,7 +323,7 @@ private fun startAcpServices(config: JSONObject) {
     AcpProxy.start(
         groupIdList, robotsJsonStr, chatterIdsJsonStr,
         groupWorkDirMap, groupRobotMap, teamSourceGroupRobotMap,
-        allRobots, channels)
+        allRobots, channels, agentGatewayServerConfig, agentGateways)
 }
 
 private fun startConfigUiServer(config: JSONObject) {

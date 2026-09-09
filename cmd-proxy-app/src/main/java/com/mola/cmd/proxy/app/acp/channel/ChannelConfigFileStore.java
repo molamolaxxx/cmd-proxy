@@ -155,6 +155,8 @@ public final class ChannelConfigFileStore {
             }
             preserveExternalTaskAuthCodes(submitted.getJSONArray("externalTaskApis"),
                     previous.getJSONArray("externalTaskApis"), secretMask);
+            preserveAgentGatewayAuthCodes(submitted.getJSONArray("agentGateways"),
+                    previous.getJSONArray("agentGateways"), secretMask);
             writeAtomically(configPath, JSON.toJSONString(submitted,
                     SerializerFeature.PrettyFormat, SerializerFeature.SortField));
         }
@@ -180,6 +182,30 @@ public final class ChannelConfigFileStore {
             }
             if (!authCodes.add(resolved)) {
                 throw new IllegalArgumentException("duplicate external task endpoint auth code");
+            }
+        }
+    }
+
+    private static void preserveAgentGatewayAuthCodes(JSONArray submitted, JSONArray previous,
+                                                       String secretMask) {
+        if (submitted == null) return;
+        java.util.Set<String> authCodes = new java.util.HashSet<>();
+        for (int i = 0; i < submitted.size(); i++) {
+            JSONObject gateway = submitted.getJSONObject(i);
+            if (gateway == null) continue;
+            JSONObject old = findById(previous, gateway.getString("id"));
+            String authCode = gateway.getString("authCode");
+            if (isBlank(authCode) || secretMask.equals(authCode)) {
+                String prior = old == null ? null : old.getString("authCode");
+                if (isBlank(prior)) gateway.remove("authCode");
+                else gateway.put("authCode", prior);
+            }
+            String resolved = gateway.getString("authCode");
+            if (isBlank(resolved)) {
+                throw new IllegalArgumentException("Agent gateway auth code is required");
+            }
+            if (!authCodes.add(resolved)) {
+                throw new IllegalArgumentException("duplicate Agent gateway auth code");
             }
         }
     }

@@ -75,6 +75,23 @@
             <version>3.14.9</version>
         </dependency>
 
+        <!-- Java 8 compatible embedded HTTP/WebSocket server for Agent Gateway. -->
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-server</artifactId>
+            <version>9.4.58.v20250814</version>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-servlet</artifactId>
+            <version>9.4.58.v20250814</version>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.jetty.websocket</groupId>
+            <artifactId>websocket-server</artifactId>
+            <version>9.4.58.v20250814</version>
+        </dependency>
+
         <!-- Cron expression parsing -->
         <dependency>
             <groupId>com.cronutils</groupId>
@@ -92,6 +109,12 @@
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
             <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.jetty.websocket</groupId>
+            <artifactId>websocket-client</artifactId>
+            <version>9.4.58.v20250814</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

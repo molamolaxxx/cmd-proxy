@@ -38,6 +38,8 @@ public final class StarweaveTeamGateway {
     private final CallbackSender callbackSender;
     private final Map<String, CompletableFuture<JSONObject>> pending =
             new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<JSONObject>> inFlightQueries =
+            new ConcurrentHashMap<>();
     private volatile boolean available;
 
     public StarweaveTeamGateway(String instanceId, String transportGroup) {
@@ -62,7 +64,24 @@ public final class StarweaveTeamGateway {
     }
 
     public JSONObject query(String operation, JSONObject payload) {
-        return request(operation, payload, queryTimeoutMillis);
+        if (!"list".equals(operation) && !"sources".equals(operation)) {
+            return request(operation, payload, queryTimeoutMillis);
+        }
+        CompletableFuture<JSONObject> mine = new CompletableFuture<>();
+        CompletableFuture<JSONObject> existing = inFlightQueries.putIfAbsent(operation, mine);
+        if (existing != null) {
+            return awaitSharedQuery(operation, existing);
+        }
+        try {
+            JSONObject result = request(operation, payload, queryTimeoutMillis);
+            mine.complete(result);
+            return result;
+        } catch (RuntimeException failure) {
+            mine.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            inFlightQueries.remove(operation, mine);
+        }
     }
 
     public JSONObject mutate(String operation, JSONObject payload) {
@@ -100,6 +119,7 @@ public final class StarweaveTeamGateway {
             throw new IllegalStateException("Starweave Team coordinator is unavailable");
         }
         String requestId = UUID.randomUUID().toString();
+        long startedAt = System.nanoTime();
         CompletableFuture<JSONObject> future = new CompletableFuture<>();
         pending.put(requestId, future);
         Map<String, String> request = new LinkedHashMap<>();
@@ -118,6 +138,9 @@ public final class StarweaveTeamGateway {
                         "Starweave Team coordinator rejected the request"));
             }
             JSONObject data = response.getJSONObject("data");
+            logger.info("Starweave Team coordinator request completed: operation={},"
+                            + " requestId={}, elapsedMillis={}", operation, requestId,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt));
             return data == null ? new JSONObject(true) : data;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -130,8 +153,9 @@ public final class StarweaveTeamGateway {
             // chance to probe the recovered route. Keep the READY lease and fail only the
             // request that actually timed out.
             logger.warn("Starweave Team coordinator request timed out: operation={},"
-                            + " requestId={}, timeoutMillis={}",
-                    operation, requestId, timeoutMillis);
+                            + " requestId={}, timeoutMillis={}, elapsedMillis={}",
+                    operation, requestId, timeoutMillis,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt));
             throw new IllegalStateException("Starweave Team coordinator is unavailable", timeout);
         } catch (java.util.concurrent.ExecutionException failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
@@ -139,6 +163,29 @@ public final class StarweaveTeamGateway {
                     + cause.getMessage(), cause);
         } finally {
             pending.remove(requestId, future);
+        }
+    }
+
+    private JSONObject awaitSharedQuery(String operation,
+                                        CompletableFuture<JSONObject> shared) {
+        long startedAt = System.nanoTime();
+        try {
+            JSONObject result = shared.get(queryTimeoutMillis, TimeUnit.MILLISECONDS);
+            logger.info("Starweave Team shared query completed: operation={}, elapsedMillis={}",
+                    operation, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt));
+            return result;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Starweave Team coordinator request interrupted",
+                    interrupted);
+        } catch (java.util.concurrent.TimeoutException timeout) {
+            logger.warn("Starweave Team shared query timed out: operation={}, elapsedMillis={}",
+                    operation, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt));
+            throw new IllegalStateException("Starweave Team coordinator is unavailable", timeout);
+        } catch (java.util.concurrent.ExecutionException failure) {
+            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            throw new IllegalStateException("Starweave Team coordinator request failed: "
+                    + cause.getMessage(), cause);
         }
     }
 
