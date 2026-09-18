@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.schedule;
 
+import com.google.gson.JsonParser;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
@@ -15,8 +16,15 @@ import org.junit.rules.TemporaryFolder;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.*;
@@ -98,6 +106,53 @@ public class ScheduleOwnerIsolationTest {
     }
 
     @Test
+    public void restoredGroupCannotOverwriteLiveTeamScheduleOwner()
+            throws Exception {
+        Path root = temporaryFolder.newFolder("team-group-owner-recovery").toPath();
+        ScheduleOwnerKey liveOwner = ScheduleOwnerKey.team(
+                "owner-1", "team-1", "member-1", "Robot One");
+        ScheduleTaskManager writer = new ScheduleTaskManager(root);
+        writer.createTask(liveOwner, "grouped", "prompt",
+                new ScheduleConfig("cron", "* * * * *"), "daily");
+        writer.bindGroupSession(liveOwner, "daily", "session-1");
+
+        // Team client feature initialization can finish before scheduler persistence load.
+        ScheduleTaskManager restored = new ScheduleTaskManager(root);
+        restored.register(liveOwner);
+        restored.start();
+        try {
+            Method ownerFor = ScheduleTaskManager.class.getDeclaredMethod(
+                    "ownerFor", String.class);
+            ownerFor.setAccessible(true);
+            ScheduleOwnerKey recoveredOwner = (ScheduleOwnerKey) ownerFor.invoke(
+                    restored, liveOwner.getPersistencePath());
+            assertEquals("owner-1", recoveredOwner.getOwnerId());
+
+            ScheduledTask task = restored.listTasks(liveOwner).get(0);
+            task.setNextRunAt(0L);
+            CountDownLatch invoked = new CountDownLatch(1);
+            AtomicReference<ScheduleOwnerKey> callbackOwner = new AtomicReference<>();
+            restored.setScopedExecutionCallback((owner, taskId, groupName, prompt,
+                                                  principal, delivery) -> {
+                callbackOwner.set(owner);
+                invoked.countDown();
+                return false;
+            });
+
+            Method scan = ScheduleTaskManager.class.getDeclaredMethod("scan");
+            scan.setAccessible(true);
+            scan.invoke(restored);
+
+            assertTrue(invoked.await(2, TimeUnit.SECONDS));
+            awaitExecutionCount(root, "DEFERRED", 1);
+            assertEquals("owner-1", callbackOwner.get().getOwnerId());
+            assertEquals(liveOwner, callbackOwner.get());
+        } finally {
+            restored.stop();
+        }
+    }
+
+    @Test
     public void starweaveMainOwnerPersistsExactSurfaceAndLogicalSession()
             throws Exception {
         Path root = temporaryFolder.newFolder("starweave-schedule").toPath();
@@ -169,6 +224,7 @@ public class ScheduleOwnerIsolationTest {
         scan.invoke(manager);
 
         assertTrue(invoked.await(2, TimeUnit.SECONDS));
+        awaitExecutionCount(root, "DEFERRED", 1);
         assertEquals(member, actual.get());
         assertEquals("owner-1", actual.get().getOwnerId());
     }
@@ -200,10 +256,89 @@ public class ScheduleOwnerIsolationTest {
         scan.invoke(manager);
 
         assertTrue(invoked.await(2, TimeUnit.SECONDS));
+        awaitExecutionCount(root, "DEFERRED", 1);
         assertSame(delivery, actualDelivery.get());
         assertTrue(actualPrompt.get().contains("已绑定创建时的原始外部信道会话"));
         assertTrue(actualPrompt.get().contains("target 必须精确设置为“回复”"));
         assertFalse(actualPrompt.get().contains("user-a"));
+    }
+
+    @Test
+    public void executionJournalPersistsDeferredSuccessAndFailureAttempts()
+            throws Exception {
+        Path root = temporaryFolder.newFolder("execution-journal").toPath();
+        ScheduleTaskManager manager = new ScheduleTaskManager(root);
+        ScheduleOwnerKey owner = ScheduleOwnerKey.team(
+                "owner-1", "team-1", "member-1", "Robot");
+        ScheduledTask cron = manager.createTask(owner, "cron run", "prompt",
+                new ScheduleConfig("cron", "* * * * *"));
+        cron.setNextRunAt(0L);
+        AtomicInteger callbacks = new AtomicInteger();
+        CountDownLatch invoked = new CountDownLatch(2);
+        manager.setScopedExecutionCallback((callbackOwner, taskId, groupName, prompt,
+                                             principal, delivery) -> {
+            invoked.countDown();
+            return callbacks.incrementAndGet() > 1;
+        });
+
+        Method scan = ScheduleTaskManager.class.getDeclaredMethod("scan");
+        scan.setAccessible(true);
+        scan.invoke(manager);
+        awaitExecutionCount(root, "DEFERRED", 1);
+        scan.invoke(manager);
+        assertTrue(invoked.await(2, TimeUnit.SECONDS));
+        awaitExecutionCount(root, "SUCCESS", 1);
+
+        ScheduledTask failed = manager.createTask(owner, "failed run", "prompt",
+                new ScheduleConfig("once", "+1h"));
+        failed.setNextRunAt(0L);
+        manager.setScopedExecutionCallback((callbackOwner, taskId, groupName, prompt,
+                                             principal, delivery) -> {
+            throw new IllegalStateException("expected callback failure");
+        });
+        scan.invoke(manager);
+        awaitExecutionCount(root, "FAILED", 1);
+
+        String jdbcUrl = "jdbc:sqlite:"
+                + root.resolve(ScheduleExecutionJournal.DATABASE_FILE).toAbsolutePath();
+        try (Connection connection = DriverManager.getConnection(jdbcUrl);
+             Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery(
+                     "SELECT status,result_code,owner_scope,team_id,team_member_id,attempt "
+                             + "FROM schedule_execution ORDER BY started_at,id")) {
+            assertTrue(rows.next());
+            assertEquals("DEFERRED", rows.getString("status"));
+            assertEquals("TARGET_NOT_EXECUTABLE", rows.getString("result_code"));
+            assertEquals("TEAM", rows.getString("owner_scope"));
+            assertEquals("team-1", rows.getString("team_id"));
+            assertEquals("member-1", rows.getString("team_member_id"));
+            assertEquals(1, rows.getInt("attempt"));
+            assertTrue(rows.next());
+            assertEquals("SUCCESS", rows.getString("status"));
+            assertEquals(2, rows.getInt("attempt"));
+            assertTrue(rows.next());
+            assertEquals("FAILED", rows.getString("status"));
+            assertEquals("EXECUTION_EXCEPTION", rows.getString("result_code"));
+            assertFalse(rows.next());
+        }
+    }
+
+    private static void awaitExecutionCount(Path root, String status, int expected)
+            throws Exception {
+        String jdbcUrl = "jdbc:sqlite:"
+                + root.resolve(ScheduleExecutionJournal.DATABASE_FILE).toAbsolutePath();
+        long deadline = System.currentTimeMillis() + 2000L;
+        while (System.currentTimeMillis() < deadline) {
+            try (Connection connection = DriverManager.getConnection(jdbcUrl);
+                 Statement statement = connection.createStatement();
+                 ResultSet result = statement.executeQuery(
+                         "SELECT COUNT(*) FROM schedule_execution WHERE status='"
+                                 + status + "'")) {
+                if (result.next() && result.getInt(1) >= expected) return;
+            }
+            Thread.sleep(10L);
+        }
+        fail("Timed out waiting for schedule execution status " + status);
     }
 
     @Test
@@ -245,23 +380,74 @@ public class ScheduleOwnerIsolationTest {
     }
 
     @Test
-    public void scheduleJsonAppliesOneGroupNameToAllCreatedTasks()
+    public void scheduleMcpArgumentsApplyOneGroupNameToAllCreatedTasks()
             throws Exception {
         Path root = temporaryFolder.newFolder("json-group").toPath();
         ScheduleTaskManager manager = new ScheduleTaskManager(root);
         ScheduleOwnerKey owner = ScheduleOwnerKey.main("Robot");
 
-        manager.handleAction("{\"action\":\"schedule_task\","
+        manager.executeTool("schedule_task", JsonParser.parseString("{"
                 + "\"groupName\":\"daily\",\"tasks\":["
                 + "{\"title\":\"one\",\"prompt\":\"p1\","
                 + "\"schedule\":{\"type\":\"once\",\"expr\":\"+1h\"}},"
                 + "{\"title\":\"two\",\"prompt\":\"p2\","
-                + "\"schedule\":{\"type\":\"once\",\"expr\":\"+2h\"}}]}",
-                owner);
+                + "\"schedule\":{\"type\":\"once\",\"expr\":\"+2h\"}}]}")
+                .getAsJsonObject(), owner, null, null);
 
         assertEquals(2, manager.listTasks(owner).size());
         assertTrue(manager.listTasks(owner).stream()
                 .allMatch(task -> "daily".equals(task.getGroupName())));
+    }
+
+    @Test
+    public void resolvesGroupDateTemplateFromScheduledOccurrence()
+            throws Exception {
+        Path root = temporaryFolder.newFolder("group-date-template").toPath();
+        ScheduleTaskManager manager = new ScheduleTaskManager(root);
+        ScheduleOwnerKey owner = ScheduleOwnerKey.main("Robot");
+        ScheduledTask task = manager.createTask(owner, "daily", "prompt",
+                new ScheduleConfig("cron", "0 5-18 * * *"),
+                "这是一个group{yyyyMMdd}");
+        ZoneId zone = ZoneId.systemDefault();
+        long scheduledAt = ZonedDateTime.of(
+                2026, 9, 16, 18, 0, 0, 0, zone).toInstant().toEpochMilli();
+
+        assertEquals("这是一个group{yyyyMMdd}", task.getGroupName());
+        assertEquals("这是一个group20260916",
+                ScheduleTaskManager.resolveGroupName(
+                        task.getGroupName(), scheduledAt, zone));
+        assertEquals("这是一个group20260917",
+                ScheduleTaskManager.resolveGroupName(task.getGroupName(),
+                        scheduledAt + TimeUnit.DAYS.toMillis(1), zone));
+        assertEquals("fixed", ScheduleTaskManager.resolveGroupName(
+                "fixed", scheduledAt, zone));
+
+        task.setNextRunAt(scheduledAt);
+        CountDownLatch invoked = new CountDownLatch(1);
+        AtomicReference<String> effectiveGroup = new AtomicReference<>();
+        manager.setScopedExecutionCallback((callbackOwner, taskId, groupName, prompt,
+                                             principal, delivery) -> {
+            effectiveGroup.set(groupName);
+            invoked.countDown();
+            return false;
+        });
+        Method trigger = ScheduleTaskManager.class.getDeclaredMethod(
+                "triggerExecution", String.class, ScheduledTask.class);
+        trigger.setAccessible(true);
+        trigger.invoke(manager, owner.getPersistencePath(), task);
+
+        assertTrue(invoked.await(2, TimeUnit.SECONDS));
+        assertEquals("这是一个group20260916", effectiveGroup.get());
+        awaitExecutionCount(root, "DEFERRED", 1);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void rejectsMalformedGroupDateTemplate() throws Exception {
+        ScheduleTaskManager manager = new ScheduleTaskManager(
+                temporaryFolder.newFolder("invalid-group-template").toPath());
+        manager.createTask(ScheduleOwnerKey.main("Robot"), "daily", "prompt",
+                new ScheduleConfig("cron", "0 5-18 * * *"),
+                "daily-{yyyyMMdd");
     }
 
     @Test(expected = IllegalArgumentException.class)

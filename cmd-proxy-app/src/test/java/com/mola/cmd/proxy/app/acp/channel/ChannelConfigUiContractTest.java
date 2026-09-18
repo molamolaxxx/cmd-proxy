@@ -22,7 +22,15 @@ public class ChannelConfigUiContractTest {
         assertTrue(html.contains("id=\"channelDialog\""));
         assertTrue(html.contains("onclick=\"openChannelDialog(-1)\""));
         assertTrue(html.contains("onclick=\"openChannelDialog('+i+')\""));
-        assertTrue(html.contains("function saveChannelDialog()"));
+        assertTrue(html.contains("async function saveChannelDialog()"));
+        assertTrue(html.contains("openChannelDialog('+i+',\\'copy\\')"));
+        assertFalse(html.contains("await applyChannelConfig(insertIndex)"));
+        assertTrue(html.contains("消息渠道已复制并保存"));
+        assertTrue(html.contains("applyChannelConfig(insertIndex).then(function()"));
+        assertTrue(html.contains("async function deleteChannel(i)"));
+        assertTrue(html.contains("消息渠道已删除并保存"));
+        assertTrue(html.contains("if(!ok){config.channels.splice(i,0,channel)"));
+        assertTrue(html.contains("var ok=await saveConfig(true)"));
         assertTrue(html.contains("<select onchange=\"channelDialogDraft.defaultChatId=this.value"));
         assertTrue(html.contains("不设置默认目标"));
         assertTrue(html.contains("系统不会自动选择"));

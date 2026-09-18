@@ -10,6 +10,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderType;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager;
 import com.mola.cmd.proxy.app.acp.common.PathResolver;
+import com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveRequestDeduplicator;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveResourcePayload;
@@ -43,9 +44,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -69,7 +72,7 @@ public class ConfigUiServer {
 
     private final int port;
     private final Runnable refreshCallback;
-    private final Consumer<String> refreshRobotCallback;
+    private final BiConsumer<String, String> refreshRobotCallback;
     private final Supplier<java.util.Map<String, String>> channelStatusSupplier;
     private final Supplier<java.util.Map<String, String>> channelErrorSupplier;
     private final BiFunction<String, Boolean, Boolean> channelInboundUpdater;
@@ -82,13 +85,19 @@ public class ConfigUiServer {
     private HttpServer server;
     private ExecutorService executor;
     private ExecutorService starweaveStreamExecutor;
+    private ScheduledExecutorService updateCheckExecutor;
     private final Semaphore starweaveStreamSlots = new Semaphore(16);
+    private final ConcurrentMap<String, Long> refreshingRobots = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Long> refreshingChannels = new ConcurrentHashMap<>();
 
     // 更新状态
+    private static final long UPDATE_CHECK_INTERVAL_MINUTES = 10L;
     private final AtomicBoolean updating = new AtomicBoolean(false);
-    private volatile String updateStatus = "idle"; // idle, downloading, done, error
+    private volatile String updateStatus = "idle"; // idle, checking, latest, downloading, done, error
     private volatile int updateProgress = 0;
     private volatile String updateMessage = "";
+    private volatile boolean automaticUpdate = false;
+    private volatile boolean updatePreparedForRestart = false;
 
     /**
      * @param port            监听端口
@@ -96,6 +105,20 @@ public class ConfigUiServer {
      * @param refreshRobotCallback 按 robot 维度刷新的回调
      */
     public ConfigUiServer(int port, Runnable refreshCallback, Consumer<String> refreshRobotCallback) {
+        this(port, refreshCallback, refreshRobotCallback,
+                java.util.Collections::emptyMap, java.util.Collections::emptyMap,
+                (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                }, (channelId, enabled) -> {
+                    throw new IllegalStateException("channel service is not running");
+                }, java.util.Collections::emptyList,
+                (previousId, channelId) -> {
+                    throw new IllegalStateException("channel service is not running");
+                });
+    }
+
+    public ConfigUiServer(int port, Runnable refreshCallback,
+                          BiConsumer<String, String> refreshRobotCallback) {
         this(port, refreshCallback, refreshRobotCallback,
                 java.util.Collections::emptyMap, java.util.Collections::emptyMap,
                 (channelId, enabled) -> {
@@ -164,6 +187,21 @@ public class ConfigUiServer {
                           BiFunction<String, Boolean, Boolean> channelPrivateChatUpdater,
                           Supplier<List<Map<String, Object>>> channelBindingTargetSupplier,
                           BiConsumer<String, String> refreshChannelCallback) {
+        this(port, refreshCallback,
+                (previousName, name) -> refreshRobotCallback.accept(name),
+                channelStatusSupplier, channelErrorSupplier, channelInboundUpdater,
+                channelPrivateChatUpdater, channelBindingTargetSupplier,
+                refreshChannelCallback);
+    }
+
+    public ConfigUiServer(int port, Runnable refreshCallback,
+                          BiConsumer<String, String> refreshRobotCallback,
+                          Supplier<java.util.Map<String, String>> channelStatusSupplier,
+                          Supplier<java.util.Map<String, String>> channelErrorSupplier,
+                          BiFunction<String, Boolean, Boolean> channelInboundUpdater,
+                          BiFunction<String, Boolean, Boolean> channelPrivateChatUpdater,
+                          Supplier<List<Map<String, Object>>> channelBindingTargetSupplier,
+                          BiConsumer<String, String> refreshChannelCallback) {
         this.port = port;
         this.refreshCallback = refreshCallback;
         this.refreshRobotCallback = refreshRobotCallback;
@@ -223,7 +261,13 @@ public class ConfigUiServer {
         server.createContext("/api/refresh", proxied(this::handleRefresh));
         server.createContext("/api/refresh-robot", proxied(this::handleRefreshRobot));
         server.createContext("/api/refresh-channel", proxied(this::handleRefreshChannel));
+        server.createContext("/api/item-refresh-status",
+                proxied(this::handleItemRefreshStatus));
         server.createContext("/api/browse-dir", proxied(this::handleBrowseDir));
+        server.createContext("/api/agent-resources/export",
+                proxied(exchange -> handleAgentResourceMigration(exchange, false)));
+        server.createContext("/api/agent-resources/import",
+                proxied(exchange -> handleAgentResourceMigration(exchange, true)));
         server.createContext("/api/agent-resources/tree",
                 proxied(this::handleAgentResourceTree));
         server.createContext("/api/agent-resources/content",
@@ -242,6 +286,8 @@ public class ConfigUiServer {
                 proxied(exchange -> handleStarweaveResources(exchange, "preview")));
         server.createContext("/api/starweave/v1/sessions/resources/download",
                 proxied(exchange -> handleStarweaveResources(exchange, "download")));
+        server.createContext("/api/starweave/v1/sessions/file-preview",
+                proxied(exchange -> handleStarweaveFilePreview(exchange, false)));
         server.createContext("/api/starweave/v1/sessions/cancel",
                 proxied(exchange -> handleStarweaveCommand(exchange, "cancel")));
         server.createContext("/api/starweave/v1/sessions/new",
@@ -260,6 +306,8 @@ public class ConfigUiServer {
                 proxied(exchange -> handleStarweaveTeams(exchange, "sources")));
         server.createContext("/api/starweave/v1/teams/create",
                 proxied(exchange -> handleStarweaveTeams(exchange, "create")));
+        server.createContext("/api/starweave/v1/teams/update",
+                proxied(exchange -> handleStarweaveTeams(exchange, "update")));
         server.createContext("/api/starweave/v1/teams/delete",
                 proxied(exchange -> handleStarweaveTeams(exchange, "delete")));
         server.createContext("/api/starweave/v1/teams/member",
@@ -276,6 +324,8 @@ public class ConfigUiServer {
                 proxied(exchange -> handleStarweaveTeamResources(exchange, "preview")));
         server.createContext("/api/starweave/v1/teams/resources/download",
                 proxied(exchange -> handleStarweaveTeamResources(exchange, "download")));
+        server.createContext("/api/starweave/v1/teams/file-preview",
+                proxied(exchange -> handleStarweaveFilePreview(exchange, true)));
         server.createContext("/api/update-jar", proxied(this::handleUpdateJar));
         server.createContext("/api/update-jar/status", proxied(this::handleUpdateJarStatus));
         server.createContext("/api/provider-runtime/releases",
@@ -288,6 +338,16 @@ public class ConfigUiServer {
                 proxied(this::handleProviderRuntimeJob));
 
         server.start();
+        updateCheckExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "jar-update-checker");
+            thread.setDaemon(true);
+            return thread;
+        });
+        updateCheckExecutor.scheduleWithFixedDelay(
+                () -> requestJarUpdate(true),
+                UPDATE_CHECK_INTERVAL_MINUTES,
+                UPDATE_CHECK_INTERVAL_MINUTES,
+                TimeUnit.MINUTES);
         logger.info("ConfigUI 已启动: http://localhost:{}", port);
     }
 
@@ -352,6 +412,9 @@ public class ConfigUiServer {
     }
 
     public void stop() {
+        if (updateCheckExecutor != null) {
+            updateCheckExecutor.shutdownNow();
+        }
         if (server != null) {
             server.stop(0);
             logger.info("ConfigUI 已停止");
@@ -439,7 +502,12 @@ public class ConfigUiServer {
             return;
         }
 
-        byte[] body = readAllBytes(exchange.getRequestBody());
+        byte[] body;
+        if ("/api/agent-resources/import".equals(exchange.getRequestURI().getPath())) {
+            try { body = AgentResourceMigration.readBounded(exchange.getRequestBody(), AgentResourceMigration.MAX_BYTES); }
+            catch (IOException e) { sendResponse(exchange, 413, "application/json",
+                    JSON.toJSONString(apiError("MIGRATION_TOO_LARGE", e.getMessage()))); return; }
+        } else { body = readAllBytes(exchange.getRequestBody()); }
         String query = stripInstanceParam(exchange.getRequestURI().getRawQuery());
         String url = "http://127.0.0.1:" + target.configUiPort + exchange.getRequestURI().getPath()
                 + (query.isEmpty() ? "" : "?" + query);
@@ -465,9 +533,17 @@ public class ConfigUiServer {
             InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
             byte[] respBytes = is == null ? new byte[0] : readAllBytes(is);
             String respType = conn.getContentType();
-            sendResponse(exchange, code,
-                    respType == null ? "application/json" : respType,
-                    new String(respBytes, StandardCharsets.UTF_8));
+            if ("/api/agent-resources/export".equals(exchange.getRequestURI().getPath()) && code == 200) {
+                exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=agent-resources.zip");
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.sendResponseHeaders(code, respBytes.length);
+                try (OutputStream output = exchange.getResponseBody()) { output.write(respBytes); }
+            } else {
+                sendResponse(exchange, code,
+                        respType == null ? "application/json" : respType,
+                        new String(respBytes, StandardCharsets.UTF_8));
+            }
         } catch (IOException e) {
             logger.warn("跨环境转发失败: url={}", url, e);
             sendResponse(exchange, 502, "application/json",
@@ -1231,10 +1307,81 @@ public class ConfigUiServer {
         }
     }
 
+    private void handleStarweaveFilePreview(HttpExchange exchange, boolean team)
+            throws IOException {
+        if (!allowStarweaveOrigin(exchange)) return;
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        String requestId = null;
+        try {
+            JSONObject request = JSON.parseObject(readBody(exchange, 64L * 1024L));
+            if (request == null) throw new IllegalArgumentException("request body is required");
+            requestId = request.getString("requestId");
+            String target = request.getString("target");
+            Integer requestedLine = request.getInteger("requestedLine");
+            if (target == null || target.trim().isEmpty() || target.length() > 8192) {
+                throw new IllegalArgumentException("target is required");
+            }
+            if (requestedLine != null && requestedLine < 1) {
+                throw new IllegalArgumentException("requestedLine must be positive");
+            }
+
+            JSONObject preview;
+            boolean accepted;
+            String code;
+            String message;
+            if (team) {
+                request.put("path", target);
+                request.put("maxBytes",
+                        com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewReader.HARD_MAX_BYTES);
+                preview = StarweaveTeamApiBridge.previewTextFile(request);
+                accepted = preview.getBooleanValue("accepted");
+                code = preview.getString("code");
+                message = preview.getString("message");
+                JSONObject data = preview.getJSONObject("data");
+                if (data != null) {
+                    data.put("requestedLine", requestedLine);
+                }
+                preview = data;
+            } else {
+                TextFilePreviewResult result = StarweaveSessionApiBridge.previewTextFile(
+                        requestId, request.getString("groupId"), request.getString("sessionId"),
+                        request.getLongValue("generation"), target,
+                        com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewReader.HARD_MAX_BYTES,
+                        null);
+                accepted = result.isAccepted();
+                code = result.getCode();
+                message = result.getMessage();
+                preview = result.getData() == null ? null
+                        : JSON.parseObject(JSON.toJSONString(result.getData()));
+                if (preview != null) preview.put("requestedLine", requestedLine);
+            }
+            sendResponse(exchange, filePreviewStatus(accepted, code), "application/json",
+                    JSON.toJSONString(starweaveEnvelope(requestId, accepted,
+                            code == null ? (accepted ? "OK" : "FILE_PREVIEW_FAILED") : code,
+                            message, preview)));
+        } catch (Exception e) {
+            sendStarweaveError(exchange, requestId, e);
+        }
+    }
+
+    private static int filePreviewStatus(boolean accepted, String code) {
+        if (accepted) return 200;
+        if ("FILE_NOT_FOUND".equals(code)) return 404;
+        if ("FILE_TOO_LARGE".equals(code)) return 413;
+        if ("BUSY".equals(code)) return 429;
+        if ("REMOTE_FILE_PREVIEW_UNSUPPORTED".equals(code)) return 422;
+        if ("IO_ERROR".equals(code)) return 502;
+        return 400;
+    }
+
     private void handleStarweaveTeams(HttpExchange exchange, String action)
             throws IOException {
         if (!allowStarweaveOrigin(exchange)) return;
-        boolean mutation = "create".equals(action) || "delete".equals(action)
+        boolean mutation = "create".equals(action) || "update".equals(action)
+                || "delete".equals(action)
                 || "member".equals(action) || "upload".equals(action);
         String expectedMethod = mutation ? "POST" : "GET";
         if (!expectedMethod.equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -1257,6 +1404,8 @@ public class ConfigUiServer {
                         "upload".equals(action) ? 28L * 1024L * 1024L : 256L * 1024L));
                 data = "create".equals(action)
                         ? StarweaveTeamApiBridge.create(request)
+                        : "update".equals(action)
+                        ? StarweaveTeamApiBridge.update(request)
                         : "upload".equals(action)
                         ? StarweaveTeamApiBridge.upload(request)
                         : "member".equals(action)
@@ -1989,16 +2138,30 @@ public class ConfigUiServer {
             String body = readBody(exchange);
             JSONObject json = JSON.parseObject(body);
             String name = json.getString("name");
+            String previousName = json.getString("previousName");
             if (name == null || name.trim().isEmpty()) {
                 sendResponse(exchange, 400, "application/json", "{\"error\":\"name 不能为空\"}");
                 return;
             }
-            refreshRobotCallback.accept(name.trim());
-            sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+            String current = name.trim();
+            long startedAt = System.currentTimeMillis();
+            if (refreshingRobots.putIfAbsent(current, startedAt) != null) {
+                sendResponse(exchange, 409, "application/json",
+                        "{\"error\":\"智能体正在刷新，请勿重复操作\"}");
+                return;
+            }
+            try {
+                refreshRobotCallback.accept(previousName == null ? "" : previousName.trim(),
+                        current);
+                sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+            } finally {
+                refreshingRobots.remove(current, startedAt);
+            }
         } catch (Exception e) {
             logger.error("按 robot 刷新服务失败", e);
+            String message = e.getMessage() == null ? "unknown error" : e.getMessage();
             sendResponse(exchange, 500, "application/json",
-                    "{\"error\":\"" + e.getMessage().replace("\"", "'") + "\"}");
+                    "{\"error\":\"" + message.replace("\"", "'") + "\"}");
         }
     }
 
@@ -2018,14 +2181,36 @@ public class ConfigUiServer {
                         "{\"error\":\"channelId 不能为空\"}");
                 return;
             }
-            refreshChannelCallback.accept(previous, current);
-            sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+            String refreshKey = current.isEmpty() ? previous : current;
+            long startedAt = System.currentTimeMillis();
+            if (refreshingChannels.putIfAbsent(refreshKey, startedAt) != null) {
+                sendResponse(exchange, 409, "application/json",
+                        "{\"error\":\"消息渠道正在刷新，请勿重复操作\"}");
+                return;
+            }
+            try {
+                refreshChannelCallback.accept(previous, current);
+                sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+            } finally {
+                refreshingChannels.remove(refreshKey, startedAt);
+            }
         } catch (Exception e) {
             logger.error("按 channel 刷新服务失败", e);
             String message = e.getMessage() == null ? "unknown error" : e.getMessage();
             sendResponse(exchange, 500, "application/json",
                     "{\"error\":\"" + message.replace("\"", "'") + "\"}");
         }
+    }
+
+    private void handleItemRefreshStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        JSONObject result = new JSONObject(true);
+        result.put("robots", new java.util.LinkedHashMap<>(refreshingRobots));
+        result.put("channels", new java.util.LinkedHashMap<>(refreshingChannels));
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
     /**
@@ -2062,6 +2247,42 @@ public class ConfigUiServer {
         }
         result.put("dirs", directoryEntries(children));
         sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+    }
+
+    private void handleAgentResourceMigration(HttpExchange exchange, boolean importing) throws IOException {
+        if (!(importing ? "POST" : "GET").equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            AcpRobotParam robot = findConfiguredRobot(param(exchange, "robot"));
+            AgentResourceMigration migration = new AgentResourceMigration();
+            if (importing) {
+                if (!"true".equals(param(exchange, "overwrite"))) {
+                    throw new IllegalArgumentException("请先确认覆盖已有配置");
+                }
+                String kinds = param(exchange, "kinds");
+                java.util.Set<String> selected = new java.util.LinkedHashSet<>();
+                if (kinds != null && !kinds.isEmpty()) {
+                    selected.addAll(java.util.Arrays.asList(kinds.split(",", -1)));
+                }
+                JSONObject result = migration.importZip(robot, exchange.getRequestBody(), selected);
+                sendResponse(exchange, 200, "application/json", result.toJSONString());
+            } else {
+                byte[] bytes = migration.exportZip(robot);
+                exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=agent-resources.zip");
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream output = exchange.getResponseBody()) { output.write(bytes); }
+            }
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_MIGRATION_REQUEST", e.getMessage())));
+        } catch (Exception e) {
+            sendResponse(exchange, 422, "application/json",
+                    JSON.toJSONString(apiError("RESOURCE_MIGRATION_FAILED", e.getMessage())));
+        }
     }
 
     private void handleAgentResourceTree(HttpExchange exchange) throws IOException {
@@ -2195,20 +2416,29 @@ public class ConfigUiServer {
             sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
             return;
         }
-        if (!updating.compareAndSet(false, true)) {
+        if (!requestJarUpdate(false)) {
             sendResponse(exchange, 409, "application/json",
                     "{\"error\":\"更新进行中，请勿重复操作\"}");
             return;
         }
-        // 重置状态
-        updateStatus = "downloading";
-        updateProgress = 0;
-        updateMessage = "开始下载...";
-
-        // 异步执行下载替换
-        new Thread(this::doUpdateJar, "jar-updater").start();
-
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+    }
+
+    private boolean requestJarUpdate(boolean automatic) {
+        if (updatePreparedForRestart) {
+            return false;
+        }
+        if (!updating.compareAndSet(false, true)) {
+            return false;
+        }
+        automaticUpdate = automatic;
+        updateProgress = 0;
+        updateMessage = "正在检查最新版本...";
+        updateStatus = "checking";
+        Thread updater = new Thread(this::checkAndUpdateJar, "jar-updater");
+        updater.setDaemon(true);
+        updater.start();
+        return true;
     }
 
     private void handleUpdateJarStatus(HttpExchange exchange) throws IOException {
@@ -2216,75 +2446,88 @@ public class ConfigUiServer {
             sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
             return;
         }
-        String json = "{\"status\":\"" + updateStatus + "\",\"progress\":" + updateProgress +
-                ",\"message\":\"" + updateMessage.replace("\"", "'") + "\"}";
-        sendResponse(exchange, 200, "application/json", json);
+        JSONObject result = new JSONObject(true);
+        result.put("status", updateStatus);
+        result.put("progress", updateProgress);
+        result.put("message", updateMessage);
+        result.put("automatic", automaticUpdate);
+        result.put("restartRequired", updatePreparedForRestart);
+        sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
     }
 
-    private void doUpdateJar() {
+    private void checkAndUpdateJar() {
+        Path tmpFile = null;
         try {
             Path jarPath = getRunningJarPath();
             if (jarPath == null) {
-                updateStatus = "error";
                 updateMessage = "无法确定当前运行的 JAR 路径";
-                updating.set(false);
+                updateStatus = "error";
                 return;
             }
 
-            String updateJarUrl = "https://" + CmdProxyConf.INSTANCE.getRemoteHost()
+            String updateBaseUrl = "https://" + CmdProxyConf.INSTANCE.getRemoteHost()
                     + "/download/cmd-proxy.jar";
+            String expectedMd5 = downloadRemoteMd5(updateBaseUrl + ".md5");
+            String currentMd5 = calculateMd5(jarPath);
+            if (expectedMd5.equalsIgnoreCase(currentMd5)) {
+                updateProgress = 100;
+                updateMessage = "当前已是最新版本";
+                updateStatus = "latest";
+                logger.debug("JAR 已是最新版本: {}", jarPath);
+                return;
+            }
+
+            updateProgress = 0;
+            updateMessage = "正在下载最新版本";
+            updateStatus = "downloading";
+            String updateJarUrl = updateBaseUrl;
             logger.info("开始下载更新: {} -> {}", updateJarUrl, jarPath);
 
-            // 创建忽略 SSL 的连接
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, new TrustManager[]{new X509TrustManager() {
-                public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-                public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            }}, null);
+            HttpsURLConnection conn = openUpdateConnection(updateJarUrl, 60000);
+            try {
+                int responseCode = conn.getResponseCode();
+                if (responseCode != 200) {
+                    throw new IOException("下载失败，HTTP " + responseCode);
+                }
 
-            URL url = new URL(updateJarUrl);
-            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
-            conn.setSSLSocketFactory(sslContext.getSocketFactory());
-            conn.setHostnameVerifier((hostname, session) -> true);
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(60000);
-            conn.connect();
+                long totalSize = conn.getContentLengthLong();
+                tmpFile = Files.createTempFile(jarPath.toAbsolutePath().getParent(),
+                        ".cmd-proxy-update-", ".tmp");
 
-            int responseCode = conn.getResponseCode();
-            if (responseCode != 200) {
-                updateStatus = "error";
-                updateMessage = "下载失败，HTTP " + responseCode;
-                updating.set(false);
-                return;
+                try (InputStream in = conn.getInputStream();
+                     OutputStream out = Files.newOutputStream(tmpFile)) {
+                    byte[] buf = new byte[8192];
+                    long downloaded = 0;
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        downloaded += n;
+                        if (totalSize > 0) {
+                            updateProgress = (int) (downloaded * 100 / totalSize);
+                        }
+                        updateMessage = "正在下载最新版本 " + (downloaded / 1024) + "KB" +
+                                (totalSize > 0 ? " / " + (totalSize / 1024) + "KB" : "");
+                    }
+                }
+            } finally {
+                conn.disconnect();
             }
 
-            long totalSize = conn.getContentLengthLong();
-            Path tmpFile = jarPath.resolveSibling(".cmd-proxy-update.tmp");
-
-            try (InputStream in = conn.getInputStream();
-                 OutputStream out = Files.newOutputStream(tmpFile)) {
-                byte[] buf = new byte[8192];
-                long downloaded = 0;
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    out.write(buf, 0, n);
-                    downloaded += n;
-                    if (totalSize > 0) {
-                        updateProgress = (int) (downloaded * 100 / totalSize);
-                    }
-                    updateMessage = "下载中 " + (downloaded / 1024) + "KB" +
-                            (totalSize > 0 ? " / " + (totalSize / 1024) + "KB" : "");
-                }
+            String downloadedMd5 = calculateMd5(tmpFile);
+            if (!expectedMd5.equalsIgnoreCase(downloadedMd5)) {
+                throw new IOException("下载文件 MD5 校验失败");
             }
 
             boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
             if (isWindows) {
                 // Windows下无法原地替换运行中的JAR，先写到.new.jar，再通过脚本异步替换
-                Path newJar = jarPath.resolveSibling(".cmd-proxy-update.new.jar");
+                Path newJar = jarPath.resolveSibling(".cmd-proxy-update-" +
+                        UUID.randomUUID() + ".new.jar");
                 Files.move(tmpFile, newJar, StandardCopyOption.REPLACE_EXISTING);
+                tmpFile = null;
 
-                Path scriptFile = jarPath.resolveSibling(".cmd-proxy-update-replace.bat");
+                Path scriptFile = jarPath.resolveSibling(".cmd-proxy-update-replace-" +
+                        UUID.randomUUID() + ".bat");
                 try (PrintWriter pw = new PrintWriter(Files.newBufferedWriter(scriptFile))) {
                     pw.println("@echo off");
                     pw.println("set OLD=" + jarPath.toAbsolutePath());
@@ -2301,25 +2544,101 @@ public class ConfigUiServer {
                                 scriptFile.toAbsolutePath().toString()});
 
                 updateProgress = 100;
-                updateStatus = "done";
+                updatePreparedForRestart = true;
                 updateMessage = "更新已准备完成，关闭程序后自动替换并重启";
+                updateStatus = "done";
                 logger.info("JAR 更新脚本已创建: {}", scriptFile);
             } else {
                 Files.move(tmpFile, jarPath, StandardCopyOption.REPLACE_EXISTING);
+                tmpFile = null;
 
                 updateProgress = 100;
-                updateStatus = "done";
                 updateMessage = "更新完成，重启后生效";
+                updateStatus = "done";
                 logger.info("JAR 更新完成: {}", jarPath);
             }
 
         } catch (Exception e) {
             logger.error("JAR 更新失败", e);
-            updateStatus = "error";
             updateMessage = "更新失败: " + e.getMessage();
+            updateStatus = "error";
         } finally {
+            if (tmpFile != null) {
+                try {
+                    Files.deleteIfExists(tmpFile);
+                } catch (IOException cleanupError) {
+                    logger.warn("清理 JAR 更新临时文件失败: {}", tmpFile, cleanupError);
+                }
+            }
             updating.set(false);
         }
+    }
+
+    private String downloadRemoteMd5(String md5Url) throws Exception {
+        HttpsURLConnection conn = openUpdateConnection(md5Url, 10000);
+        try {
+            int responseCode = conn.getResponseCode();
+            if (responseCode != 200) {
+                throw new IOException("获取版本 MD5 失败，HTTP " + responseCode);
+            }
+            try (InputStream input = conn.getInputStream();
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[256];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    if (output.size() + count > 1024) {
+                        throw new IOException("版本 MD5 文件内容过大");
+                    }
+                    output.write(buffer, 0, count);
+                }
+                return parseMd5(new String(output.toByteArray(), StandardCharsets.US_ASCII));
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private HttpsURLConnection openUpdateConnection(String targetUrl, int readTimeout)
+            throws Exception {
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, new TrustManager[]{new X509TrustManager() {
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+        }}, null);
+
+        HttpsURLConnection conn = (HttpsURLConnection) new URL(targetUrl).openConnection();
+        conn.setSSLSocketFactory(sslContext.getSocketFactory());
+        conn.setHostnameVerifier((hostname, session) -> true);
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(readTimeout);
+        conn.connect();
+        return conn;
+    }
+
+    static String parseMd5(String content) throws IOException {
+        String value = content == null ? "" : content.trim();
+        String hash = value.isEmpty() ? "" : value.split("\\s+", 2)[0];
+        if (!hash.matches("(?i)[0-9a-f]{32}")) {
+            throw new IOException("版本 MD5 文件格式无效");
+        }
+        return hash.toLowerCase(Locale.ROOT);
+    }
+
+    static String calculateMd5(Path path) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("MD5");
+        try (InputStream input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                digest.update(buffer, 0, count);
+            }
+        }
+        StringBuilder result = new StringBuilder(32);
+        for (byte value : digest.digest()) {
+            result.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+        }
+        return result.toString();
     }
 
     private Path getRunningJarPath() {

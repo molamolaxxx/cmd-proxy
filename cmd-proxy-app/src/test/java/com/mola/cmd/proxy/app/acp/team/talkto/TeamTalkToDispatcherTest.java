@@ -244,7 +244,7 @@ public class TeamTalkToDispatcherTest {
         assertNotNull(fixture.target.lastPrompt);
         assertTrue(fixture.target.lastPrompt.contains("hello"));
         assertTrue(fixture.target.lastPrompt.contains("target 精确设置为：member-1"));
-        assertTrue(fixture.target.lastPrompt.contains("_depth 设置为：1"));
+        assertFalse(fixture.target.lastPrompt.contains("_depth"));
         assertFalse(fixture.target.lastPrompt.contains("\"action\""));
         assertEquals(Arrays.asList(
                         TeamEventType.TALK_TO_SEND,
@@ -360,6 +360,34 @@ public class TeamTalkToDispatcherTest {
         assertEquals(0, fixture.dispatcher.inboxSize("member-2"));
         assertEquals(2, Collections.frequency(
                 types(fixture.events), TeamEventType.TALK_TO_RECEIVE));
+    }
+
+    @Test
+    public void senderOverflowRejectsOnlyCurrentMessageAndAllowsReverseReply() {
+        Fixture fixture = fixture();
+        fixture.target.setClientState(AbstractAcpClient.State.BUSY);
+        setMemberState(fixture.runtime, "member-2", TeamMemberState.BUSY);
+        PromptOptions options = PromptOptions.defaults();
+        com.mola.cmd.proxy.app.acp.talkto.model.TalkToTrace parent =
+                options.talkToParentFor("member-2");
+
+        for (int i = 0; i < 5; i++) {
+            assertTrue(fixture.dispatcher.deliver(new TalkToRequest(
+                    "member-2", "limited-" + i, 0).withParentTrace(parent),
+                    "member-1", "", null).contains("Team inbox"));
+        }
+        String rejected = fixture.dispatcher.deliver(new TalkToRequest(
+                "member-2", "limited-overflow", 0).withParentTrace(parent),
+                "member-1", "", null);
+        String reverse = fixture.dispatcher.deliver(new TalkToRequest(
+                "member-1", "reverse-reply", 0).withParentTrace(parent),
+                "member-2", "", null);
+
+        assertTrue(rejected.contains("SENDER_LIMIT"));
+        assertTrue(rejected.contains("current=5, limit=5"));
+        assertTrue(rejected.contains("通信链保持可用"));
+        assertTrue(reverse.contains("已成功"));
+        assertFalse(types(fixture.events).contains(TeamEventType.TALK_TO_CIRCUIT_OPENED));
     }
 
     @Test

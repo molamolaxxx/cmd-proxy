@@ -42,6 +42,7 @@ public final class StarweaveSessionManager {
     private final StarweaveUploadStore uploadStore;
     private final Map<String, StarweaveTurnTracker> turnTrackers = new ConcurrentHashMap<>();
     private final Map<String, Object> historyProjectionLocks = new ConcurrentHashMap<>();
+    private final Map<String, Object> openLocks = new ConcurrentHashMap<>();
 
     public StarweaveSessionManager(String instanceId, AcpClientRegistry registry,
                                    RobotResolver robotResolver,
@@ -79,29 +80,58 @@ public final class StarweaveSessionManager {
         AcpRobotParam robot = requireRobot(robotName);
         AcpClientIdentity identity = StarweaveIdentity.identity(instanceId, robot.getName());
         String groupId = identity.getLogicalId();
-        AcpClient existing = registry.getClient(groupId);
-        if (existing != null) {
-            if (!existing.getClientIdentity().isStarweave()) {
-                throw new IllegalStateException("groupId is occupied by a non-Starweave client");
+        synchronized (openLocks.computeIfAbsent(groupId, ignored -> new Object())) {
+            AcpClient existing = registry.getClient(groupId);
+            if (existing != null) {
+                if (!existing.getClientIdentity().isStarweave()) {
+                    throw new IllegalStateException("groupId is occupied by a non-Starweave client");
+                }
+                StarweaveSessionIndex.Entry entry = index.get(groupId);
+                if (entry == null || !entry.isActive()
+                        || !Objects.equals(entry.getCurrentSessionId(), existing.getSessionId())) {
+                    entry = index.activate(robot.getName(), groupId, existing.getSessionId());
+                }
+                return view(existing, entry);
             }
-            StarweaveSessionIndex.Entry entry = index.get(groupId);
-            if (entry == null || !entry.isActive()
-                    || !Objects.equals(entry.getCurrentSessionId(), existing.getSessionId())) {
-                entry = index.activate(robot.getName(), groupId, existing.getSessionId());
-            }
-            return view(existing, entry);
-        }
 
-        StarweaveSessionIndex.Entry previous = index.get(groupId);
-        boolean forceNew = previous == null || previous.isForceNewOnNextOpen()
-                || !previous.isActive();
-        AcpClient created = sessionService.create(identity, robot.getWorkDir(), robot,
-                forceNew, clientInitializer(groupId, robot));
-        StarweaveSessionIndex.Entry active = index.activate(
-                robot.getName(), groupId, created.getSessionId());
-        eventStore.append(groupId, created.getSessionId(), active.getGeneration(),
-                "SESSION_STATE_CHANGED", statePayload(created));
-        return view(created, active);
+            StarweaveSessionIndex.Entry previous = index.get(groupId);
+            boolean forceNew = previous == null || previous.isForceNewOnNextOpen()
+                    || !previous.isActive();
+            AcpClient created = sessionService.create(identity, robot.getWorkDir(), robot,
+                    forceNew, clientInitializer(groupId, robot));
+            StarweaveSessionIndex.Entry active = index.activate(
+                    robot.getName(), groupId, created.getSessionId());
+            eventStore.append(groupId, created.getSessionId(), active.getGeneration(),
+                    "SESSION_STATE_CHANGED", statePayload(created));
+            return view(created, active);
+        }
+    }
+
+    /**
+     * Restores an ACTIVE Starweave slot after its robot client was rebuilt.
+     * A rename retires the old logical slot and opens the renamed robot as a
+     * fresh slot; an ordinary refresh reloads the existing provider session.
+     */
+    public JSONObject reopenAfterRobotRefresh(String previousRobotName,
+                                              String robotName) throws Exception {
+        String previousName = requireText(previousRobotName, "previousRobotName");
+        String currentName = requireText(robotName, "robotName");
+        String previousGroupId = StarweaveIdentity.identity(
+                instanceId, previousName).getLogicalId();
+        StarweaveSessionIndex.Entry previous = index.get(previousGroupId);
+        if (previous == null || !previous.isActive()) return null;
+
+        if (!previousName.equals(currentName)) {
+            registry.closeByGroupId(previousGroupId);
+            turnTracker(previousGroupId).reset();
+            StarweaveSessionIndex.Entry deleted = index.markDeleted(previousGroupId);
+            JSONObject payload = new JSONObject(true);
+            payload.put("reason", "ROBOT_REFRESH_RENAME");
+            payload.put("robotName", currentName);
+            eventStore.append(previousGroupId, previous.getCurrentSessionId(),
+                    deleted.getGeneration(), "SESSION_DELETED", payload);
+        }
+        return open(currentName);
     }
 
     /**
@@ -270,6 +300,15 @@ public final class StarweaveSessionManager {
         }
         result.put("truncated", fileSize(path) > bytes.length);
         return result;
+    }
+
+    /** Reads a text link against the selected session's workspace. */
+    public com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult previewTextFile(
+            String requestId, String groupId, String sessionId, long generation,
+            String path, Integer maxBytes, String charset) {
+        AcpClient client = requireResourceClient(groupId, sessionId, generation);
+        return com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewReader.read(
+                requestId, client.getWorkspacePath(), path, maxBytes, charset);
     }
 
     public StarweaveResourcePayload downloadResource(

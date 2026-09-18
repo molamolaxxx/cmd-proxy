@@ -221,7 +221,14 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                 request.getParentTrace(), sender.getTeamMemberId(), targetMemberId);
         if (!circuit.isAccepted()) {
             recentMessages.remove(dedupKey, now);
-            return rejectCircuit(sender, target, rosterTarget, content, circuit);
+            if (circuit.isCircuitOpen()) {
+                return rejectCircuit(sender, target, rosterTarget, content, circuit);
+            }
+            return reject(sender, senderName, target, content, request.getDepth(),
+                    circuit.getReason(), "当前消息超过通信限额（current="
+                            + circuit.getCurrent() + ", limit=" + circuit.getLimit()
+                            + "），消息未投递，但通信链保持可用，cascadeId="
+                            + circuit.getTrace().getCascadeId());
         }
         String messageId = circuit.getTrace().getMessageId();
         int nextDepth = circuit.getTrace().getHopCount();

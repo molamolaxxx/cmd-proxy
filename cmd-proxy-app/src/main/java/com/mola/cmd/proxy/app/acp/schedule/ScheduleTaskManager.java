@@ -9,7 +9,6 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
@@ -67,6 +66,10 @@ public class ScheduleTaskManager {
 
     /** 相对时间表达式：+30s, +30m, +2h, +1d */
     private static final Pattern RELATIVE_TIME_PATTERN = Pattern.compile("^\\+(\\d+)([smhd])$");
+    private static final Pattern GROUP_DATE_TEMPLATE_PATTERN =
+            Pattern.compile("\\{([^{}]+)}");
+    private static final Pattern GROUP_DATE_FORMAT_PATTERN =
+            Pattern.compile("[yMdHms._-]+");
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type TASK_LIST_TYPE = new TypeToken<List<ScheduledTask>>() {}.getType();
@@ -74,6 +77,7 @@ public class ScheduleTaskManager {
             new TypeToken<Map<String, String>>() {}.getType();
 
     private final Path schedulesBaseDir;
+    private final ScheduleExecutionJournal executionJournal;
 
     private final CronParser cronParser = new CronParser(
             CronDefinitionBuilder.instanceDefinitionFor(CronType.UNIX));
@@ -91,6 +95,8 @@ public class ScheduleTaskManager {
     /** persistencePath -> 显式 owner 身份 */
     private final Map<String, ScheduleOwnerKey> ownerKeys = new ConcurrentHashMap<>();
     private final Set<String> blockedTeamIds = ConcurrentHashMap.newKeySet();
+    private final Map<String, DeferredScheduleState> deferredSchedules =
+            new ConcurrentHashMap<>();
 
     /** 任务触发回调 */
     private ScheduleExecutionCallback executionCallback;
@@ -107,6 +113,7 @@ public class ScheduleTaskManager {
      */
     public ScheduleTaskManager(Path schedulesBaseDir) {
         this.schedulesBaseDir = schedulesBaseDir.toAbsolutePath().normalize();
+        this.executionJournal = new ScheduleExecutionJournal(this.schedulesBaseDir);
     }
 
     // ==================== 生命周期 ====================
@@ -187,7 +194,9 @@ public class ScheduleTaskManager {
         task.setOwner(owner);
         task.setTitle(title);
         task.setPrompt(prompt);
-        task.setGroupName(normalizeGroupName(groupName));
+        String normalizedGroupName = normalizeGroupName(groupName);
+        validateGroupNameTemplate(normalizedGroupName);
+        task.setGroupName(normalizedGroupName);
         task.setSchedule(config);
         task.setStatus(ScheduledTask.STATUS_WAITING);
         task.setCreatedAt(System.currentTimeMillis());
@@ -246,6 +255,7 @@ public class ScheduleTaskManager {
             }
         }
         if (removed != null) {
+            deferredSchedules.remove(deferredKey(robotName, taskId));
             persistTasks(robotName);
             logger.info("定时任务已取消, robot={}, id={}, title={}",
                     robotName, taskId, removed.getTitle());
@@ -293,6 +303,7 @@ public class ScheduleTaskManager {
                 target.setNextRunAt(calculateNextRunAt(newSchedule));
             }
         }
+        deferredSchedules.remove(deferredKey(robotName, taskId));
         persistTasks(robotName);
         logger.info("定时任务已更新, robot={}, id={}", robotName, taskId);
         return target;
@@ -378,9 +389,16 @@ public class ScheduleTaskManager {
     private void triggerExecution(String robotName, ScheduledTask task) {
         logger.info("触发定时任务执行, robot={}, id={}, title={}", robotName, task.getId(), task.getTitle());
 
+        ScheduleOwnerKey owner = ownerFor(robotName);
+        long scheduledAt = task.getNextRunAt();
+        String executionId = beginExecutionRecord(
+                owner, task, nextExecutionAttempt(robotName, task.getId()));
+
         if (executionCallback == null && scopedExecutionCallback == null) {
             logger.error("executionCallback 未设置，无法执行定时任务");
             onTaskCompleted(robotName, task.getId(), false);
+            finishExecutionRecord(executionId, "FAILED",
+                    "CALLBACK_NOT_CONFIGURED", "execution callback is not configured");
             return;
         }
 
@@ -395,27 +413,46 @@ public class ScheduleTaskManager {
                             + "如需调用 talk_to，target 必须精确设置为“回复”。"
                             + "不要查询历史记录、猜测 userid 或改用默认信道目标。";
                 }
-                ScheduleOwnerKey owner = ownerFor(robotName);
+                String effectiveGroupName = resolveGroupName(
+                        task.getGroupName(), scheduledAt, ZoneId.systemDefault());
                 boolean triggered = scopedExecutionCallback != null
                         ? scopedExecutionCallback.execute(owner, task.getId(),
-                                task.getGroupName(), prompt, task.getAuthPrincipalContext(),
+                                effectiveGroupName, prompt, task.getAuthPrincipalContext(),
                                 task.getChannelDeliveryContext())
                         : executionCallback.execute(robotName, task.getId(), prompt);
                 if (!triggered) {
-                    // client 忙碌，回退状态，下一轮重试
-                    logger.info("定时任务未执行（client 忙碌），等待下一轮, robot={}, id={}",
+                    // 目标未通过执行门禁，回退状态，下一轮重试。具体原因由执行端记录。
+                    logger.info("定时任务未执行（目标暂不可执行），等待下一轮, robot={}, id={}",
                             robotName, task.getId());
+                    recordDeferred(robotName, task);
                     synchronized (tasksByRobot.get(robotName)) {
                         task.setStatus(ScheduledTask.STATUS_WAITING);
                     }
                     runningByRobot.put(robotName, false);
                     persistTasks(robotName);
+                    finishExecutionRecord(executionId, "DEFERRED",
+                            "TARGET_NOT_EXECUTABLE",
+                            "execution admission returned false; retry scheduled");
                     return;
                 }
+                DeferredScheduleState deferred = deferredSchedules.remove(
+                        deferredKey(robotName, task.getId()));
+                if (deferred != null) {
+                    logger.info("定时任务延迟恢复执行, robot={}, id={}, scheduledAt={},"
+                                    + " delayMillis={}, deferredMillis={}, deferredAttempts={}",
+                            robotName, task.getId(), formatTime(task.getNextRunAt()),
+                            System.currentTimeMillis() - task.getNextRunAt(),
+                            System.currentTimeMillis() - deferred.firstDeferredAt,
+                            deferred.attempts);
+                }
                 onTaskCompleted(robotName, task.getId(), true);
+                finishExecutionRecord(executionId, "SUCCESS",
+                        "EXECUTION_ACCEPTED", null);
             } catch (Exception e) {
                 logger.error("定时任务执行异常, robot={}, id={}", robotName, task.getId(), e);
                 onTaskCompleted(robotName, task.getId(), false);
+                finishExecutionRecord(executionId, "FAILED",
+                        "EXECUTION_EXCEPTION", e.getClass().getName() + ": " + e.getMessage());
             }
         }, "schedule-exec-" + robotName);
         execThread.setDaemon(true);
@@ -429,6 +466,7 @@ public class ScheduleTaskManager {
      */
     public void onTaskCompleted(String robotName, String taskId, boolean success) {
         runningByRobot.put(robotName, false);
+        deferredSchedules.remove(deferredKey(robotName, taskId));
 
         List<ScheduledTask> tasks = tasksByRobot.get(robotName);
         if (tasks == null) return;
@@ -461,6 +499,70 @@ public class ScheduleTaskManager {
             }
         }
         persistTasks(robotName);
+    }
+
+    private void recordDeferred(String robotName, ScheduledTask task) {
+        String key = deferredKey(robotName, task.getId());
+        DeferredScheduleState state = deferredSchedules.computeIfAbsent(
+                key, ignored -> new DeferredScheduleState(System.currentTimeMillis()));
+        int attempts;
+        synchronized (state) {
+            state.attempts++;
+            attempts = state.attempts;
+        }
+        if (attempts == 5 || attempts % 30 == 0) {
+            logger.warn("定时任务持续延迟, robot={}, id={}, scheduledAt={},"
+                            + " delayMillis={}, deferredAttempts={}",
+                    robotName, task.getId(), formatTime(task.getNextRunAt()),
+                    System.currentTimeMillis() - task.getNextRunAt(), attempts);
+        }
+    }
+
+    private int nextExecutionAttempt(String robotName, String taskId) {
+        DeferredScheduleState state = deferredSchedules.get(
+                deferredKey(robotName, taskId));
+        if (state == null) return 1;
+        synchronized (state) {
+            return state.attempts + 1;
+        }
+    }
+
+    private String beginExecutionRecord(ScheduleOwnerKey owner,
+                                        ScheduledTask task, int attempt) {
+        try {
+            return executionJournal.begin(
+                    owner, task, attempt, System.currentTimeMillis());
+        } catch (Exception error) {
+            logger.error("定时任务执行记录写入失败, phase=begin, owner={}, taskId={}",
+                    owner, task.getId(), error);
+            return null;
+        }
+    }
+
+    private void finishExecutionRecord(String executionId, String status,
+                                       String resultCode, String detail) {
+        if (executionId == null) return;
+        try {
+            executionJournal.finish(executionId, status, resultCode,
+                    detail, System.currentTimeMillis());
+        } catch (Exception error) {
+            logger.error("定时任务执行记录写入失败, phase=finish, executionId={},"
+                            + " status={}, resultCode={}",
+                    executionId, status, resultCode, error);
+        }
+    }
+
+    private static String deferredKey(String robotName, String taskId) {
+        return robotName + "\n" + taskId;
+    }
+
+    private static final class DeferredScheduleState {
+        private final long firstDeferredAt;
+        private int attempts;
+
+        private DeferredScheduleState(long firstDeferredAt) {
+            this.firstDeferredAt = firstDeferredAt;
+        }
     }
 
     // ==================== 持久化 ====================
@@ -503,7 +605,7 @@ public class ScheduleTaskManager {
                     new String(Files.readAllBytes(file), StandardCharsets.UTF_8),
                     GROUP_SESSION_MAP_TYPE);
             if (sessions == null || sessions.isEmpty()) return;
-            String storageId = registerOwner(owner);
+            String storageId = registerLoadedOwner(owner);
             Map<String, String> normalized = new ConcurrentHashMap<>();
             for (Map.Entry<String, String> entry : sessions.entrySet()) {
                 String groupName = normalizeGroupName(entry.getKey());
@@ -585,18 +687,40 @@ public class ScheduleTaskManager {
             if (tasks == null || tasks.isEmpty()) {
                 return;
             }
-            ScheduleOwnerKey owner = directoryOwner;
+            ScheduleOwnerKey loadedOwner = directoryOwner;
             for (ScheduledTask task : tasks) {
-                if (task.getOwner() == null) {
-                    task.setOwner(directoryOwner);
-                } else {
-                    owner = task.getOwner();
+                ScheduleOwnerKey taskOwner = task.getOwner();
+                if (taskOwner != null
+                        && persistencePath.equals(taskOwner.getPersistencePath())) {
+                    if (loadedOwner == directoryOwner) {
+                        loadedOwner = taskOwner;
+                    } else if (!sameOwnerIdentity(loadedOwner, taskOwner)) {
+                        logger.warn("同一 tasks.json 包含不一致的 owner，统一使用首个身份,"
+                                        + " file={}, selectedOwner={}, ignoredOwner={}",
+                                tasksFile, loadedOwner, taskOwner);
+                    }
                 }
             }
-            String storageId = registerOwner(owner);
-            tasksByRobot.put(storageId, new ArrayList<>(tasks));
+            String storageId = registerLoadedOwner(loadedOwner);
+            List<ScheduledTask> loadedTasks = new ArrayList<>(tasks);
+            tasksByRobot.put(storageId, loadedTasks);
+            ScheduleOwnerKey canonicalOwner = ownerFor(storageId);
+            boolean corrected = false;
+            synchronized (loadedTasks) {
+                for (ScheduledTask task : loadedTasks) {
+                    if (!sameOwnerIdentity(task.getOwner(), canonicalOwner)) {
+                        corrected = true;
+                    }
+                    task.setOwner(canonicalOwner);
+                }
+            }
+            if (corrected) {
+                persistTasks(storageId);
+                logger.info("schedule task owner 已按当前身份迁移, storageId={}, ownerId={}",
+                        storageId, canonicalOwner.getOwnerId());
+            }
             logger.info("加载 schedule owner '{}' 的定时任务, 数量={}",
-                    storageId, tasks.size());
+                    storageId, loadedTasks.size());
         } catch (Exception e) {
             logger.error("读取 tasks.json 失败, file={}", tasksFile, e);
         }
@@ -611,6 +735,8 @@ public class ScheduleTaskManager {
         tasksByRobot.remove(storageId);
         groupSessionsByOwner.remove(storageId);
         runningByRobot.remove(storageId);
+        String deferredPrefix = storageId + "\n";
+        deferredSchedules.keySet().removeIf(key -> key.startsWith(deferredPrefix));
         ownerKeys.remove(storageId);
         Path base = schedulesBaseDir;
         Path dir = base.resolve(owner.getPersistencePath()).normalize();
@@ -745,8 +871,45 @@ public class ScheduleTaskManager {
             throw new IllegalArgumentException("schedule owner must not be null");
         }
         String storageId = owner.getPersistencePath();
-        ownerKeys.put(storageId, owner);
+        ScheduleOwnerKey previous = ownerKeys.put(storageId, owner);
+        if (previous != null && !sameOwnerIdentity(previous, owner)) {
+            List<ScheduledTask> tasks = tasksByRobot.get(storageId);
+            if (tasks != null) {
+                synchronized (tasks) {
+                    for (ScheduledTask task : tasks) {
+                        task.setOwner(owner);
+                    }
+                }
+                persistTasks(storageId);
+            }
+            logger.info("schedule owner 已用运行态身份修正, storageId={},"
+                            + " previousOwnerId={}, ownerId={}",
+                    storageId, previous.getOwnerId(), owner.getOwnerId());
+        }
         return storageId;
+    }
+
+    /** Persistence-derived owners are fallback identities and must not replace live clients. */
+    private String registerLoadedOwner(ScheduleOwnerKey owner) {
+        if (owner == null) {
+            throw new IllegalArgumentException("schedule owner must not be null");
+        }
+        String storageId = owner.getPersistencePath();
+        ownerKeys.putIfAbsent(storageId, owner);
+        return storageId;
+    }
+
+    private static boolean sameOwnerIdentity(ScheduleOwnerKey left,
+                                             ScheduleOwnerKey right) {
+        return left != null && right != null
+                && java.util.Objects.equals(left.getOwnerId(), right.getOwnerId())
+                && java.util.Objects.equals(left.getSurface(), right.getSurface())
+                && java.util.Objects.equals(left.getLogicalId(), right.getLogicalId())
+                && java.util.Objects.equals(left.getRobotName(), right.getRobotName())
+                && java.util.Objects.equals(left.getTeamId(), right.getTeamId())
+                && java.util.Objects.equals(left.getTeamMemberId(), right.getTeamMemberId())
+                && java.util.Objects.equals(
+                        left.getPersistencePath(), right.getPersistencePath());
     }
 
     private ScheduleOwnerKey ownerFor(String storageId) {
@@ -767,6 +930,50 @@ public class ScheduleTaskManager {
             throw new IllegalArgumentException("groupName length must be <= 100");
         }
         return normalized;
+    }
+
+    private static void validateGroupNameTemplate(String groupName) {
+        if (groupName == null) return;
+        resolveGroupName(groupName, 0L, ZoneId.systemDefault());
+    }
+
+    static String resolveGroupName(String groupName, long scheduledAt,
+                                   ZoneId zoneId) {
+        String normalized = normalizeGroupName(groupName);
+        if (normalized == null) return null;
+        if (zoneId == null) throw new IllegalArgumentException("zoneId must not be null");
+
+        Matcher matcher = GROUP_DATE_TEMPLATE_PATTERN.matcher(normalized);
+        StringBuffer resolved = new StringBuffer();
+        int lastEnd = 0;
+        while (matcher.find()) {
+            String between = normalized.substring(lastEnd, matcher.start());
+            if (between.indexOf('{') >= 0 || between.indexOf('}') >= 0) {
+                throw new IllegalArgumentException("groupName contains malformed date template");
+            }
+            String pattern = matcher.group(1);
+            if (!GROUP_DATE_FORMAT_PATTERN.matcher(pattern).matches()
+                    || !pattern.matches(".*[yMdHms].*")) {
+                throw new IllegalArgumentException(
+                        "groupName date template contains unsupported pattern: " + pattern);
+            }
+            String value;
+            try {
+                value = Instant.ofEpochMilli(scheduledAt).atZone(zoneId)
+                        .format(DateTimeFormatter.ofPattern(pattern));
+            } catch (IllegalArgumentException error) {
+                throw new IllegalArgumentException(
+                        "groupName date template is invalid: " + pattern, error);
+            }
+            matcher.appendReplacement(resolved, Matcher.quoteReplacement(value));
+            lastEnd = matcher.end();
+        }
+        String tail = normalized.substring(lastEnd);
+        if (tail.indexOf('{') >= 0 || tail.indexOf('}') >= 0) {
+            throw new IllegalArgumentException("groupName contains malformed date template");
+        }
+        matcher.appendTail(resolved);
+        return normalizeGroupName(resolved.toString());
     }
 
     /**
@@ -953,70 +1160,21 @@ public class ScheduleTaskManager {
                         ChannelDeliveryContext channelDeliveryContext);
     }
 
-    // ==================== JSON 指令处理（供 AcpClient 调用） ====================
+    // ==================== MCP 工具处理 ====================
 
-    /**
-     * 从 Agent 完整回复中检测并处理定时任务指令。
-     * <p>
-     * 合并了 JSON 提取和指令执行：先从 fullResponse 中检测 schedule_task / manage_schedule
-     * 关键词并提取完整 JSON，再路由到对应操作。
-     *
-     * @param fullResponse Agent 的完整回复文本
-     * @param robotName    当前 robot 名称
-     * @return 操作结果文本（供注入回 Agent），未检测到指令时返回 null
-     */
-    public String detectAndHandle(String fullResponse, String robotName) {
-        return detectAndHandle(fullResponse, ScheduleOwnerKey.main(robotName));
-    }
-
-    public String detectAndHandle(String fullResponse, ScheduleOwnerKey owner) {
-        return detectAndHandle(fullResponse, owner, null);
-    }
-
-    public String detectAndHandle(String fullResponse, ScheduleOwnerKey owner,
-                                  AuthPrincipalContext authPrincipalContext) {
-        String actionJson = extractActionJson(fullResponse);
-        if (actionJson == null) return null;
-        return handleAction(actionJson, owner, authPrincipalContext);
-    }
-
-    /**
-     * 处理 Agent 输出的定时任务 JSON 指令。
-     * <p>
-     * 解析 action 字段，路由到对应的操作（create/list/cancel/update），
-     * 返回格式化的结果文本供注入回 Agent。
-     *
-     * @param actionJson 完整的 JSON 字符串
-     * @param robotName  当前 robot 名称
-     * @return 操作结果文本，action 不匹配时返回 null
-     */
-    public String handleAction(String actionJson, String robotName) {
-        return handleAction(actionJson, ScheduleOwnerKey.main(robotName));
-    }
-
-    public String handleAction(String actionJson, ScheduleOwnerKey owner) {
-        return handleAction(actionJson, owner, null);
-    }
-
-    public String handleAction(String actionJson, ScheduleOwnerKey owner,
-                               AuthPrincipalContext authPrincipalContext) {
-        return handleAction(actionJson, owner, authPrincipalContext, null);
-    }
-
-    public String handleAction(String actionJson, ScheduleOwnerKey owner,
-                               AuthPrincipalContext authPrincipalContext,
-                               ChannelDeliveryContext channelDeliveryContext) {
-        JsonObject json = JsonParser.parseString(actionJson).getAsJsonObject();
-        String action = json.get("action").getAsString();
-
-        switch (action) {
+    public String executeTool(String toolName, JsonObject arguments,
+                              ScheduleOwnerKey owner,
+                              AuthPrincipalContext authPrincipalContext,
+                              ChannelDeliveryContext channelDeliveryContext) {
+        switch (toolName) {
             case "schedule_task":
-                return handleCreate(json, owner, authPrincipalContext,
+                return handleCreate(arguments, owner, authPrincipalContext,
                         channelDeliveryContext);
             case "manage_schedule":
-                return handleManage(json, owner);
+                return handleManage(arguments, owner);
             default:
-                return null;
+                throw new IllegalArgumentException("Unsupported schedule MCP tool: "
+                        + toolName);
         }
     }
 
@@ -1085,50 +1243,4 @@ public class ScheduleTaskManager {
         }
     }
 
-    // ==================== JSON 提取 ====================
-
-    /**
-     * 从 Agent 完整回复中提取 schedule_task 或 manage_schedule JSON。
-     *
-     * @return 第一个匹配的完整 JSON 字符串，不存在则返回 null
-     */
-    private String extractActionJson(String fullResponse) {
-        int scheduleIdx = fullResponse.indexOf("schedule_task");
-        int manageIdx = fullResponse.indexOf("manage_schedule");
-
-        int targetIdx = -1;
-        if (scheduleIdx >= 0 && manageIdx >= 0) {
-            targetIdx = Math.min(scheduleIdx, manageIdx);
-        } else if (scheduleIdx >= 0) {
-            targetIdx = scheduleIdx;
-        } else if (manageIdx >= 0) {
-            targetIdx = manageIdx;
-        }
-
-        if (targetIdx < 0) return null;
-
-        int braceStart = fullResponse.lastIndexOf('{', targetIdx);
-        if (braceStart < 0) return null;
-
-        int braces = 0;
-        boolean inString = false;
-        boolean escaped = false;
-
-        for (int i = braceStart; i < fullResponse.length(); i++) {
-            char c = fullResponse.charAt(i);
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\' && inString) { escaped = true; continue; }
-            if (c == '"') { inString = !inString; continue; }
-            if (inString) continue;
-
-            if (c == '{') braces++;
-            else if (c == '}') {
-                braces--;
-                if (braces == 0) {
-                    return fullResponse.substring(braceStart, i + 1);
-                }
-            }
-        }
-        return null;
-    }
 }

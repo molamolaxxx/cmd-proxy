@@ -1,6 +1,5 @@
 package com.mola.cmd.proxy.app.acp.subagent;
 
-import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.MemoryManagerBridge;
 import com.mola.cmd.proxy.app.acp.acpclient.listener.AcpResponseListener;
@@ -13,25 +12,15 @@ import org.slf4j.LoggerFactory;
 import java.io.Closeable;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * 子 Agent 派发器，负责：
- * <ol>
- *   <li>从主 Agent LLM 输出中检测 dispatch_subagent 指令</li>
- *   <li>并行创建 SubAgentAcpClient 执行子任务</li>
- *   <li>聚合结果，格式化为主 Agent 可理解的上下文</li>
- * </ol>
+ * 并行创建 SubAgentAcpClient 执行子任务，并聚合为主 Agent 可理解的结果。
  */
 public class SubAgentDispatcher implements Closeable {
 
     private static final Logger logger = LoggerFactory.getLogger(SubAgentDispatcher.class);
-
-    private static final Pattern DISPATCH_PATTERN = Pattern.compile(
-            "\\{\\s*\"action\"\\s*:\\s*\"dispatch_subagent\".*?\"tasks\"\\s*:\\s*\\[.*?]\\s*}",
-            Pattern.DOTALL);
 
     private final Map<String, AcpRobotParam> robotRegistry;
     private final Set<String> allowedAgentNames;
@@ -72,41 +61,6 @@ public class SubAgentDispatcher implements Closeable {
      */
     public void setMemoryManagers(Map<String, MemoryManagerBridge> memoryManagers) {
         this.memoryManagers = memoryManagers != null ? memoryManagers : Collections.emptyMap();
-    }
-
-    // ==================== 指令检测 ====================
-
-    /**
-     * 检测 LLM 输出中是否包含 dispatch_subagent 指令。
-     *
-     * @param fullResponse 主 Agent 当前累积的完整输出
-     * @return 解析出的任务列表，未检测到时返回 null
-     */
-    public List<SubAgentTask> detectDispatch(String fullResponse) {
-        Matcher matcher = DISPATCH_PATTERN.matcher(fullResponse);
-        if (!matcher.find()) return null;
-
-        try {
-            String json = matcher.group();
-            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
-            JsonArray tasksArray = obj.getAsJsonArray("tasks");
-            if (tasksArray == null || tasksArray.size() == 0) return null;
-
-            List<SubAgentTask> tasks = new ArrayList<>();
-            for (JsonElement elem : tasksArray) {
-                JsonObject taskObj = elem.getAsJsonObject();
-                String agent = taskObj.has("agent") ? taskObj.get("agent").getAsString() : null;
-                String title = taskObj.has("title") ? taskObj.get("title").getAsString() : null;
-                String prompt = taskObj.has("prompt") ? taskObj.get("prompt").getAsString() : null;
-                if (agent != null && prompt != null && !agent.isEmpty() && !prompt.isEmpty()) {
-                    tasks.add(new SubAgentTask(agent, title, prompt));
-                }
-            }
-            return tasks.isEmpty() ? null : tasks;
-        } catch (Exception e) {
-            logger.warn("dispatch_subagent JSON 解析失败: {}", e.getMessage());
-            return null;
-        }
     }
 
     // ==================== 并行派发 ====================
@@ -298,7 +252,7 @@ public class SubAgentDispatcher implements Closeable {
         }
 
         // 注入当前时间和工作路径
-        sb.append(String.format("[Current Time: %s]\n[Workspace: %s]\n",
+        sb.append(String.format("[Current Time: %s]\n<workspace>%s</workspace>\n",
                 java.time.ZonedDateTime.now().format(
                         java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")),
                 workDir));

@@ -113,7 +113,7 @@ final class AgentResourceBrowser {
         return result;
     }
 
-    private List<ResourceRoot> roots(AcpRobotParam robot, String kind) {
+    List<ResourceRoot> roots(AcpRobotParam robot, String kind) {
         if (robot == null) throw new IllegalArgumentException("agent not found");
         String workspace = robot.getWorkDir();
         if (workspace == null || workspace.trim().isEmpty()) {
@@ -330,10 +330,10 @@ final class AgentResourceBrowser {
         return value == null || value.trim().isEmpty();
     }
 
-    private static final class ResourceRoot {
-        private final Path path;
+    static final class ResourceRoot {
+        final Path path;
         private final String label;
-        private final boolean file;
+        final boolean file;
 
         private ResourceRoot(Path path, String label, boolean file) {
             this.path = path;

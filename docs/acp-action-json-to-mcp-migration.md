@@ -7,7 +7,7 @@
 - 子 Agent、定时任务、TalkTo 的业务语义不变。
 - MolaChat/Fast Team 现有 Action 专属卡片的样式、顺序和完成边界不变。
 - 主 Agent、Team Member、SubAgent、信道、定时任务的 principal 和路由上下文继续正确传播。
-- 旧 ACP Session 在迁移期间仍可通过 Action JSON 兼容层工作。
+- 旧 Action JSON 兼容层在 MCP 全量上线后删除。
 
 ## 设计约束
 
@@ -62,7 +62,7 @@ ActionToolService
 - [x] 通过 AcpClient active-turn 引用承载 Robot、workspace、principal、channel turn、schedule owner 和 listener。
 - [x] 实现 `ActionRuntimeRegistry`，安全管理 `authSessionId -> active turn context`。
 - [x] MCP Server 仅根据 Header 中的 `authSessionId` 执行，缺失、过期或非 active turn 时拒绝。
-- [x] 旧 Action JSON handler 改为调用同一 `ActionToolService`，避免双份业务逻辑。
+- [x] MCP 工具通过统一 `ActionToolService` 执行业务逻辑。
 
 ### 3. Provider 和会话注入
 
@@ -70,13 +70,13 @@ ActionToolService
 - [x] 为每个具备 Action 能力的 AcpClient（含 Team）注入独立 `authSessionId` Header；不向没有 Action Harness 的分析/临时子 Client 暴露无效工具。
 - [x] `session/new` 和 `session/load` 使用同一注入逻辑。
 - [x] 主会话、恢复会话、自动轮转、Robot 刷新和 Team 会话均在 `client.start()` 前完成能力装配，保证首次 MCP `tools/list` 可见正确工具。
-- [x] 内置 Server 名固定为保留名 `cmd-proxy-runtime`；用户配置同名 Server 时明确报错，不静默覆盖。
+- [x] 内置 Server 名固定为保留名 `acp-harness-runtime`；用户配置同名 Server 时明确报错，不静默覆盖。
 - [ ] 明确 Kiro、OpenCode、Claude Agent ACP、Codex ACP 的集成验证结果。
 - [x] 配置变化通过 Robot 刷新和 Session 恢复生效，不宣称运行中热插拔。
 
 ### 4. 全部运行时提示词迁移
 
-- [x] `AcpClient` 全局 Harness：从“输出 Action JSON”改为“调用 cmd-proxy MCP 工具”。
+- [x] `AcpClient` 全局 Harness：从“输出 Action JSON”改为“调用 ACP harness MCP 工具”。
 - [x] `SubAgentContextInjector`：仅保留可用 Agent、工作目录和并行语义。
 - [x] `ScheduleContextInjector`：仅保留 schedule 参数语义、cron/once 规则和 owner 语义。
 - [x] `TalkToContextInjector`：保留异步投递、通讯录和禁止脚本轮询约束。
@@ -93,12 +93,12 @@ ActionToolService
 - [x] 外部 MCP 工具仍使用现有通用 tool card。
 - [ ] 保持卡片后文本、连续卡片、Fast Team 和普通 ACP 的渲染一致。
 
-### 6. Action JSON 兼容和删除路径
+### 6. Action JSON 兼容层删除
 
-- [x] 迁移期保留 `DispatchBufferFilter` 和 JSON parser，但新提示词不再引导使用。
-- [x] 兼容路径和 MCP 路径共用业务执行层和卡片事件。
-- [x] 记录兼容路径累计命中次数，作为后续删除依据。
-- [ ] 四个 Provider 完成真实验证后，再删除 Action Loop 和文本拦截。
+- [x] 删除 `DispatchBufferFilter`、Action Loop、文本拦截和提前取消 round 的逻辑。
+- [x] 删除子 Agent、定时任务和 TalkTo 的 LLM 文本 JSON 检测与解析器。
+- [x] 定时任务 MCP 直接接收工具名和参数对象，不再构造带 `action` 字段的兼容 JSON。
+- [x] 删除运行时提示词中的 Action JSON 文案和兼容命中计数。
 
 ### 7. 测试和验收
 
@@ -127,7 +127,7 @@ ActionToolService
 - 全量测试结果：295 个测试通过，0 失败、0 错误。
 - 打包结果：Reactor 三个模块全部成功，已生成普通 JAR 和依赖聚合 JAR。
 - 待真实环境验收：Kiro、OpenCode、Claude Agent ACP、Codex ACP 各跑一次 MCP 调用，并在 MolaChat/Fast Team 核对专属卡片、卡片后文本和连续卡片。
-- 旧 Action JSON 只作为迁移兼容入口保留；新提示词不再引导生成 Action JSON。
+- 旧 Action JSON 入口已删除；四项能力仅接受 MCP 工具调用。
 
 ## 建议执行顺序
 
@@ -137,7 +137,7 @@ ActionToolService
 4. 四个 MCP 工具接入现有业务组件。
 5. 全部运行时提示词迁移。
 6. 专属卡片保留和通用卡片去重。
-7. 旧 Action JSON 兼容层收口。
+7. 删除旧 Action JSON 兼容层。
 8. 四 Provider 真实验证和 MolaChat 卡片验收。
 
 ## 完成标准
@@ -146,5 +146,5 @@ ActionToolService
 - 四个工具的执行结果直接作为 MCP tool result 返回 Agent。
 - 专属 Action 卡片与迁移前一致，不出现重复的通用 MCP 卡片。
 - principal、Team、信道、schedule owner 和 SubAgent 身份不丢失、不串话。
-- 旧 Session 在兼容期内仍可完成 Action JSON 调用，新 Session 不产生 Action JSON。
+- 新旧 Session 均仅通过 MCP 调用四项工具，不再识别 Assistant 文本中的 Action JSON。
 - 聚焦测试、模块全量测试、打包和真实卡片验收通过。

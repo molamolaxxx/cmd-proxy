@@ -62,6 +62,13 @@ public final class StarweaveSessionApiBridge {
         return requireManager().previewResource(groupId, sessionId, generation, resourceId);
     }
 
+    public static com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult previewTextFile(
+            String requestId, String groupId, String sessionId, long generation,
+            String path, Integer maxBytes, String charset) {
+        return requireManager().previewTextFile(requestId, groupId, sessionId, generation,
+                path, maxBytes, charset);
+    }
+
     public static StarweaveResourcePayload downloadResource(
             String groupId, String sessionId, long generation, String resourceId) {
         return requireManager().downloadResource(groupId, sessionId, generation, resourceId);

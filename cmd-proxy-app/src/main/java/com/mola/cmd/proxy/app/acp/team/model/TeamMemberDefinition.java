@@ -85,6 +85,12 @@ public final class TeamMemberDefinition {
                 remark, newConfigFingerprint, state, sessionId, lastError);
     }
 
+    public TeamMemberDefinition withRemark(String newRemark) {
+        return new TeamMemberDefinition(teamMemberId, robotId, acpClientId, robotGroup,
+                sourceRobotId, sourceGroupId, sourceRobotName, displayName, avatar, order,
+                newRemark, configFingerprint, state, sessionId, lastError);
+    }
+
     public String getTeamMemberId() {
         return teamMemberId;
     }

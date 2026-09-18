@@ -90,7 +90,6 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
         }
         sb.append("除下方明确列出的外部信道 target 外，禁止使用来源 robotName、displayName、");
         sb.append("acpClientId、chatterId:robotName 或未列出的名称路由。\n");
-        sb.append("消息为异步投递：目标忙碌时进入该成员的 Team 专属 inbox。\n\n");
         sb.append("同一发送者的兼容队列消息可能合并为一个批量 turn；")
                 .append("请统一处理，不要逐条发送确认。\n\n");
         appendRuntimeConstraints(sb);
@@ -117,7 +116,6 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
         sb.append("\n发送消息时直接调用 talk_to MCP 工具，并使用上方列出的准确 target。\n");
         sb.append("\nTeam talk_to 限制不适用于 dispatch_subagent、schedule、memory 或其他 ACP 能力；");
         sb.append("这些能力仍按正常模式工作。\n");
-        sb.append("不要在回复正文中模拟工具调用或输出 Action JSON。\n");
         sb.append("</agent-team>\n");
         return sb.toString();
     }

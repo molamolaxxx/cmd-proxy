@@ -51,6 +51,40 @@ public class AgentResourceBrowserTest {
     }
 
     @Test
+    public void listsWorkspaceSharedMcpForEveryAgentType() throws Exception {
+        Path workspace = temporaryFolder.newFolder("all-provider-mcp").toPath();
+        Path config = workspace.resolve(".cmd-proxy/mcp.json");
+        Files.createDirectories(config.getParent());
+        Files.write(config, "{\"mcpServers\":{}}".getBytes(StandardCharsets.UTF_8));
+        String[] providers = {"KIRO_CLI", "OPENCODE", "CLAUDE_AGENT_ACP",
+                "CODEX_ACP", "DEEPSEEK_HARNESS_ACP"};
+
+        AgentResourceBrowser browser = new AgentResourceBrowser();
+        for (String provider : providers) {
+            JSONObject node = findFile(browser.tree(robot(provider, workspace, provider),
+                    AgentResourceBrowser.MCP).getJSONArray("nodes"), "mcp.json");
+            assertNotNull(provider + " must expose .cmd-proxy/mcp.json", node);
+        }
+    }
+
+    @Test
+    public void listsSharedAgentSkillsForCodexOpenCodeAndDeepSeekHarness()
+            throws Exception {
+        Path workspace = temporaryFolder.newFolder("shared-agent-skills").toPath();
+        Path skill = workspace.resolve(".agents/skills/shared/SKILL.md");
+        Files.createDirectories(skill.getParent());
+        Files.write(skill, "# Shared".getBytes(StandardCharsets.UTF_8));
+        String[] providers = {"CODEX_ACP", "OPENCODE", "DEEPSEEK_HARNESS_ACP"};
+
+        AgentResourceBrowser browser = new AgentResourceBrowser();
+        for (String provider : providers) {
+            JSONObject node = findFile(browser.tree(robot(provider, workspace, provider),
+                    AgentResourceBrowser.SKILL).getJSONArray("nodes"), "SKILL.md");
+            assertNotNull(provider + " must expose .agents/skills", node);
+        }
+    }
+
+    @Test
     public void rendersSkillMarkdownAndTranslatesStructuredMemoryFiles() throws Exception {
         Path workspace = temporaryFolder.newFolder("resource-workspace").toPath();
         Path skill = workspace.resolve(".agents/skills/demo/SKILL.md");

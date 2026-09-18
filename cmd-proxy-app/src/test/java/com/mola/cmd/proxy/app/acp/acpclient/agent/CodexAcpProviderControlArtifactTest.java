@@ -2,7 +2,10 @@ package com.mola.cmd.proxy.app.acp.acpclient.agent;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import org.junit.Test;
+
+import java.util.Map;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -19,6 +22,17 @@ public class CodexAcpProviderControlArtifactTest {
         assertArrayEquals(new String[0], provider.getArgs());
         assertTrue(provider.hasFallbackCommand());
         assertEquals("codex-acp", provider.getFallbackCommand());
+    }
+
+    @Test
+    public void forcesFullAccessAsTheInitialCodexAcpMode() {
+        CodexAcpProvider provider = new CodexAcpProvider();
+
+        Map<String, String> configuredEnv = provider.getExtraEnv(new AcpRobotParam());
+        Map<String, String> defaultEnv = provider.getExtraEnv(null);
+
+        assertEquals("agent-full-access", configuredEnv.get("INITIAL_AGENT_MODE"));
+        assertEquals("agent-full-access", defaultEnv.get("INITIAL_AGENT_MODE"));
     }
 
     @Test

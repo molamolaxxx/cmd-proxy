@@ -1,7 +1,5 @@
 package com.mola.cmd.proxy.app.acp.talkto;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
@@ -33,18 +31,16 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 /**
  * TalkTo 消息投递器，负责：
- * <ol>
- *   <li>从 LLM 输出中检测 talk_to 指令</li>
- *   <li>投递消息到目标 robot（READY 时直接投递，非 READY 时进入 inbox）</li>
- *   <li>管理每个 robot 的 inbox 队列</li>
- * </ol>
+ * 投递 talk_to 消息到目标 robot，并管理每个 robot 的 inbox 队列。
  */
 public class TalkToDispatcher implements ExternalTalkToContactProvider {
 
-    private static final Logger logger = LoggerFactory.getLogger(TalkToDispatcher.class);
+    @FunctionalInterface
+    public interface StarweaveSessionStarter {
+        void open(String robotName) throws Exception;
+    }
 
-    private static final String TALK_TO_TRIGGER = "\"action\"";
-    private static final String TALK_TO_ACTION = "talk_to";
+    private static final Logger logger = LoggerFactory.getLogger(TalkToDispatcher.class);
 
     /** inbox 容量上限 */
     private static final int INBOX_CAPACITY = 10;
@@ -58,6 +54,7 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
     private final Map<String, AcpRobotParam> robotRegistry;
     private final AcpClientRegistry clientRegistry;
     private final Map<String, String> robotToGroupId;
+    private volatile StarweaveSessionStarter starweaveSessionStarter;
 
     /** 普通 MAIN dispatcher 可注册的外部端点；Team dispatcher 不注册。 */
     private final List<ExternalTalkToGateway> externalGateways = new CopyOnWriteArrayList<>();
@@ -97,114 +94,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         return false;
     }
 
-    // ==================== 指令检测 ====================
-
-    /**
-     * 直接从已捕获的 JSON 字符串解析 talk_to 请求（无需从 fullResponse 中重新搜索提取）。
-     *
-     * @param capturedJson DispatchBufferFilter 捕获的完整 JSON 字符串
-     * @return 解析出的请求，解析失败时返回 null
-     */
-    public TalkToRequest parseTalkToJson(String capturedJson) {
-        if (capturedJson == null || capturedJson.isEmpty()) {
-            logger.warn("parseTalkToJson: capturedJson 为 null 或空");
-            return null;
-        }
-        try {
-            logger.debug("parseTalkToJson: len={}, head={}, tail={}",
-                    capturedJson.length(),
-                    capturedJson.length() > 60 ? capturedJson.substring(0, 60) : capturedJson,
-                    capturedJson.length() > 60 ? capturedJson.substring(capturedJson.length() - 30) : capturedJson);
-            JsonObject obj = JsonParser.parseString(capturedJson).getAsJsonObject();
-
-            String action = obj.has("action") ? obj.get("action").getAsString() : "";
-            if (!"talk_to".equals(action)) return null;
-
-            String target = obj.has("target") ? obj.get("target").getAsString() : null;
-            String content = obj.has("content") ? obj.get("content").getAsString() : null;
-            int depth = obj.has("_depth") ? obj.get("_depth").getAsInt() : 0;
-
-            if (target == null || target.isEmpty() || content == null || content.isEmpty()) {
-                logger.warn("talk_to 指令缺少 target 或 content");
-                return null;
-            }
-
-            return new TalkToRequest(target, content, depth);
-        } catch (Exception e) {
-            // 详细诊断：打印 capturedJson 的首尾字符（含十六进制）
-            String head = capturedJson.length() > 80 ? capturedJson.substring(0, 80) : capturedJson;
-            String tail = capturedJson.length() > 80 ? capturedJson.substring(capturedJson.length() - 40) : "";
-            logger.warn("capturedJson 解析 talk_to 失败: {}, len={}, head=[{}], tail=[{}]",
-                    e.getMessage(), capturedJson.length(), head, tail);
-            return null;
-        }
-    }
-
-    /**
-     * 从 LLM 输出中检测 talk_to 指令。
-     *
-     * @param fullResponse 主 Agent 当前累积的完整输出
-     * @return 解析出的请求，未检测到时返回 null
-     */
-    public TalkToRequest detectTalkTo(String fullResponse) {
-        // 查找 talk_to 关键词位置
-        int actionIdx = fullResponse.indexOf("\"talk_to\"");
-        if (actionIdx < 0) return null;
-
-        // 向前找到包含该关键词的 JSON 对象起始 {
-        int braceStart = fullResponse.lastIndexOf('{', actionIdx);
-        if (braceStart < 0) return null;
-
-        // 用花括号平衡提取完整 JSON
-        String json = extractBalancedJson(fullResponse, braceStart);
-        if (json == null) return null;
-
-        try {
-            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
-
-            String action = obj.has("action") ? obj.get("action").getAsString() : "";
-            if (!"talk_to".equals(action)) return null;
-
-            String target = obj.has("target") ? obj.get("target").getAsString() : null;
-            String content = obj.has("content") ? obj.get("content").getAsString() : null;
-            int depth = obj.has("_depth") ? obj.get("_depth").getAsInt() : 0;
-
-            if (target == null || target.isEmpty() || content == null || content.isEmpty()) {
-                logger.warn("talk_to 指令缺少 target 或 content");
-                return null;
-            }
-
-            return new TalkToRequest(target, content, depth);
-        } catch (Exception e) {
-            logger.warn("talk_to JSON 解析失败: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * 从指定位置开始，提取花括号平衡的完整 JSON 字符串。
-     */
-    private static String extractBalancedJson(String text, int braceStart) {
-        int braces = 0;
-        boolean inString = false;
-        boolean escaped = false;
-
-        for (int i = braceStart; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\' && inString) { escaped = true; continue; }
-            if (c == '"') { inString = !inString; continue; }
-            if (inString) continue;
-
-            if (c == '{') braces++;
-            else if (c == '}') {
-                braces--;
-                if (braces == 0) {
-                    return text.substring(braceStart, i + 1);
-                }
-            }
-        }
-        return null;
+    /** Enables MAIN Starweave senders to lazily open a missing local target session. */
+    public void setStarweaveSessionStarter(StarweaveSessionStarter starter) {
+        this.starweaveSessionStarter = starter;
     }
 
     // ==================== 消息投递 ====================
@@ -344,6 +236,25 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         if (senderClient != null && senderClient.getClientIdentity() != null) {
             targetGroupId = resolveLocalTargetGroupId(robotToGroupId,
                     senderClient.getClientIdentity(), senderChatterId, target);
+            if (senderClient.getClientIdentity().isStarweave()
+                    && (targetGroupId == null
+                    || clientRegistry.getClient(targetGroupId) == null)
+                    && starweaveSessionStarter != null) {
+                try {
+                    starweaveSessionStarter.open(target);
+                    targetGroupId = resolveLocalTargetGroupId(robotToGroupId,
+                            senderClient.getClientIdentity(), senderChatterId, target);
+                } catch (Exception error) {
+                    logger.warn("Starweave talkTo 自动开启目标会话失败: sender={}, target={}",
+                            senderName, target, error);
+                    String reason = error.getMessage();
+                    if (reason == null || reason.trim().isEmpty()) {
+                        reason = error.getClass().getSimpleName();
+                    }
+                    return "[talkTo 结果]\n发送失败：无法为 robot '" + target
+                            + "' 自动建立 Starweave 会话：" + reason;
+                }
+            }
             if (targetGroupId == null) {
                 return "[talkTo 结果]\n发送失败：robot '" + target
                         + "' 未在当前 Chatter ID（" + senderChatterId
@@ -368,7 +279,9 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 request.getParentTrace(), senderGroupId == null ? senderName : senderGroupId,
                 targetGroupId);
         if (!circuit.isAccepted()) {
-            return circuitOpenResult(circuit, senderName, target);
+            return circuit.isCircuitOpen()
+                    ? circuitOpenResult(circuit, senderName, target)
+                    : admissionRejectedResult(circuit, senderName, target);
         }
 
         // 6. 记录发送记录（用于去重）
@@ -443,10 +356,13 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 request.getParentTrace(), budgetSender,
                 targetChatterId + ":" + target);
         if (!circuit.isAccepted()) {
-            if (circuitBreaker.claimRelay(circuit.getTrace().getCascadeId())) {
+            if (circuit.isCircuitOpen()
+                    && circuitBreaker.claimRelay(circuit.getTrace().getCascadeId())) {
                 relayCrossCircuit(circuit, senderName, senderChatterId, target, targetChatterId);
             }
-            return circuitOpenResult(circuit, senderName, target);
+            return circuit.isCircuitOpen()
+                    ? circuitOpenResult(circuit, senderName, target)
+                    : admissionRejectedResult(circuit, senderName, target);
         }
 
         // 2. 防循环：短时间重复检测
@@ -741,6 +657,20 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         return "[TALK_TO_CIRCUIT_OPENED]\n通信链已由服务端终止，不要重试或发送确认消息。"
                 + " cascadeId=" + admission.getTrace().getCascadeId()
                 + ", reason=" + admission.getReason() + "。";
+    }
+
+    protected String admissionRejectedResult(TalkToCircuitBreaker.Admission admission,
+                                             String sender, String target) {
+        logger.warn("TalkTo message rejected without opening circuit: cascadeId={}, sender={}, "
+                        + "target={}, hop={}, reason={}, current={}, limit={}",
+                admission.getTrace().getCascadeId(), sender, target,
+                admission.getTrace().getHopCount(), admission.getReason(),
+                admission.getCurrent(), admission.getLimit());
+        return "[talkTo 结果]\n发送失败（" + admission.getReason() + "）：当前消息超过通信限额，"
+                + "消息未投递，但通信链保持可用。"
+                + " cascadeId=" + admission.getTrace().getCascadeId()
+                + ", current=" + admission.getCurrent()
+                + ", limit=" + admission.getLimit() + "。";
     }
 
     /**

@@ -34,28 +34,35 @@ public class TalkToCircuitBreakerTest {
     }
 
     @Test
-    public void perSenderLimitStopsAcknowledgementPingPongBeforeHopLimit() {
+    public void perSenderLimitRejectsOnlyCurrentMessageAndKeepsCascadeOpen() {
         TalkToCircuitBreaker breaker = new TalkToCircuitBreaker();
-        TalkToCircuitBreaker.Admission first = breaker.admit(null, "A", "B");
-        TalkToCircuitBreaker.Admission second = breaker.admit(first.getTrace(), "A", "C");
-        TalkToCircuitBreaker.Admission rejected = breaker.admit(second.getTrace(), "A", "D");
+        TalkToTrace parent = new TalkToTrace(null, null, null, 0,
+                System.currentTimeMillis());
+        for (int i = 0; i < TalkToCircuitBreaker.MAX_MESSAGES_PER_SENDER; i++) {
+            assertTrue(breaker.admit(parent, "A", "target-" + i).isAccepted());
+        }
+        TalkToCircuitBreaker.Admission rejected = breaker.admit(parent, "A", "overflow");
 
-        assertTrue(first.isAccepted());
-        assertTrue(second.isAccepted());
         assertFalse(rejected.isAccepted());
         assertEquals("SENDER_LIMIT", rejected.getReason());
+        assertEquals(5, rejected.getCurrent());
+        assertEquals(5, rejected.getLimit());
+        assertFalse(rejected.isCircuitOpen());
+        assertTrue(breaker.canDeliver(parent));
+        assertTrue(breaker.admit(parent, "B", "A").isAccepted());
     }
 
     @Test
     public void fanoutCannotResetBudgetByChangingRecipientsAndNotifiesOnce() {
         TalkToCircuitBreaker breaker = new TalkToCircuitBreaker();
         TalkToTrace parent = new TalkToTrace(null, null, null, 0, System.currentTimeMillis());
-        for (int i = 0; i < 6; i++) {
-            assertEquals(i < 2, breaker.admit(parent, "leader", "member-" + i).isAccepted());
+        for (int i = 0; i < 7; i++) {
+            assertEquals(i < TalkToCircuitBreaker.MAX_MESSAGES_PER_SENDER,
+                    breaker.admit(parent, "leader", "member-" + i).isAccepted());
         }
-        assertTrue(breaker.claimNotification(parent.getCascadeId()));
         assertFalse(breaker.claimNotification(parent.getCascadeId()));
-        assertFalse(breaker.canDeliver(parent.next()));
+        assertFalse(breaker.claimNotification(parent.getCascadeId()));
+        assertTrue(breaker.canDeliver(parent.next()));
     }
 
     @Test
@@ -70,9 +77,19 @@ public class TalkToCircuitBreakerTest {
     public void expiredTraceCannotBeDeliveredEvenAfterStateCleanup() {
         TalkToCircuitBreaker breaker = new TalkToCircuitBreaker();
         TalkToTrace expired = new TalkToTrace(null, null, null, 2,
-                System.currentTimeMillis() - TalkToCircuitBreaker.CASCADE_TTL_MS * 3);
+                System.currentTimeMillis() - TalkToCircuitBreaker.CASCADE_TTL_MS - 60_000L);
         assertFalse(breaker.canDeliver(expired));
         assertEquals("CASCADE_EXPIRED", breaker.admit(expired, "A", "B").getReason());
+    }
+
+    @Test
+    public void longRunningInvestigationCanReplyWithinTwoHours() {
+        TalkToCircuitBreaker breaker = new TalkToCircuitBreaker();
+        TalkToTrace investigation = new TalkToTrace(null, null, null, 1,
+                System.currentTimeMillis() - 90L * 60L * 1000L);
+
+        assertTrue(breaker.canDeliver(investigation));
+        assertTrue(breaker.admit(investigation, "B", "A").isAccepted());
     }
 
     @Test

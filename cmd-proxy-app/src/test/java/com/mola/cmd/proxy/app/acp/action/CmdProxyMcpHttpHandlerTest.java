@@ -41,6 +41,17 @@ public class CmdProxyMcpHttpHandlerTest {
     }
 
     @Test
+    public void exposesAcpHarnessServerIdentity() throws Exception {
+        JsonObject response = post("{\"jsonrpc\":\"2.0\",\"id\":0,"
+                        + "\"method\":\"initialize\","
+                        + "\"params\":{\"protocolVersion\":\"2025-06-18\"}}",
+                "application/json", null);
+
+        assertEquals("acp-harness-runtime", response.getAsJsonObject("result")
+                .getAsJsonObject("serverInfo").get("name").getAsString());
+    }
+
+    @Test
     public void listsOnlyToolsAvailableToAuthSession() throws Exception {
         ActionRuntimeRegistry.getInstance().register("list-session", (name, arguments) -> "ok",
                 () -> new LinkedHashSet<>(Arrays.asList("schedule_task", "manage_schedule")));
@@ -50,6 +61,54 @@ public class CmdProxyMcpHttpHandlerTest {
         assertEquals(2, tools.size());
         assertEquals("schedule_task", tools.get(0).getAsJsonObject().get("name").getAsString());
         assertTrue(tools.get(0).getAsJsonObject().has("inputSchema"));
+        String groupDescription = tools.get(0).getAsJsonObject()
+                .getAsJsonObject("inputSchema").getAsJsonObject("properties")
+                .getAsJsonObject("groupName").get("description").getAsString();
+        assertTrue(groupDescription.contains("默认省略"));
+        assertTrue(groupDescription.contains("daily-{yyyyMMdd}"));
+    }
+
+    @Test
+    public void exposesDetailedToolContractsWithoutModelVisibleDepth() {
+        JsonArray tools = CmdProxyMcpHttpHandler.tools();
+
+        JsonObject dispatch = findTool(tools, "dispatch_subagent");
+        assertTrue(dispatch.get("description").getAsString().contains("聚合返回结果"));
+        JsonObject dispatchProperties = dispatch.getAsJsonObject("inputSchema")
+                .getAsJsonObject("properties");
+        assertTrue(dispatchProperties.getAsJsonObject("tasks")
+                .get("description").getAsString().contains("独立任务实例"));
+        JsonObject dispatchItemProperties = dispatchProperties.getAsJsonObject("tasks")
+                .getAsJsonObject("items").getAsJsonObject("properties");
+        assertTrue(dispatchItemProperties.getAsJsonObject("agent").has("description"));
+        assertTrue(dispatchItemProperties.getAsJsonObject("title")
+                .get("description").getAsString().contains("2～6"));
+
+        JsonObject schedule = findTool(tools, "schedule_task");
+        JsonObject scheduleProperties = schedule.getAsJsonObject("inputSchema")
+                .getAsJsonObject("properties");
+        JsonObject scheduleFields = scheduleProperties.getAsJsonObject("tasks")
+                .getAsJsonObject("items").getAsJsonObject("properties")
+                .getAsJsonObject("schedule").getAsJsonObject("properties");
+        assertEquals("cron", scheduleFields.getAsJsonObject("type")
+                .getAsJsonArray("enum").get(0).getAsString());
+        assertTrue(scheduleFields.getAsJsonObject("expr")
+                .get("description").getAsString().contains("标准五位 cron"));
+
+        JsonObject manage = findTool(tools, "manage_schedule");
+        JsonArray operations = manage.getAsJsonObject("inputSchema")
+                .getAsJsonObject("properties").getAsJsonObject("operation")
+                .getAsJsonArray("enum");
+        assertEquals(3, operations.size());
+        assertEquals("update", operations.get(2).getAsString());
+
+        JsonObject talkTo = findTool(tools, "talk_to");
+        JsonObject talkToProperties = talkTo.getAsJsonObject("inputSchema")
+                .getAsJsonObject("properties");
+        assertTrue(talkTo.get("description").getAsString().contains("路由层已经接收"));
+        assertTrue(talkToProperties.getAsJsonObject("target").has("description"));
+        assertTrue(talkToProperties.getAsJsonObject("content").has("description"));
+        assertFalse(talkToProperties.has("_depth"));
     }
 
     @Test
@@ -99,6 +158,15 @@ public class CmdProxyMcpHttpHandlerTest {
         HttpURLConnection connection = open(accept, authSessionId);
         write(connection, body);
         return JsonParser.parseString(read(connection.getInputStream())).getAsJsonObject();
+    }
+
+    private static JsonObject findTool(JsonArray tools, String name) {
+        for (int i = 0; i < tools.size(); i++) {
+            JsonObject tool = tools.get(i).getAsJsonObject();
+            if (name.equals(tool.get("name").getAsString())) return tool;
+        }
+        fail("Missing tool: " + name);
+        return null;
     }
 
     private HttpURLConnection open(String accept, String authSessionId) throws Exception {

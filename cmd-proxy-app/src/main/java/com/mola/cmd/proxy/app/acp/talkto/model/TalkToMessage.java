@@ -95,10 +95,7 @@ public class TalkToMessage {
                 .append("才调用 talk_to；最终结果默认结束通信链，不要再发确认。\n");
         sb.append("如确需回复，请调用 talk_to MCP 工具，并将 target 精确设置为：")
                 .append(sender).append("。\n");
-        sb.append("为保留防循环上下文，请将工具参数 _depth 设置为：")
-                .append(depth).append("。该值仅用于兼容和诊断，")
-                .append("服务端将独立校验通信链。\n");
-        sb.append("工具结果会直接返回当前上下文；不要输出 Action JSON。\n");
+        sb.append("工具调用结果会作为本轮工具返回值提供给你。\n");
     }
 
     /**

@@ -50,7 +50,8 @@ public class TeamTalkToContextInjectorTest {
         assertTrue(context.contains("重要运行时约束：发出 talk_to 后"));
         assertTrue(context.contains("不要使用 Bash、PowerShell、Python"));
         assertTrue(context.contains("wait、sleep、while 循环"));
-        assertTrue(context.contains("不表示你会在当前 turn 内获得回复"));
+        assertFalse(context.contains("不表示你会在当前 turn 内获得回复"));
+        assertFalse(context.contains("目标忙碌时进入该成员的 Team 专属 inbox"));
         assertFalse(context.contains("outside-robot"));
         assertFalse(context.contains("team-acp-member-2"));
         assertFalse(context.contains("source-robot-member-2"));

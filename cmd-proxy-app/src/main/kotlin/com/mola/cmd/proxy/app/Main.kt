@@ -339,7 +339,7 @@ private fun startConfigUiServer(config: JSONObject) {
         val server = ConfigUiServer(
             actualPort,
             { reloadAcpServices() },
-            { name -> reloadRobot(name) },
+            { previousName, name -> reloadRobot(previousName, name) },
             { AcpProxy.channelStatuses().mapValues { it.value.name } },
             { AcpProxy.channelErrors() },
             { channelId, inboundAllowed ->
@@ -402,7 +402,7 @@ private fun reloadAcpServices() {
 /**
  * 按 robot 维度热重载：重新读取配置文件，只重建指定 robot 的 ACP 进程。
  */
-private fun reloadRobot(robotName: String) {
+private fun reloadRobot(previousRobotName: String, robotName: String) {
     try {
         val file = File(CmdProxyHome.pathOf("acpConfig.json"))
         val content = file.readText(Charset.forName("UTF-8"))
@@ -428,7 +428,7 @@ private fun reloadRobot(robotName: String) {
 
         val chatterIds = chatterIdsArray.toJavaList(String::class.java)
 
-        AcpProxy.reloadRobot(robotName, robot, chatterIds, allRobots)
+        AcpProxy.reloadRobot(previousRobotName, robot, chatterIds, allRobots)
     } catch (e: Exception) {
         log.error("robot 级热重载失败, robot={}", robotName, e)
         throw e

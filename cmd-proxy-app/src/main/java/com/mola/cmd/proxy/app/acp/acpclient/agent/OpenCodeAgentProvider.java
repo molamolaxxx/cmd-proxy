@@ -78,6 +78,8 @@ public class OpenCodeAgentProvider implements AgentProvider {
         paths.add(Paths.get(HOME, ".config", "opencode", "skills"));
         if (workspacePath != null && !workspacePath.trim().isEmpty()) {
             paths.add(Paths.get(workspacePath, ".opencode", "skills"));
+            // cmd-proxy 通用 Skill 目录同时向 Codex、OpenCode 与 DSH 展示。
+            paths.add(Paths.get(workspacePath, ".agents", "skills"));
         }
         return paths;
     }

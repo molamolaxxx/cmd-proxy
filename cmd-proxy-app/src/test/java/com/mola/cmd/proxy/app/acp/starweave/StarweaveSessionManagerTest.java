@@ -6,6 +6,9 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.acpclient.MainSessionApplicationService;
+import com.mola.cmd.proxy.app.acp.acpclient.PromptOptions;
+import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
+import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -16,9 +19,16 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
@@ -65,6 +75,131 @@ public class StarweaveSessionManagerTest {
         assertTrue(reopened.getLongValue("generation") > deleted.getLongValue("generation"));
         assertEquals(1, manager.list().size());
         registry.closeAllForShutdown();
+    }
+
+    @Test
+    public void robotRefreshReopensPreviouslyActiveStarweaveSession() throws Exception {
+        FakeFactory factory = new FakeFactory();
+        AcpClientRegistry registry = registry(factory);
+        StarweaveSessionManager manager = manager(registry);
+        JSONObject opened = manager.open("Robot");
+        String groupId = opened.getString("groupId");
+
+        registry.closeByGroupId(groupId);
+        assertNull(registry.getClient(groupId));
+
+        JSONObject reopened = manager.reopenAfterRobotRefresh("Robot", "Robot");
+
+        assertNotNull(reopened);
+        assertTrue(reopened.getBooleanValue("active"));
+        assertNotNull(registry.getClient(groupId));
+        assertTrue(reopened.getLongValue("generation")
+                > opened.getLongValue("generation"));
+        registry.closeAllForShutdown();
+    }
+
+    @Test
+    public void talkToAutoOpensMissingTargetAndMakesItVisibleInSessionList()
+            throws Exception {
+        AcpRobotParam robotA = robot("A");
+        AcpRobotParam robotB = robot("B");
+        Map<String, AcpRobotParam> robots = new LinkedHashMap<>();
+        robots.put("A", robotA);
+        robots.put("B", robotB);
+        Map<String, String> routes = new java.util.concurrent.ConcurrentHashMap<>();
+        FakeFactory factory = new FakeFactory();
+        AcpClientRegistry registry = registry(factory);
+        TalkToDispatcher dispatcher = new TalkToDispatcher(robots, registry, routes);
+        StarweaveSessionManager manager = new StarweaveSessionManager(
+                "instance-test", registry, robots::get,
+                (groupId, client, robot) -> routes.put(
+                        "STARWEAVE:starweave-instance-test:" + robot.getName(), groupId),
+                new StarweaveSessionIndex(temporary.newFolder("talkto-index")
+                        .toPath().resolve("sessions.json")),
+                new StarweaveSessionEventStore(64));
+        dispatcher.setStarweaveSessionStarter(manager::open);
+        JSONObject openedA = manager.open("A");
+
+        String result = dispatcher.deliver(new TalkToRequest("B", "请检查", 0),
+                "A", "starweave-instance-test", openedA.getString("groupId"),
+                robotA.getContacts());
+
+        assertTrue(result, result.contains("已成功将消息发送给 B"));
+        String groupB = StarweaveIdentity.identity(
+                "instance-test", "B").getLogicalId();
+        FakeClient clientB = (FakeClient) registry.getClient(groupB);
+        assertNotNull(clientB);
+        assertTrue(clientB.sentMessage.contains("请检查"));
+        assertEquals(2, manager.list().size());
+        assertTrue(manager.status(groupB).getBooleanValue("active"));
+        registry.closeAllForShutdown();
+    }
+
+    @Test
+    public void talkToReportsFailureWhenAutomaticOpenFailsAndCanRetry() throws Exception {
+        AcpRobotParam robotA = robot("A");
+        AcpRobotParam robotB = robot("B");
+        Map<String, AcpRobotParam> robots = new LinkedHashMap<>();
+        robots.put("A", robotA);
+        robots.put("B", robotB);
+        Map<String, String> routes = new java.util.concurrent.ConcurrentHashMap<>();
+        FakeFactory factory = new FakeFactory();
+        AcpClientRegistry registry = registry(factory);
+        TalkToDispatcher dispatcher = new TalkToDispatcher(robots, registry, routes);
+        StarweaveSessionManager manager = new StarweaveSessionManager(
+                "instance-test", registry, robots::get,
+                (groupId, client, robot) -> routes.put(
+                        "STARWEAVE:starweave-instance-test:" + robot.getName(), groupId),
+                new StarweaveSessionIndex(temporary.newFolder("talkto-failure-index")
+                        .toPath().resolve("sessions.json")),
+                new StarweaveSessionEventStore(64));
+        dispatcher.setStarweaveSessionStarter(manager::open);
+        JSONObject openedA = manager.open("A");
+        factory.failNextStart = true;
+
+        String failed = dispatcher.deliver(new TalkToRequest("B", "请检查", 0),
+                "A", "starweave-instance-test", openedA.getString("groupId"),
+                robotA.getContacts());
+
+        assertTrue(failed, failed.contains("发送失败"));
+        assertEquals(1, manager.list().size());
+
+        String retried = dispatcher.deliver(new TalkToRequest("B", "请检查", 0),
+                "A", "starweave-instance-test", openedA.getString("groupId"),
+                robotA.getContacts());
+        assertTrue(retried, retried.contains("已成功将消息发送给 B"));
+        assertEquals(2, manager.list().size());
+        registry.closeAllForShutdown();
+    }
+
+    @Test
+    public void concurrentOpenCreatesOnlyOneVisibleSession() throws Exception {
+        FakeFactory factory = new FakeFactory();
+        factory.startDelayMillis = 50L;
+        AcpClientRegistry registry = registry(factory);
+        StarweaveSessionManager manager = manager(registry);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            java.util.concurrent.Callable<JSONObject> open = () -> {
+                ready.countDown();
+                start.await();
+                return manager.open("Robot");
+            };
+            Future<JSONObject> first = executor.submit(open);
+            Future<JSONObject> second = executor.submit(open);
+            ready.await();
+            start.countDown();
+
+            assertEquals(first.get().getString("sessionId"),
+                    second.get().getString("sessionId"));
+            assertEquals(1, factory.sequence.get());
+            assertEquals(1, manager.list().size());
+        } finally {
+            executor.shutdownNow();
+            registry.closeAllForShutdown();
+        }
     }
 
     @Test
@@ -192,6 +327,43 @@ public class StarweaveSessionManagerTest {
     }
 
     @Test
+    public void fileLinkPreviewUsesCurrentSessionWorkspaceAndRejectsStaleGeneration()
+            throws Exception {
+        Path workspace = temporary.newFolder("preview-workspace").toPath();
+        Files.write(workspace.resolve("README.md"),
+                "# Starweave preview\n".getBytes(StandardCharsets.UTF_8));
+        AcpRobotParam robot = new AcpRobotParam();
+        robot.setName("Robot");
+        robot.setWorkDir(workspace.toString());
+        FakeFactory factory = new FakeFactory();
+        AcpClientRegistry registry = registry(factory);
+        StarweaveSessionManager manager = new StarweaveSessionManager(
+                "instance-test", registry, name -> robot,
+                (groupId, client, configuredRobot) -> { },
+                new StarweaveSessionIndex(temporary.newFolder("preview-index")
+                        .toPath().resolve("sessions.json")),
+                new StarweaveSessionEventStore(64));
+        JSONObject opened = manager.open("Robot");
+
+        com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult preview =
+                manager.previewTextFile("preview-request", opened.getString("groupId"),
+                        opened.getString("sessionId"), opened.getLongValue("generation"),
+                        "README.md", 1024, null);
+
+        assertTrue(preview.isAccepted());
+        assertEquals("# Starweave preview\n", preview.getData().get("content"));
+        try {
+            manager.previewTextFile("stale-request", opened.getString("groupId"),
+                    opened.getString("sessionId"), opened.getLongValue("generation") + 1L,
+                    "README.md", 1024, null);
+            fail("stale generation must not read a file");
+        } catch (IllegalStateException expected) {
+            assertTrue(expected.getMessage().startsWith("SESSION_STALE"));
+        }
+        registry.closeAllForShutdown();
+    }
+
+    @Test
     public void restartRecoversEveryActiveClosedSessionAndSkipsDeletedSlots()
             throws Exception {
         StarweaveSessionIndex index = new StarweaveSessionIndex(
@@ -231,15 +403,20 @@ public class StarweaveSessionManagerTest {
     }
 
     private StarweaveSessionManager manager(AcpClientRegistry registry) throws Exception {
-        AcpRobotParam robot = new AcpRobotParam();
-        robot.setName("Robot");
-        robot.setWorkDir(temporary.getRoot().getAbsolutePath());
+        AcpRobotParam robot = robot("Robot");
         return new StarweaveSessionManager("instance-test", registry,
                 name -> "Robot".equals(name) ? robot : null,
                 (groupId, client, configuredRobot) -> { },
                 new StarweaveSessionIndex(temporary.newFolder("index")
                         .toPath().resolve("sessions.json")),
                 new StarweaveSessionEventStore(64));
+    }
+
+    private AcpRobotParam robot(String name) {
+        AcpRobotParam robot = new AcpRobotParam();
+        robot.setName(name);
+        robot.setWorkDir(temporary.getRoot().getAbsolutePath());
+        return robot;
     }
 
     private static AcpClientRegistry registry(FakeFactory handler) throws Exception {
@@ -256,6 +433,7 @@ public class StarweaveSessionManagerTest {
     private static final class FakeFactory implements InvocationHandler {
         private final AtomicInteger sequence = new AtomicInteger();
         private volatile boolean failNextStart;
+        private volatile long startDelayMillis;
         private volatile FakeClient lastCreated;
 
         @Override
@@ -273,7 +451,7 @@ public class StarweaveSessionManagerTest {
                         (String) args[1], (String) args[1], robot.getName());
             }
             lastCreated = new FakeClient(identity, (AcpRobotParam) args[2],
-                    sequence.incrementAndGet(), failNextStart);
+                    sequence.incrementAndGet(), failNextStart, startDelayMillis);
             failNextStart = false;
             return lastCreated;
         }
@@ -282,6 +460,7 @@ public class StarweaveSessionManagerTest {
     private static final class FakeClient extends AcpClient {
         private final int sequence;
         private final boolean failStart;
+        private final long startDelayMillis;
         private boolean forceNew;
         private String restoreSessionId;
         private boolean closed;
@@ -289,10 +468,11 @@ public class StarweaveSessionManagerTest {
         private List<Map<String, String>> sentFiles;
 
         private FakeClient(AcpClientIdentity identity, AcpRobotParam robot,
-                           int sequence, boolean failStart) {
-            super(".", identity, robot);
+                           int sequence, boolean failStart, long startDelayMillis) {
+            super(robot.getWorkDir(), identity, robot);
             this.sequence = sequence;
             this.failStart = failStart;
+            this.startDelayMillis = startDelayMillis;
         }
 
         @Override
@@ -310,6 +490,14 @@ public class StarweaveSessionManagerTest {
         @Override
         public void start() throws IOException {
             if (failStart) throw new IOException("planned start failure");
+            if (startDelayMillis > 0L) {
+                try {
+                    Thread.sleep(startDelayMillis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("start interrupted", interrupted);
+                }
+            }
             setSessionId(restoreSessionId == null
                     ? "session-" + sequence : restoreSessionId);
             state.set(State.READY);
@@ -331,6 +519,12 @@ public class StarweaveSessionManagerTest {
             sentMessage = userInput;
             sentFiles = files;
             state.set(State.BUSY);
+        }
+
+        @Override
+        public void send(String userInput, List<Map<String, String>> files,
+                         PromptOptions options) {
+            send(userInput, files);
         }
     }
 }

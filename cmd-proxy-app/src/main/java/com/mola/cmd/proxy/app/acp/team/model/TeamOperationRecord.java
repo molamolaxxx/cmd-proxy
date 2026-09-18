@@ -4,7 +4,8 @@ public final class TeamOperationRecord {
 
     public enum Operation {
         CREATE,
-        DELETE
+        DELETE,
+        UPDATE_REMARKS
     }
 
     public enum Status {

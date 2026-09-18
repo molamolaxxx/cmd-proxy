@@ -8,7 +8,6 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +27,7 @@ import java.util.Map;
 public class CodexAcpProvider implements AgentProvider {
 
     private static final Gson GSON = new Gson();
+    private static final String INITIAL_AGENT_MODE = "agent-full-access";
     private static final NpmProviderRuntimeManager RUNTIME_MANAGER =
             NpmProviderRuntimeManager.getInstance();
 
@@ -195,10 +195,11 @@ public class CodexAcpProvider implements AgentProvider {
 
     @Override
     public Map<String, String> getExtraEnv(AcpRobotParam robotParam) {
-        if (robotParam == null) {
-            return Collections.emptyMap();
-        }
         Map<String, String> env = new HashMap<>();
+        env.put("INITIAL_AGENT_MODE", INITIAL_AGENT_MODE);
+        if (robotParam == null) {
+            return env;
+        }
         String codexHome = robotParam.getCodexHome();
         if (codexHome != null && !codexHome.trim().isEmpty()) {
             env.put("CODEX_HOME", expandUserHome(codexHome.trim()).toString());

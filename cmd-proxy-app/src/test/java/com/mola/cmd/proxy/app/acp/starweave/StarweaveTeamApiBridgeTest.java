@@ -89,6 +89,46 @@ public class StarweaveTeamApiBridgeTest {
     }
 
     @Test
+    public void updatesLocalTeamMemberRemarks() throws Exception {
+        String instanceId = "instance-edit";
+        String ownerId = StarweaveIdentity.ownerId(instanceId);
+        TeamStore store = new TeamStore(temporary.newFolder("edit-remarks").toPath());
+        TeamManager manager = new TeamManager(store, new TeamClientRegistry(),
+                new MapTeamSourceRobotResolver(java.util.Collections.emptyMap()));
+        TeamDefinition definition = TeamDefinition.creating("team-edit", ownerId,
+                "Editable", "team-acp-" + instanceId, "create-edit",
+                Arrays.asList(
+                        new TeamMemberDefinition("member-a", "source-a", "A", "A",
+                                "old a", "fingerprint-a"),
+                        new TeamMemberDefinition("member-b", "source-b", "B", "B",
+                                "old b", "fingerprint-b")), 100L);
+        store.saveTeam(definition);
+        manager.recoverPersistedDefinitions();
+        StarweaveTeamApiBridge.install(manager, instanceId,
+                java.util.Collections::emptyList);
+        try {
+            JSONObject remarks = new JSONObject(true);
+            remarks.put("member-a", "new a");
+            remarks.put("member-b", "new b");
+            JSONObject request = new JSONObject(true);
+            request.put("requestId", "update-edit");
+            request.put("teamId", "team-edit");
+            request.put("expectedVersion", 1L);
+            request.put("memberRemarks", remarks);
+
+            JSONObject result = StarweaveTeamApiBridge.update(request);
+
+            assertTrue(result.getBooleanValue("accepted"));
+            TeamDefinition updated = store.loadTeam("team-edit").get();
+            assertEquals("new a", updated.getMembers().get(0).getRemark());
+            assertEquals("new b", updated.getRoster().get(1).getRemark());
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
+    }
+
+    @Test
     public void rejectsSourceOutsideTheStarweaveCatalog() throws Exception {
         TeamManager manager = new TeamManager(
                 new TeamStore(temporary.newFolder("rejected").toPath()),
@@ -110,6 +150,30 @@ public class StarweaveTeamApiBridgeTest {
             } catch (IllegalArgumentException expected) {
                 assertTrue(expected.getMessage().contains("available Starweave"));
             }
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
+    }
+
+    @Test
+    public void rejectsCoordinatedFilePreviewWithoutReadingTheLocalFilesystem()
+            throws Exception {
+        TeamManager manager = new TeamManager(
+                new TeamStore(temporary.newFolder("remote-preview").toPath()),
+                new TeamClientRegistry(), new MapTeamSourceRobotResolver(
+                java.util.Collections.emptyMap()));
+        StarweaveTeamApiBridge.install(manager, "instance-test",
+                java.util.Collections::emptyList);
+        try {
+            JSONObject request = new JSONObject(true);
+            request.put("coordinated", true);
+            request.put("target", "/etc/passwd");
+
+            JSONObject result = StarweaveTeamApiBridge.previewTextFile(request);
+
+            assertFalse(result.getBooleanValue("accepted"));
+            assertEquals("REMOTE_FILE_PREVIEW_UNSUPPORTED", result.getString("code"));
         } finally {
             StarweaveTeamApiBridge.clear(manager);
             manager.close();

@@ -307,6 +307,9 @@ object AcpProxy {
                 taskRobotRegistry[groupId] = robot
             }
         )
+        talkToDispatcher.setStarweaveSessionStarter { robotName ->
+            starweaveSessionManager!!.open(robotName)
+        }
         StarweaveSessionApiBridge.install(starweaveSessionManager!!)
         initializeTeamTransport()
         val starweaveRecovery = starweaveSessionManager!!.recoverActiveSessions()
@@ -1239,22 +1242,10 @@ object AcpProxy {
         }
     }
 
-    private val DISPATCH_MARKER = "dispatch_subagent"
-    private val SUB_AGENT_RESULTS_MARKER = "Sub-Agent Results"
-    private val SCHEDULE_RESULT_MARKER = "[定时任务操作结果]"
-    private val SCHEDULE_LIST_MARKER = "[定时任务列表]"
-    private val DISPATCH_PATTERN = java.util.regex.Pattern.compile(
-        "\\{\\s*\"action\"\\s*:\\s*\"dispatch_subagent\".*?\"tasks\"\\s*:\\s*\\[.*?]\\s*}",
-        java.util.regex.Pattern.DOTALL
-    )
-
     /**
      * 将恢复的会话历史以快照形式异步推送给 molachat，让用户回忆聊天细节。
      * <p>
-     * 回放规则：
-     * - USER 消息：普通消息以用户标识展示；sub_agent_results 以子 Agent 结果展示
-     * - ASSISTANT 消息：包含 dispatch_subagent 时解析并展示派发任务；否则正常 onMessage
-     * - TOOL 消息：通过 onToolCall 展示
+     * USER、ASSISTANT 和 TOOL 消息按持久化角色回放；MCP 专属事件由事件历史投影。
      */
     private fun replaySessionSnapshot(groupId: String, client: AcpClient) {
         val listener = client.globalListener ?: return
@@ -1270,65 +1261,11 @@ object AcpProxy {
             when (msg.role) {
                 com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.USER -> {
                     val content = msg.content ?: continue
-                    if (content.contains(SUB_AGENT_RESULTS_MARKER)) {
-                        // 子 Agent 结果回传，按每个子 Agent 逐条展示
-                        val agentBlockPattern = Regex("### (.+?)\\n状态: (.+?)\\n([\\s\\S]*?)(?=### |请综合以上|$)")
-                        val matches = agentBlockPattern.findAll(content)
-                        var matched = false
-                        for (m in matches) {
-                            matched = true
-                            val agentName = m.groupValues[1].trim()
-                            val status = m.groupValues[2].trim()
-                            val detail = m.groupValues[3].trim()
-                            if (status == "SUCCESS") {
-                                listener.onSubAgentEvent("AGENT_COMPLETE", agentName, detail)
-                            } else {
-                                listener.onSubAgentEvent("AGENT_ERROR", agentName, detail)
-                            }
-                        }
-                        if (!matched) {
-                            // 兜底：无法解析时整体展示
-                            listener.onSubAgentEvent("AGENT_COMPLETE", "agent派发结果", content)
-                        }
-                    } else if (content.contains(SCHEDULE_RESULT_MARKER) || content.contains(SCHEDULE_LIST_MARKER)) {
-                        // 定时任务操作结果回传
-                        val isCreate = content.contains("操作: create")
-                        val eventType = if (isCreate) "SCHEDULE_CREATE" else "SCHEDULE_MANAGE"
-                        listener.onScheduleEvent(eventType, content, isCreate)
-                    } else {
-                        listener.onMessage("**🧑 用户：**\n${content}\n\n---\n\n")
-                    }
+                    listener.onMessage("**🧑 用户：**\n${content}\n\n---\n\n")
                 }
                 com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.ASSISTANT -> {
                     val content = msg.content ?: continue
-                    if (content.contains(DISPATCH_MARKER)) {
-                        // 解析 dispatch_subagent JSON，展示派发的任务入参
-                        val matcher = DISPATCH_PATTERN.matcher(content)
-                        var matchedJson: String? = null
-                        if (matcher.find()) {
-                            matchedJson = matcher.group()
-                            try {
-                                val json = com.google.gson.JsonParser.parseString(matchedJson).asJsonObject
-                                val tasks = json.getAsJsonArray("tasks")
-                                val sb = StringBuilder("子 Agent 派发任务：\n")
-                                for (t in tasks) {
-                                    val task = t.asJsonObject
-                                    val agent = task.get("agent")?.asString ?: "unknown"
-                                    val title = task.get("title")?.asString ?: ""
-                                    val prompt = task.get("prompt")?.asString ?: ""
-                                    sb.append("- [$agent/$title] $prompt\n")
-                                }
-                                listener.onSubAgentEvent("DISPATCH_START", null, sb.toString())
-                            } catch (e: Exception) {
-                                listener.onSubAgentEvent("DISPATCH_START", null, "子 Agent 派发（解析失败）")
-                            }
-                        }
-                        // dispatch JSON 之外可能还有正常文本，也展示出来
-                        val cleanedContent = if (matchedJson != null) content.replace(matchedJson, "").trim() else content.trim()
-                        if (cleanedContent.isNotBlank()) {
-                            listener.onMessage("${cleanedContent}\n\n---\n\n")
-                        }
-                    } else if (content.isNotBlank()) {
+                    if (content.isNotBlank()) {
                         listener.onMessage("${content}\n\n---\n\n")
                     }
                 }
@@ -2280,11 +2217,19 @@ object AcpProxy {
      * 按 robot 维度热重载：只重建指定 robot 的 ACP 进程，不影响其他 robot。
      */
     @Synchronized
-    fun reloadRobot(robotName: String, robot: AcpRobotParam,
+    fun reloadRobot(previousRobotName: String, robot: AcpRobotParam,
                     chatterIds: List<String>,
                     configuredRobots: Collection<AcpRobotParam>) {
-        log.info("开始 robot 级热重载: robot={}, enabled={}, onlySubAgent={}, onlyTeamMember={}",
-            robotName, robot.isEnabled, robot.isOnlySubAgent, robot.isOnlyTeamMember)
+        val robotName = robot.name.trim()
+        val requestedPreviousName = previousRobotName.trim()
+        val runtimeRobotName = when {
+            configuredRobotNames.contains(requestedPreviousName) -> requestedPreviousName
+            configuredRobotNames.contains(robotName) -> robotName
+            else -> ""
+        }
+        log.info("开始 robot 级热重载: previousRobot={}, robot={}, enabled={}, onlySubAgent={}, onlyTeamMember={}",
+            runtimeRobotName, robotName, robot.isEnabled, robot.isOnlySubAgent,
+            robot.isOnlyTeamMember)
 
         require(!(robot.isOnlySubAgent && robot.isOnlyTeamMember)) {
             "onlySubAgent and onlyTeamMember cannot both be true"
@@ -2294,9 +2239,9 @@ object AcpProxy {
             throw IllegalStateException(
                 "chatterIds changed; use full ACP service refresh instead of robot refresh")
         }
-        if (!configuredRobotNames.contains(robotName)) {
+        if (runtimeRobotName != robotName && configuredRobotNames.contains(robotName)) {
             throw IllegalStateException(
-                "robot identity changed or is not active; use full ACP service refresh")
+                "robot '$robotName' is already active")
         }
 
         // 单 Robot 刷新也同步完整配置快照，使记忆所有者能立即读取被引用
@@ -2311,32 +2256,50 @@ object AcpProxy {
         configuredRobotNames.clear()
         configuredRobotNames.addAll(latestConfiguredRobots.keys)
 
-        // 1. 找到该 robot 的所有旧 groupId，逐一关闭
-        val oldGroupIds = registry.getGroupIdsByRobot(robotName)
-        val remainsTeamSource = TeamSourceEligibility.isEligible(robot)
+        // 1. 找到该 robot 的所有旧 MAIN/Starweave client 与 Team 来源槽位。
+        // Team-only Robot 没有 MAIN client，也必须清掉来源维度的旧功能实例，
+        // 否则新 Team client 仍会复用保存前的记忆/能力配置。
+        val oldSourceGroupIds = if (runtimeRobotName.isEmpty()) emptyList()
+            else globalGroupRobotRegistry.entries
+                .filter { it.value.name == runtimeRobotName }
+                .map { it.key }
+                .distinct()
+        val oldGroupIds = if (runtimeRobotName.isEmpty()) emptyList()
+            else registry.getGroupIdsByRobot(runtimeRobotName)
         for (groupId in oldGroupIds) {
             registry.closeByGroupId(groupId)
             // 新 client 必须按最新记忆执行方式重建 manager；旧 Team 引用由
             // MemoryManagerRegistry 延迟到全局 stop 再关闭。
             memoryManagers.remove(groupId)
-            // MAIN → Team-only 时 Team client 仍按 sourceGroupId 共用这些服务。
-            if (!remainsTeamSource) {
-                abilityServices.remove(groupId)
+            abilityServices.remove(groupId)
+            log.info("robot '{}' 旧 client 已关闭, groupId={}", runtimeRobotName, groupId)
+        }
+        oldSourceGroupIds.forEach { sourceGroupId ->
+            memoryManagers.remove(sourceGroupId)
+            abilityServices.remove(sourceGroupId)
+        }
+        if (runtimeRobotName.isNotEmpty()) {
+            globalGroupRobotRegistry.entries.removeIf { it.value.name == runtimeRobotName }
+            taskRobotRegistry.entries.removeIf { it.value.name == runtimeRobotName }
+            robotToGroupIdMap.remove(runtimeRobotName)
+            robotToGroupIdMap.remove("MOLACHAT:$runtimeRobotName")
+            robotToGroupIdMap.remove("STARWEAVE:$runtimeRobotName")
+            robotToGroupIdMap.keys.removeIf { key ->
+                key.startsWith("MOLACHAT:") && key.endsWith(":$runtimeRobotName") ||
+                    key.startsWith("STARWEAVE:") && key.endsWith(":$runtimeRobotName")
             }
-            log.info("robot '{}' 旧 client 已关闭, groupId={}", robotName, groupId)
+            memoryManagers.remove("subagent:$runtimeRobotName")
+            if (runtimeRobotName != robotName) {
+                val previousAcpId = "acp-" + runtimeRobotName.replace(" ", "_")
+                    .replace("\u3000", "_")
+                teamManager?.disableSourceRobot(previousAcpId)
+            }
         }
-        globalGroupRobotRegistry.entries.removeIf { it.value.name == robotName }
-        taskRobotRegistry.entries.removeIf { it.value.name == robotName }
-        robotToGroupIdMap.remove(robotName)
-        robotToGroupIdMap.remove("MOLACHAT:$robotName")
-        robotToGroupIdMap.remove("STARWEAVE:$robotName")
-        robotToGroupIdMap.keys.removeIf { key ->
-            key.startsWith("MOLACHAT:") && key.endsWith(":$robotName") ||
-                key.startsWith("STARWEAVE:") && key.endsWith(":$robotName")
-        }
-        memoryManagers.remove("subagent:$robotName")
 
         // 2. 更新全局 robot 注册表
+        if (runtimeRobotName.isNotEmpty()) {
+            globalRobotRegistry.remove(runtimeRobotName)
+        }
         configuredRobotRegistry[robotName] = robot
         if (robot.isEnabled && !robot.isOnlyTeamMember) {
             globalRobotRegistry[robotName] = robot
@@ -2359,6 +2322,7 @@ object AcpProxy {
         teamManager?.reconcileRevokedGrants()
 
         // 3. 只有普通 MAIN robot 才重建 client；Team-only 仅保留来源配置。
+        val startupFailures = mutableListOf<String>()
         if (robot.isEnabled && !robot.isOnlySubAgent && !robot.isOnlyTeamMember) {
             val newGroupIds = sourceGroupIds
 
@@ -2369,7 +2333,10 @@ object AcpProxy {
                         featureInitializer.initialize(
                             AcpClientFeatureInitializer.Context.main(groupId), created, robot)
                     }
-                    if (registry.getClient(groupId) == null) continue
+                    if (registry.getClient(groupId) == null) {
+                        startupFailures.add("$groupId: ACP client was not registered")
+                        continue
+                    }
 
                     // 更新 robotToGroupIdMap（取第一个新 groupId）
                     robotToGroupIdMap.putIfAbsent(robotName, groupId)
@@ -2383,6 +2350,7 @@ object AcpProxy {
                     log.info("robot '{}' 新 client 已创建, groupId={}", robotName, groupId)
                 } catch (e: Exception) {
                     log.error("robot '{}' client 重建失败, groupId={}", robotName, groupId, e)
+                    startupFailures.add("$groupId: ${e.message ?: e.javaClass.simpleName}")
                 }
             }
 
@@ -2400,7 +2368,39 @@ object AcpProxy {
             }
         }
 
-        // 4. 触发 acpSyncRobots 通知 MolaChat 更新 robot 信息
+        // 4. 恢复被本次 Robot 重建影响的 Starweave/Team 会话。
+        // Starweave 只恢复刷新前已经 ACTIVE 的槽位；Team member 则按来源
+        // Robot 精确替换 client，并通过 session/load 继续原会话。
+        if (robot.isEnabled && !robot.isOnlySubAgent && !robot.isOnlyTeamMember) {
+            try {
+                val previousStarweaveRobot = if (runtimeRobotName.isEmpty()) {
+                    robotName
+                } else runtimeRobotName
+                val reopened = starweaveSessionManager?.reopenAfterRobotRefresh(
+                    previousStarweaveRobot, robotName)
+                if (reopened != null) {
+                    log.info("Starweave 会话已随 robot 自动刷新并开启: robot={}, sessionId={}",
+                        robotName, reopened.getString("sessionId"))
+                }
+            } catch (e: Exception) {
+                log.error("Starweave 会话随 robot 自动刷新失败: robot={}", robotName, e)
+                startupFailures.add("Starweave: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+        if (TeamSourceEligibility.isEligible(robot)) {
+            try {
+                val refreshedMembers = teamManager?.refreshSourceRobot(acpId) ?: 0
+                if (refreshedMembers > 0) {
+                    log.info("Team member 已随 robot 自动刷新并开启: robot={}, members={}",
+                        robotName, refreshedMembers)
+                }
+            } catch (e: Exception) {
+                log.error("Team member 随 robot 自动刷新失败: robot={}", robotName, e)
+                startupFailures.add("Fast Team: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+
+        // 5. 触发 acpSyncRobots 通知 MolaChat 更新 robot 信息
         try {
             val allRobots = globalRobotRegistry.values.filter {
                 it.isEnabled && !it.isOnlySubAgent && !it.isOnlyTeamMember
@@ -2418,6 +2418,10 @@ object AcpProxy {
             log.error("acpSyncRobots 回调发送失败 (robot级重载)", e)
         }
 
+        if (startupFailures.isNotEmpty()) {
+            throw IllegalStateException(
+                "robot '$robotName' failed to start: ${startupFailures.joinToString("; ")}")
+        }
         log.info("robot 级热重载完成: robot={}", robotName)
     }
 

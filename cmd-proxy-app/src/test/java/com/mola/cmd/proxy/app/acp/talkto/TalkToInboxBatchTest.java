@@ -94,8 +94,8 @@ public class TalkToInboxBatchTest {
         TalkToCircuitBreaker.Admission first = dispatcher.circuitBreaker.admit(null, "A", "B");
         dispatcher.offerToInbox("route", new TalkToMessage("A", "queued", 1,
                 Collections.emptyList(), null, first.getTrace()));
-        dispatcher.circuitBreaker.admit(first.getTrace(), "A", "B");
-        assertFalse(dispatcher.circuitBreaker.admit(first.getTrace(), "A", "C").isAccepted());
+        assertFalse(dispatcher.circuitBreaker.openCascade(
+                first.getTrace(), "TEST_LIMIT").isAccepted());
         assertNull(dispatcher.pollInboxBatch("route", null, 8));
     }
 

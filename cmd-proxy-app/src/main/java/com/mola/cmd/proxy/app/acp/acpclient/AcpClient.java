@@ -20,7 +20,6 @@ import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
 import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
-import com.mola.cmd.proxy.app.acp.subagent.DispatchBufferFilter;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentContextInjector;
 import com.mola.cmd.proxy.app.acp.subagent.SubAgentDispatcher;
 import com.mola.cmd.proxy.app.acp.subagent.model.SubAgentResult;
@@ -63,7 +62,6 @@ public class AcpClient extends AbstractAcpClient {
     private static final Logger logger = LoggerFactory.getLogger(AcpClient.class);
     private static final String CHANNEL_REPLY_TARGET = "回复";
     private static final long CHANNEL_REPLY_CONTINUATION_TTL_MS = 10L * 60L * 1000L;
-    private static final AtomicLong LEGACY_ACTION_JSON_HIT_COUNT = new AtomicLong();
     private static final int MAX_CONSECUTIVE_INBOX_TURNS = 2;
     private static final long INBOX_FAIRNESS_DELAY_MS = 250L;
     private static final ScheduledExecutorService INBOX_SCHEDULER =
@@ -100,7 +98,6 @@ public class AcpClient extends AbstractAcpClient {
     private final AtomicBoolean queuedWorkCancellationPending = new AtomicBoolean(false);
     private final AtomicInteger consecutiveInboxTurns = new AtomicInteger();
     private final AtomicBoolean deferredInboxScheduled = new AtomicBoolean();
-    private final ActionToolService actionToolService;
 
     /** 会话上下文管理器 */
     private final ConversationHistoryManager historyManager;
@@ -209,7 +206,7 @@ public class AcpClient extends AbstractAcpClient {
         this.mcpConfigPaths = agentProvider.getMcpConfigPaths(this.workspacePath, robotParam);
         this.authSessionId = McpAuthManager.getInstance().createSession(
                 clientIdentity.getTransportGroup());
-        this.actionToolService = new ActionToolService(
+        ActionToolService actionToolService = new ActionToolService(
                 this::executeMcpDispatchSubagent,
                 args -> executeMcpSchedule("schedule_task", args),
                 args -> executeMcpSchedule("manage_schedule", args),
@@ -804,11 +801,11 @@ public class AcpClient extends AbstractAcpClient {
                             ? element.getAsJsonObject().get("name").getAsString() : "")) {
                 throw new IllegalStateException("MCP Server 名称 '"
                         + CmdProxyMcpHttpHandler.SERVER_NAME
-                        + "' 为 cmd-proxy 运行时保留名称，请重命名用户配置中的同名 Server");
+                        + "' 为 ACP harness 保留名称，请重命名用户配置中的同名 Server");
             }
         }
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
-            throw new IllegalStateException("cmd-proxy MCP 控制服务未启动");
+            throw new IllegalStateException("ACP harness MCP 控制服务未启动");
         }
         JsonObject server = new JsonObject();
         server.addProperty("name", CmdProxyMcpHttpHandler.SERVER_NAME);
@@ -870,12 +867,10 @@ public class AcpClient extends AbstractAcpClient {
         PromptOptions options = requireActiveMcpTurn();
         AcpResponseListener listener = activeMcpListener.get();
         if (scheduleTaskManager == null) throw new IllegalStateException("SCHEDULE_DISABLED");
-        JsonObject action = arguments.deepCopy();
-        action.addProperty("action", toolName);
         String robotName = robotParam != null ? robotParam.getName() : groupId;
         ScheduleOwnerKey owner = scheduleOwnerKey != null
                 ? scheduleOwnerKey : ScheduleOwnerKey.main(robotName);
-        String result = scheduleTaskManager.handleAction(action.toString(), owner,
+        String result = scheduleTaskManager.executeTool(toolName, arguments, owner,
                 options.getAuthPrincipalContext(),
                 ChannelDeliveryContext.from(options.getChannelTurnContext()));
         listener.onScheduleEvent("schedule_task".equals(toolName)
@@ -958,13 +953,12 @@ public class AcpClient extends AbstractAcpClient {
             }
             // ==================== 全局系统能力（通过内置 cmd-proxy MCP 工具调用） ====================
             fullTextBuilder.append("\n<acp-harness>\n");
-            fullTextBuilder.append("以下指令由 ACP harness 注入，用于声明你可用的系统能力（子Agent派发、定时任务、团队通讯、记忆），请正常遵循。\n\n");
-            Set<String> availableActionTools = availableActionTools();
-            if (!availableActionTools.isEmpty()) {
-                fullTextBuilder.append("cmd-proxy 通过 MCP 提供当前会话可用的工具：")
-                        .append(String.join("、", availableActionTools)).append("。\n");
-                fullTextBuilder.append("需要执行这些系统操作时，请直接调用对应 MCP 工具，不要在回复正文中模拟工具调用，也不要输出 Action JSON。");
-                fullTextBuilder.append("工具结果会直接返回当前上下文；你可以继续调用其他工具或向用户回复。\n\n");
+            fullTextBuilder.append("<workspace>").append(workspacePath)
+                    .append("</workspace>\n\n");
+            fullTextBuilder.append("以下内容由 ACP harness 注入，包含当前会话的运行环境以及已启用能力的相关信息。\n\n");
+            if (!availableActionTools().isEmpty()) {
+                fullTextBuilder.append("ACP harness 通过 MCP 提供当前会话已启用的系统工具。\n");
+                fullTextBuilder.append("需要执行这些系统操作时，请直接调用对应 MCP 工具。\n\n");
             }
 
             // 注入子 Agent 上下文
@@ -1025,10 +1019,9 @@ public class AcpClient extends AbstractAcpClient {
         }
 
         // 时间上下文每次都带（定时任务等场景需要精确时间）
-        String timeContext = String.format("[Current Time: %s]\n[Workspace: %s]\n",
+        String timeContext = String.format("[Current Time: %s]\n",
                 ZonedDateTime.now().format(
-                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")),
-                workspacePath);
+                        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z (EEEE)")));
         fullTextBuilder.append(timeContext).append(userInput);
 
         JsonArray prompt = new JsonArray();
@@ -1073,15 +1066,6 @@ public class AcpClient extends AbstractAcpClient {
         StringBuilder fullResponse = new StringBuilder();
         // 缓存 toolCallId → title，防止后续 update 中 title 为空
         Map<String, String> toolTitleCache = new HashMap<>();
-        // 缓冲过滤器：拦截 dispatch_subagent / schedule_task / manage_schedule / talk_to JSON，避免推送给用户
-        boolean scheduleFilterEnabled = scheduleTaskManager != null;
-        boolean talkToFilterEnabled = talkToDispatcher != null;
-        AtomicBoolean promptResponseReceived = new AtomicBoolean(false);
-        AtomicBoolean actionTurnStopRequested = new AtomicBoolean(false);
-        DispatchBufferFilter bufferFilter = new DispatchBufferFilter(
-                listener, subAgentDispatcher != null, scheduleFilterEnabled, talkToFilterEnabled,
-                capturedJson -> requestActionTurnStop(
-                        promptResponseReceived, actionTurnStopRequested));
         while (true) {
             String line = reader.readLine();
             if (line == null) {
@@ -1111,7 +1095,6 @@ public class AcpClient extends AbstractAcpClient {
 
             // prompt response（JSON-RPC Response 没有 method 字段，排除 Request 误匹配）
             if (!msg.has("method") && msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
-                promptResponseReceived.set(true);
                 String stopReason = "unknown";
                 if (msg.has("result") && msg.getAsJsonObject("result").has("stopReason")) {
                     stopReason = msg.getAsJsonObject("result").get("stopReason").getAsString();
@@ -1120,23 +1103,11 @@ public class AcpClient extends AbstractAcpClient {
 
                 // 排空迟到 chunk（OpenCode ACP bug workaround）
                 // sleep 让管道里迟到的数据到位，然后一次抽干 reader 缓冲区
-                drainLateChunks(fullResponse, bufferFilter, listener, toolTitleCache);
+                drainLateChunks(fullResponse, listener, toolTitleCache);
 
                 historyManager.addAssistantMessage(fullResponse.toString());
                 historyManager.flushTurn(sessionId);
                 lastMessageAt.set(System.currentTimeMillis());
-
-                // flush 缓冲区（如果有未推送的非 dispatch 内容）
-                bufferFilter.flush();
-
-                // Action Loop：本 round 只执行流式捕获的第一条 action，结果通过
-                // handler 的 follow-up prompt 回灌给 LLM；下一条 action 由下一 round 决定。
-                List<String> capturedJsonList = bufferFilter.getCapturedJsonList();
-                String capturedJson = firstEnabledCapturedAction(capturedJsonList);
-                if (capturedJson != null) {
-                    handleCapturedAction(capturedJson, fullResponse.toString(), listener, options);
-                    return;
-                }
 
                 if (options.hasChannelTurnContext()) {
                     if (!options.hasChannelReplyAttempt()
@@ -1158,7 +1129,7 @@ public class AcpClient extends AbstractAcpClient {
 
             // session/update
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
-                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache,
+                processSessionUpdate(msg, fullResponse, listener, toolTitleCache,
                         compactionSignal);
             } else {
                 double usage = agentProvider.extractContextUsage(msg);
@@ -1192,46 +1163,6 @@ public class AcpClient extends AbstractAcpClient {
             return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.SCHEDULE;
         }
         return com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.USER;
-    }
-
-    void requestActionTurnStop(AtomicBoolean promptResponseReceived,
-                               AtomicBoolean actionTurnStopRequested) {
-        if (promptResponseReceived.get()
-                || !actionTurnStopRequested.compareAndSet(false, true)) {
-            return;
-        }
-        if (sessionId == null) {
-            logger.warn("捕获 action 时 sessionId 为空，无法提前结束当前 round");
-            return;
-        }
-        JsonObject params = new JsonObject();
-        params.addProperty("sessionId", sessionId);
-        JsonObject notification = new JsonObject();
-        notification.addProperty("jsonrpc", JSONRPC_VERSION);
-        notification.addProperty("method", "session/cancel");
-        notification.add("params", params);
-        try {
-            sendJson(notification);
-            logger.info("已捕获首条 action，发送 session/cancel 结束当前 prompt round, sessionId={}",
-                    sessionId);
-        } catch (IOException e) {
-            // cancel 是延迟优化；发送失败不丢 action，仍由 prompt 正常结束路径处理。
-            logger.warn("action 捕获后发送 session/cancel 失败，等待当前 round 自然结束", e);
-        }
-    }
-
-    private String firstEnabledCapturedAction(List<String> capturedJsonList) {
-        if (capturedJsonList == null) return null;
-        for (String json : capturedJsonList) {
-            String action = capturedAction(json);
-            if (("dispatch_subagent".equals(action) && subAgentDispatcher != null)
-                    || (("schedule_task".equals(action) || "manage_schedule".equals(action))
-                    && scheduleTaskManager != null)
-                    || ("talk_to".equals(action) && talkToDispatcher != null)) {
-                return json;
-            }
-        }
-        return null;
     }
 
     public long getLastMessageAt() {
@@ -1269,7 +1200,7 @@ public class AcpClient extends AbstractAcpClient {
      * 主循环和 drain 阶段共用此方法。
      */
     private void processSessionUpdate(JsonObject msg, StringBuilder fullResponse,
-                                      DispatchBufferFilter bufferFilter, AcpResponseListener listener,
+                                      AcpResponseListener listener,
                                       Map<String, String> toolTitleCache,
                                       AgentProvider.CompactionSignal compactionSignal) {
         JsonObject updateParams = msg.getAsJsonObject("params");
@@ -1290,7 +1221,7 @@ public class AcpClient extends AbstractAcpClient {
                     return;
                 }
                 fullResponse.append(text);
-                bufferFilter.accept(text);
+                listener.onMessage(text);
             }
         } else if ("tool_call".equals(updateType) || "tool_call_update".equals(updateType)) {
             String toolCallId = update.has("toolCallId") ? update.get("toolCallId").getAsString() : "";
@@ -1352,7 +1283,8 @@ public class AcpClient extends AbstractAcpClient {
         }
         String normalized = searchable.toString().toLowerCase(Locale.ROOT)
                 .replace('_', '-');
-        if (!normalized.contains("cmd-proxy")) return false;
+        if (!normalized.contains("acp-harness")
+                && !normalized.contains("cmd-proxy")) return false;
         return normalized.contains("dispatch-subagent")
                 || normalized.contains("schedule-task")
                 || normalized.contains("manage-schedule")
@@ -1430,7 +1362,7 @@ public class AcpClient extends AbstractAcpClient {
      * end_turn RPC response 之后送达）。
      * sleep 让管道里迟到的数据到位，然后一次性抽干 reader 缓冲区。
      */
-    private void drainLateChunks(StringBuilder fullResponse, DispatchBufferFilter bufferFilter,
+    private void drainLateChunks(StringBuilder fullResponse,
                                  AcpResponseListener listener, Map<String, String> toolTitleCache)
             throws IOException {
         try {
@@ -1458,280 +1390,11 @@ public class AcpClient extends AbstractAcpClient {
                     observeCompactionSignal(msg, listener);
 
             if (msg.has("method") && "session/update".equals(msg.get("method").getAsString())) {
-                processSessionUpdate(msg, fullResponse, bufferFilter, listener, toolTitleCache,
+                processSessionUpdate(msg, fullResponse, listener, toolTitleCache,
                         compactionSignal);
             } else if (msg.has("method") && "session/request_permission".equals(msg.get("method").getAsString())) {
                 autoAllowPermission(msg);
             }
-        }
-    }
-
-    /**
-     * 检测并处理子 Agent 派发指令。
-     * <p>
-     * 在主 Agent turn 结束后调用。如果检测到 dispatch_subagent 指令：
-     * 1. 并行执行子 Agent 任务
-     * 2. 将结果格式化为 follow-up prompt
-     * 3. 自动发送第二轮 prompt 让主 Agent 汇总
-     *
-     * @return true 如果检测到并处理了派发指令
-     */
-    private boolean handleSubAgentDispatch(String fullResponse, AcpResponseListener listener,
-                                           PromptOptions options) {
-        if (subAgentDispatcher == null) return false;
-
-        List<SubAgentTask> tasks = subAgentDispatcher.detectDispatch(fullResponse);
-        if (tasks == null || tasks.isEmpty()) return false;
-
-        logger.info("检测到子 Agent 派发指令，任务数={}", tasks.size());
-
-        try {
-            List<SubAgentResult> results = subAgentDispatcher.dispatch(
-                    tasks, listener, workspacePath,
-                    options == null ? null : options.getAuthPrincipalContext());
-
-            String resultContext = SubAgentDispatcher.formatResults(results);
-
-            listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
-                    "正在汇总子 Agent 结果...");
-            sendPrompt(resultContext, null, Collections.emptySet(), listener, options);
-            return true;
-
-        } catch (Exception e) {
-            logger.error("子 Agent 派发处理失败", e);
-            listener.onSubAgentEvent("DISPATCH_COMPLETE", null,
-                    "子 Agent 派发失败: " + e.getMessage());
-            releaseChannelTurn(options);
-            listener.onComplete(fullResponse);
-            return true;
-        }
-    }
-
-
-
-    /**
-     * 检测并处理定时任务指令（schedule_task / manage_schedule）。
-     *
-     * @return true 如果检测到并处理了定时任务指令
-     */
-    private boolean handleScheduleAction(String fullResponse, AcpResponseListener listener,
-                                         PromptOptions options) {
-        if (scheduleTaskManager == null) return false;
-
-        try {
-            String robotName = robotParam != null ? robotParam.getName() : groupId;
-            ScheduleOwnerKey owner = scheduleOwnerKey != null
-                    ? scheduleOwnerKey : ScheduleOwnerKey.main(robotName);
-            String resultText = scheduleTaskManager.detectAndHandle(fullResponse, owner,
-                    options == null ? null : options.getAuthPrincipalContext());
-            if (resultText == null) return false;
-
-            // UI 事件推送：根据 action 类型决定展开/收起
-            boolean isCreate = fullResponse.contains("schedule_task");
-            String eventType = isCreate ? "SCHEDULE_CREATE" : "SCHEDULE_MANAGE";
-            listener.onScheduleEvent(eventType, resultText, isCreate);
-
-            logger.info("定时任务指令处理完成");
-            sendPrompt(resultText, null, Collections.emptySet(), listener, options);
-            return true;
-
-        } catch (Exception e) {
-            logger.error("定时任务指令处理失败", e);
-            try {
-                sendPrompt("[定时任务操作结果]\n操作失败: " + e.getMessage(), null,
-                        Collections.emptySet(), listener, options);
-            } catch (IOException ioe) {
-                logger.error("发送错误结果失败", ioe);
-                releaseChannelTurn(options);
-                listener.onComplete(fullResponse);
-            }
-            return true;
-        }
-    }
-
-
-
-    /**
-     * 检测并处理 talkTo 指令。
-     * <p>
-     * 在主 Agent turn 结束后调用。如果检测到 talk_to 指令：
-     * 1. 解析目标和内容
-     * 2. 通过 TalkToDispatcher 投递消息
-     * 3. 将结果作为 follow-up prompt 发回主 Agent
-     *
-     * @return true 如果检测到并处理了 talkTo 指令
-     */
-    private boolean handleTalkTo(String fullResponse, AcpResponseListener listener) {
-        if (talkToDispatcher == null) return false;
-
-        TalkToRequest request =
-                talkToDispatcher.detectTalkTo(fullResponse);
-        if (request == null) return false;
-        PromptOptions options = activeMcpOptions.get();
-        String displayTarget = request.getTarget();
-        request = request.withParentTrace(options == null ? null
-                : options.talkToParentFor(displayTarget));
-        request = resolveChannelReplyTarget(request, options);
-        if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
-            try {
-                sendPrompt(unresolvedChannelReplyResult(), null, Collections.emptySet(),
-                        listener, options);
-            } catch (IOException e) {
-                releaseChannelTurn(options);
-                listener.onError(e);
-            }
-            return true;
-        }
-
-        String senderName = talkToRoutingName();
-        // 从 groupId 中提取 chatterId（groupId = sort(chatterId, acpId).join("")）
-        String senderChatterId = extractChatterId();
-        logger.info("检测到 talkTo 指令: {} → {}", senderName, request.getTarget());
-
-        try {
-            java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
-                    robotParam != null ? robotParam.getContacts() : null;
-            String resultText = talkToDispatcher.deliver(
-                    request, senderName, senderChatterId, groupId, contacts,
-                    options == null ? null : options.getAuthPrincipalContext());
-            recordPendingChannelReply(request, options, resultText);
-            // 在发送方前端推送 talkTo 卡片
-            publishOrdinaryTalkToResult(
-                    listener, displayTarget, request.getContent(), resultText);
-            if (isTalkToCircuitOpen(resultText)) {
-                releaseChannelTurn(options);
-                listener.onComplete(resultText);
-                return true;
-            }
-            sendPrompt(resultText, null, Collections.emptySet(), listener, options);
-            return true;
-        } catch (Exception e) {
-            logger.error("talkTo 处理失败", e);
-            try {
-                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null,
-                        Collections.emptySet(), listener, options);
-            } catch (IOException ioe) {
-                logger.error("发送 talkTo 错误结果失败", ioe);
-                releaseChannelTurn(options);
-                listener.onComplete(fullResponse);
-            }
-            return true;
-        }
-    }
-
-    /**
-     * 根据捕获的 JSON 中的 action 类型分发执行对应的业务逻辑。
-     * 在 turn 结束后调用，替代原来的 if-return 重解析链。
-     */
-    private void handleCapturedAction(String capturedJson, String fullResponse,
-                                      AcpResponseListener listener, PromptOptions options) {
-        String action = capturedAction(capturedJson);
-        if (!("dispatch_subagent".equals(action)
-                || "schedule_task".equals(action)
-                || "manage_schedule".equals(action)
-                || "talk_to".equals(action))) {
-            logger.warn("捕获了未知 action 的 JSON: {}", capturedJson);
-            releaseChannelTurn(options);
-            listener.onComplete(fullResponse);
-            return;
-        }
-
-        try {
-            JsonObject arguments = JsonParser.parseString(capturedJson).getAsJsonObject();
-            arguments.remove("action");
-            long hitCount = LEGACY_ACTION_JSON_HIT_COUNT.incrementAndGet();
-            logger.info("旧 Action JSON 兼容路径命中，将通过 ActionToolService 执行, action={}, totalHits={}",
-                    action, hitCount);
-            String result = actionToolService.execute(action, arguments);
-            if ("talk_to".equals(action) && isTalkToCircuitOpen(result)) {
-                releaseChannelTurn(options);
-                listener.onComplete(result);
-                return;
-            }
-            sendPrompt(result, null, Collections.emptySet(), listener, options);
-        } catch (Exception e) {
-            logger.error("旧 Action JSON 兼容执行失败, action={}", action, e);
-            try {
-                sendPrompt("[cmd-proxy 工具结果]\n执行失败: " + e.getMessage(), null,
-                        Collections.emptySet(), listener, options);
-            } catch (IOException followUpError) {
-                logger.error("发送兼容执行错误结果失败", followUpError);
-                releaseChannelTurn(options);
-                listener.onComplete(fullResponse);
-            }
-        }
-    }
-
-    private static String capturedAction(String json) {
-        try {
-            JsonObject object = JsonParser.parseString(json).getAsJsonObject();
-            return object.has("action") && !object.get("action").isJsonNull()
-                    ? object.get("action").getAsString() : "";
-        } catch (RuntimeException e) {
-            return "";
-        }
-    }
-
-    /**
-     * 直接使用已捕获的 JSON 处理 talk_to，避免从 fullResponse 中重新解析。
-     */
-    private boolean handleTalkToDirect(String capturedJson, String fullResponse,
-                                       AcpResponseListener listener, PromptOptions options) {
-        if (talkToDispatcher == null) {
-            logger.warn("talkToDispatcher 为 null，无法处理 talk_to");
-            return false;
-        }
-
-        TalkToRequest request = talkToDispatcher.parseTalkToJson(capturedJson);
-        if (request == null) {
-            logger.warn("capturedJson 解析 talk_to 失败, json={}", capturedJson);
-            return false;
-        }
-        String displayTarget = request.getTarget();
-        request = request.withParentTrace(options == null ? null
-                : options.talkToParentFor(displayTarget));
-        request = resolveChannelReplyTarget(request, options);
-        if (CHANNEL_REPLY_TARGET.equals(request.getTarget())) {
-            try {
-                sendPrompt(unresolvedChannelReplyResult(), null, Collections.emptySet(),
-                        listener, options);
-            } catch (IOException e) {
-                logger.error("发送缺失信道续接结果失败", e);
-                releaseChannelTurn(options);
-            }
-            return true;
-        }
-
-        String senderName = talkToRoutingName();
-        String senderChatterId = extractChatterId();
-        logger.info("检测到 talkTo 指令(buffered): {} → {}", senderName, request.getTarget());
-
-        try {
-            java.util.List<com.mola.cmd.proxy.app.acp.talkto.model.ContactRef> contacts =
-                    robotParam != null ? robotParam.getContacts() : null;
-            String resultText = talkToDispatcher.deliver(
-                    request, senderName, senderChatterId, groupId, contacts,
-                    options == null ? null : options.getAuthPrincipalContext());
-            recordPendingChannelReply(request, options, resultText);
-            publishOrdinaryTalkToResult(
-                    listener, displayTarget, request.getContent(), resultText);
-            if (isTalkToCircuitOpen(resultText)) {
-                releaseChannelTurn(options);
-                listener.onComplete(resultText);
-                return true;
-            }
-            sendPrompt(resultText, null, Collections.emptySet(), listener, options);
-            return true;
-        } catch (Exception e) {
-            logger.error("talkTo 处理失败", e);
-            try {
-                sendPrompt("[talkTo 结果]\n发送失败: " + e.getMessage(), null,
-                        Collections.emptySet(), listener, options);
-            } catch (IOException ioe) {
-                logger.error("发送 talkTo 错误结果失败", ioe);
-                releaseChannelTurn(options);
-            }
-            return true; // 已处理（虽然失败），不 fallback
         }
     }
 

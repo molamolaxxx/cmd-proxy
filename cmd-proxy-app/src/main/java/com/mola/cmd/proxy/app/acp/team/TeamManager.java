@@ -75,6 +75,9 @@ public final class TeamManager implements AutoCloseable {
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> autoNewSessionLastChecks =
             new ConcurrentHashMap<>();
+    /** First observation time for member BUSY while the authoritative client is READY. */
+    private final ConcurrentHashMap<String, Long> scheduleStateMismatchSince =
+            new ConcurrentHashMap<>();
     private final TeamResourceReaper resourceReaper;
     private final TeamLimits limits;
     private final TeamMetrics metrics = new TeamMetrics();
@@ -83,6 +86,7 @@ public final class TeamManager implements AutoCloseable {
     private static final long OPERATION_TTL_MILLIS = 24L * 60L * 60L * 1000L;
     private static final long TOMBSTONE_TTL_MILLIS = 7L * 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_CLEANUP_TIMEOUT_MILLIS = 30_000L;
+    private static final long SCHEDULE_STATE_MISMATCH_GRACE_MILLIS = 30_000L;
 
     public TeamManager(TeamStore store, TeamClientRegistry clientRegistry) {
         this(store, clientRegistry, spec -> {
@@ -525,6 +529,109 @@ public final class TeamManager implements AutoCloseable {
         }
     }
 
+    public TeamCommandResult updateRemarks(TeamRemarksUpdateCommand command) {
+        String requestId = command == null ? "" : command.getRequestId();
+        try {
+            validateRemarksUpdate(command);
+        } catch (IllegalArgumentException e) {
+            return TeamCommandResult.error(requestId,
+                    TeamErrorCode.VALIDATION_ERROR, e.getMessage());
+        }
+        String payloadHash = sha256(gson.toJson(command));
+        synchronized (requestLocks.computeIfAbsent(requestId, ignored -> new Object())) {
+            try {
+                Optional<TeamOperationRecord> existing = store.loadOperation(requestId);
+                if (existing.isPresent()) {
+                    TeamOperationRecord operation = existing.get();
+                    if (operation.getOperation() != TeamOperationRecord.Operation.UPDATE_REMARKS
+                            || !payloadHash.equals(operation.getPayloadHash())) {
+                        return TeamCommandResult.error(requestId,
+                                TeamErrorCode.IDEMPOTENCY_CONFLICT,
+                                "requestId already used with different operation or payload");
+                    }
+                    if (operation.getResultSnapshot() != null
+                            && !operation.getResultSnapshot().trim().isEmpty()) {
+                        return TeamCommandResult.fromSnapshotJson(
+                                operation.getResultSnapshot());
+                    }
+                }
+                TeamRuntime runtime = teams.get(command.getTeamId());
+                if (runtime == null) {
+                    Optional<TeamDefinition> persisted = store.loadTeam(command.getTeamId());
+                    if (!persisted.isPresent()) {
+                        return TeamCommandResult.error(requestId,
+                                TeamErrorCode.NOT_FOUND, "Team not found");
+                    }
+                    attachPersistedDefinition(persisted.get());
+                    runtime = teams.get(command.getTeamId());
+                }
+                runtime.getOperationLock().lock();
+                try {
+                    TeamDefinition current = runtime.getDefinition();
+                    if (!command.getOwnerChatterId().equals(current.getOwnerChatterId())) {
+                        return TeamCommandResult.error(requestId,
+                                TeamErrorCode.UNAUTHORIZED,
+                                "Team does not belong to ownerChatterId");
+                    }
+                    if (current.getState().isTerminal()
+                            || current.getState() == TeamState.DELETING) {
+                        return TeamCommandResult.error(requestId,
+                                TeamErrorCode.TEAM_DELETING,
+                                "Team cannot be edited while deleting");
+                    }
+                    if (command.getExpectedVersion() != null
+                            && command.getExpectedVersion().longValue()
+                            != current.getVersion()) {
+                        return TeamCommandResult.error(requestId,
+                                TeamErrorCode.VERSION_CONFLICT,
+                                "expectedVersion does not match current Team version");
+                    }
+                    validateMemberRemarks(current, command.getMemberRemarks());
+                    if (!existing.isPresent()) {
+                        store.saveOperation(new TeamOperationRecord(requestId,
+                                TeamOperationRecord.Operation.UPDATE_REMARKS,
+                                payloadHash, command.getTeamId(),
+                                TeamOperationRecord.Status.ACCEPTED, null,
+                                System.currentTimeMillis(),
+                                System.currentTimeMillis() + OPERATION_TTL_MILLIS));
+                    }
+                    TeamDefinition next = current.withMemberRemarks(
+                            command.getMemberRemarks(), System.currentTimeMillis());
+                    store.saveTeam(next);
+                    if (!runtime.publishNextDefinition(next)) {
+                        throw new IOException(
+                                "Team version changed before remarks update publish");
+                    }
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("team", next);
+                    publishEvent(runtime, TeamEventType.TEAM_REMARKS_UPDATED, data);
+                    TeamCommandResult result = TeamCommandResult.success(requestId,
+                            "UPDATED", "Team member remarks updated",
+                            next.getVersion(), data);
+                    return finishRemarksUpdateOperation(command, payloadHash, result,
+                            TeamOperationRecord.Status.SUCCEEDED);
+                } finally {
+                    runtime.getOperationLock().unlock();
+                }
+            } catch (IllegalArgumentException e) {
+                return TeamCommandResult.error(requestId,
+                        TeamErrorCode.VALIDATION_ERROR, e.getMessage());
+            } catch (TeamStore.VersionConflictException e) {
+                return TeamCommandResult.error(requestId,
+                        TeamErrorCode.VERSION_CONFLICT, e.getMessage());
+            } catch (Exception e) {
+                TeamCommandResult result = TeamCommandResult.error(requestId,
+                        TeamErrorCode.INTERNAL_ERROR, safeMessage(e));
+                try {
+                    return finishRemarksUpdateOperation(command, payloadHash, result,
+                            TeamOperationRecord.Status.FAILED);
+                } catch (IOException ignored) {
+                    return result;
+                }
+            }
+        }
+    }
+
     public TeamCommandResult list(TeamQuery query) {
         try {
             ensureOpen();
@@ -671,6 +778,8 @@ public final class TeamManager implements AutoCloseable {
      */
     public void cleanupEphemeralResourcesForDelete(String teamId) {
         cleanupTalkTo(teamId);
+        scheduleStateMismatchSince.keySet().removeIf(
+                key -> key.startsWith(teamId + ":"));
         scheduleCleanup.accept(teamId);
     }
 
@@ -702,32 +811,95 @@ public final class TeamManager implements AutoCloseable {
         if (owner == null || !owner.isTeam() || prompt == null
                 || prompt.trim().isEmpty() || closed.get()
                 || startupCoordinator == null) {
+            logScheduleRejection(owner, taskId, "INVALID_OR_CLOSED",
+                    null, null, null);
             return false;
         }
         TeamRuntime runtime = teams.get(owner.getTeamId());
         if (runtime == null) {
+            logScheduleRejection(owner, taskId, "TEAM_RUNTIME_MISSING",
+                    null, null, null);
             return false;
         }
         runtime.getOperationLock().lock();
         try {
             TeamDefinition team = runtime.getDefinition();
-            if (!runtime.isAcceptingRequests()
-                    || team.getState()
-                    != com.mola.cmd.proxy.app.acp.team.model.TeamState.READY
-                    || !team.getOwnerChatterId().equals(owner.getOwnerId())
-                    || !grantsActive(team)) {
+            if (!runtime.isAcceptingRequests()) {
+                logScheduleRejection(owner, taskId, "TEAM_NOT_ACCEPTING",
+                        team, null, null);
+                return false;
+            }
+            if (team.getState()
+                    != com.mola.cmd.proxy.app.acp.team.model.TeamState.READY) {
+                logScheduleRejection(owner, taskId, "TEAM_NOT_READY",
+                        team, null, null);
+                return false;
+            }
+            if (!team.getOwnerChatterId().equals(owner.getOwnerId())) {
+                logScheduleRejection(owner, taskId, "OWNER_MISMATCH",
+                        team, null, null);
+                return false;
+            }
+            if (!grantsActive(team)) {
+                logScheduleRejection(owner, taskId, "GRANT_INACTIVE",
+                        team, null, null);
                 return false;
             }
             TeamMemberDefinition member =
                     findMember(team, owner.getTeamMemberId());
-            if (member == null
-                    || member.getState()
-                    != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.READY) {
+            if (member == null) {
+                logScheduleRejection(owner, taskId, "MEMBER_MISSING",
+                        team, null, null);
                 return false;
             }
             AcpClient old = clientRegistry.get(
                     team.getTeamId(), member.getTeamMemberId()).orElse(null);
-            if (old == null || old.getState() != AbstractAcpClient.State.READY) {
+            String mismatchKey = scheduleMismatchKey(
+                    team.getTeamId(), member.getTeamMemberId());
+            if (member.getState()
+                    != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.READY) {
+                if (member.getState()
+                        == com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.BUSY
+                        && old != null
+                        && old.getState() == AbstractAcpClient.State.READY) {
+                    long now = System.currentTimeMillis();
+                    Long firstObserved = scheduleStateMismatchSince.putIfAbsent(
+                            mismatchKey, now);
+                    long mismatchSince = firstObserved == null ? now : firstObserved;
+                    if (now - mismatchSince < SCHEDULE_STATE_MISMATCH_GRACE_MILLIS) {
+                        logScheduleRejection(owner, taskId,
+                                "MEMBER_BUSY_CLIENT_READY_GRACE", team, member, old);
+                        return false;
+                    }
+                    logger.warn("schedule_gate reconciliation=member_ready"
+                                    + " taskId={} teamId={} memberId={} sessionId={}"
+                                    + " memberState={} clientState={} mismatchMillis={}",
+                            taskId, team.getTeamId(), member.getTeamMemberId(),
+                            old.getSessionId(), member.getState(), old.getState(),
+                            now - mismatchSince);
+                    publishMemberState(runtime, member.getTeamMemberId(),
+                            com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.READY,
+                            null);
+                    team = runtime.getDefinition();
+                    member = findMember(team, owner.getTeamMemberId());
+                    scheduleStateMismatchSince.remove(mismatchKey);
+                } else {
+                    scheduleStateMismatchSince.remove(mismatchKey);
+                    logScheduleRejection(owner, taskId, "MEMBER_NOT_READY",
+                            team, member, old);
+                    return false;
+                }
+            } else {
+                scheduleStateMismatchSince.remove(mismatchKey);
+            }
+            if (old == null) {
+                logScheduleRejection(owner, taskId, "CLIENT_MISSING",
+                        team, member, null);
+                return false;
+            }
+            if (old.getState() != AbstractAcpClient.State.READY) {
+                logScheduleRejection(owner, taskId, "CLIENT_NOT_READY",
+                        team, member, old);
                 return false;
             }
 
@@ -782,6 +954,8 @@ public final class TeamManager implements AutoCloseable {
                             authPrincipalContext, channelDeliveryContext));
             return true;
         } catch (Exception error) {
+            logger.warn("schedule_gate result=error taskId={} owner={} message={}",
+                    taskId, owner, safeMessage(error), error);
             TeamError teamError = TeamError.of(
                     TeamErrorCode.CLIENT_START_FAILED, safeMessage(error), true);
             try {
@@ -1164,7 +1338,8 @@ public final class TeamManager implements AutoCloseable {
             String name = message.getToolName();
             if (name == null) return null;
             String normalized = name.toLowerCase(Locale.ROOT).replace('_', '-');
-            if (!normalized.contains("cmd-proxy")) return null;
+            if (!normalized.contains("acp-harness")
+                    && !normalized.contains("cmd-proxy")) return null;
             Map<String, Object> payload = new LinkedHashMap<>();
             String output = firstString(message.getRawOutput(), "text");
             if (normalized.contains("talk-to")) {
@@ -1737,14 +1912,41 @@ public final class TeamManager implements AutoCloseable {
                 return;
             }
             publishMemberState(runtime, memberId, state, error);
+            scheduleStateMismatchSince.remove(scheduleMismatchKey(teamId, memberId));
             retryRevokedCleanup = revokedGrantCleanupPending.contains(teamId);
-        } catch (Exception ignored) {
+        } catch (Exception updateError) {
+            logger.warn("Team member 状态回写失败, teamId={}, memberId={}, state={}",
+                    teamId, memberId, state, updateError);
         } finally {
             runtime.getOperationLock().unlock();
         }
         if (retryRevokedCleanup) {
             scheduleRevokedGrantCleanup(runtime);
         }
+    }
+
+    private void logScheduleRejection(ScheduleOwnerKey owner, String taskId,
+                                      String reason, TeamDefinition team,
+                                      TeamMemberDefinition member, AcpClient client) {
+        TeamRuntime runtime = team == null ? null : teams.get(team.getTeamId());
+        logger.info("schedule_gate result=deferred reason={} taskId={} teamId={}"
+                        + " memberId={} requestOwnerId={} teamOwnerId={}"
+                        + " teamState={} memberState={} clientState={}"
+                        + " acceptingRequests={} sessionId={}",
+                reason, taskId,
+                owner == null ? null : owner.getTeamId(),
+                owner == null ? null : owner.getTeamMemberId(),
+                owner == null ? null : owner.getOwnerId(),
+                team == null ? null : team.getOwnerChatterId(),
+                team == null ? null : team.getState(),
+                member == null ? null : member.getState(),
+                client == null ? null : client.getState(),
+                runtime == null ? null : runtime.isAcceptingRequests(),
+                client == null ? null : client.getSessionId());
+    }
+
+    private static String scheduleMismatchKey(String teamId, String memberId) {
+        return teamId + ":" + memberId;
     }
 
     /**
@@ -1819,6 +2021,103 @@ public final class TeamManager implements AutoCloseable {
             if (client != null && client.getState() == AbstractAcpClient.State.BUSY) return true;
         }
         return false;
+    }
+
+    /**
+     * Rebuilds every local Team member backed by one refreshed source robot.
+     * Existing provider sessions are loaded again instead of creating a new
+     * conversation, so a config save does not leave the member CLOSED.
+     */
+    public int refreshSourceRobot(String sourceRobotId) throws IOException {
+        String sourceId = sourceRobotId == null ? "" : sourceRobotId.trim();
+        if (sourceId.isEmpty() || closed.get()) return 0;
+        if (startupCoordinator == null) {
+            throw new IOException("Team startup coordinator is unavailable");
+        }
+
+        int refreshed = 0;
+        List<String> failures = new ArrayList<>();
+        for (TeamDefinition snapshot : snapshotDefinitions()) {
+            TeamRuntime runtime = teams.get(snapshot.getTeamId());
+            if (runtime == null) continue;
+            for (TeamMemberDefinition candidate : snapshot.getMembers()) {
+                if (!sourceId.equals(candidate.getSourceRobotId())) continue;
+                boolean oldRemoved = false;
+                runtime.getOperationLock().lock();
+                try {
+                    TeamDefinition current = runtime.getDefinition();
+                    if (current.getState() != TeamState.READY) continue;
+                    TeamMemberDefinition member = findMember(
+                            current, candidate.getTeamMemberId());
+                    if (member == null || !sourceId.equals(member.getSourceRobotId())) {
+                        continue;
+                    }
+
+                    publishMemberState(runtime, member.getTeamMemberId(),
+                            TeamMemberState.STARTING, null);
+                    AcpClient old = clientRegistry.remove(current.getTeamId(),
+                            member.getTeamMemberId()).orElse(null);
+                    oldRemoved = true;
+                    if (old != null) {
+                        try {
+                            old.close();
+                        } catch (IOException closeFailure) {
+                            logger.warn("刷新来源 Robot 时关闭旧 Team client 失败, teamId={}, memberId={}",
+                                    current.getTeamId(), member.getTeamMemberId(), closeFailure);
+                        }
+                    }
+
+                    TeamMemberDefinition starting = findMember(
+                            runtime.getDefinition(), member.getTeamMemberId());
+                    AcpClient replacement = startupCoordinator.replaceMember(
+                            runtime, starting, TeamMemberStartOptions.initial());
+                    if (!clientRegistry.register(current.getTeamId(),
+                            member.getTeamMemberId(), replacement)) {
+                        replacement.close();
+                        throw new IOException("duplicate Team member client");
+                    }
+                    String fingerprint = TeamSourceRobotSnapshots.fingerprint(
+                            replacement.getRobotParam());
+                    publishMemberState(runtime, member.getTeamMemberId(),
+                            TeamMemberState.READY, null, fingerprint);
+                    refreshed++;
+                    logger.info("Team member 已随来源 Robot 自动刷新并开启, teamId={}, memberId={}, sourceRobotId={}, sessionId={}",
+                            current.getTeamId(), member.getTeamMemberId(), sourceId,
+                            replacement.getSessionId());
+                } catch (Exception error) {
+                    String key = snapshot.getTeamId() + "/" + candidate.getTeamMemberId();
+                    failures.add(key + ": " + safeMessage(error));
+                    if (oldRemoved) {
+                        clientRegistry.remove(snapshot.getTeamId(),
+                                candidate.getTeamMemberId()).ifPresent(client -> {
+                            try {
+                                client.close();
+                            } catch (IOException closeFailure) {
+                                logger.warn("关闭刷新失败的 Team client 失败, teamId={}, memberId={}",
+                                        snapshot.getTeamId(), candidate.getTeamMemberId(),
+                                        closeFailure);
+                            }
+                        });
+                    }
+                    TeamError teamError = TeamError.of(TeamErrorCode.CLIENT_START_FAILED,
+                            safeMessage(error), true);
+                    try {
+                        publishMemberState(runtime, candidate.getTeamMemberId(),
+                                TeamMemberState.ERROR, teamError);
+                    } catch (Exception stateError) {
+                        logger.warn("Team member 自动刷新失败状态回写失败, teamId={}, memberId={}",
+                                snapshot.getTeamId(), candidate.getTeamMemberId(), stateError);
+                    }
+                } finally {
+                    runtime.getOperationLock().unlock();
+                }
+            }
+        }
+        if (!failures.isEmpty()) {
+            throw new IOException("Team member refresh failed: "
+                    + String.join("; ", failures));
+        }
+        return refreshed;
     }
 
     /**
@@ -2387,6 +2686,13 @@ public final class TeamManager implements AutoCloseable {
             TeamRuntime runtime, String memberId,
             com.mola.cmd.proxy.app.acp.team.model.TeamMemberState state,
             TeamError error) throws IOException {
+        publishMemberState(runtime, memberId, state, error, null);
+    }
+
+    private void publishMemberState(
+            TeamRuntime runtime, String memberId,
+            com.mola.cmd.proxy.app.acp.team.model.TeamMemberState state,
+            TeamError error, String configFingerprint) throws IOException {
         TeamDefinition current = runtime.getDefinition();
         List<TeamMemberDefinition> members = new ArrayList<>();
         TeamMemberDefinition updated = null;
@@ -2398,7 +2704,9 @@ public final class TeamManager implements AutoCloseable {
                 if (client != null && client.getSessionId() != null) {
                     sessionId = client.getSessionId();
                 }
-                updated = member.withState(state, sessionId, error);
+                TeamMemberDefinition configured = configFingerprint == null
+                        ? member : member.withConfigFingerprint(configFingerprint);
+                updated = configured.withState(state, sessionId, error);
                 members.add(updated);
             } else {
                 members.add(member);
@@ -2574,6 +2882,18 @@ public final class TeamManager implements AutoCloseable {
             throws IOException {
         store.saveOperation(new TeamOperationRecord(
                 command.getRequestId(), TeamOperationRecord.Operation.DELETE,
+                payloadHash, command.getTeamId(), status, gson.toJson(result),
+                System.currentTimeMillis(),
+                System.currentTimeMillis() + OPERATION_TTL_MILLIS));
+        return result;
+    }
+
+    private TeamCommandResult finishRemarksUpdateOperation(
+            TeamRemarksUpdateCommand command, String payloadHash,
+            TeamCommandResult result, TeamOperationRecord.Status status)
+            throws IOException {
+        store.saveOperation(new TeamOperationRecord(
+                command.getRequestId(), TeamOperationRecord.Operation.UPDATE_REMARKS,
                 payloadHash, command.getTeamId(), status, gson.toJson(result),
                 System.currentTimeMillis(),
                 System.currentTimeMillis() + OPERATION_TTL_MILLIS));
@@ -2787,6 +3107,39 @@ public final class TeamManager implements AutoCloseable {
                 && command.getExpectedVersion().longValue() < 1L) {
             throw new IllegalArgumentException(
                     "expectedVersion must be positive");
+        }
+    }
+
+    private static void validateRemarksUpdate(TeamRemarksUpdateCommand command) {
+        if (command == null) throw new IllegalArgumentException("command is required");
+        requireSchema(command.getSchemaVersion());
+        requireSafeId(command.getRequestId(), "requestId");
+        requireText(command.getOwnerChatterId(), "ownerChatterId");
+        requireSafeId(command.getTeamId(), "teamId");
+        if (command.getExpectedVersion() != null
+                && command.getExpectedVersion().longValue() < 1L) {
+            throw new IllegalArgumentException("expectedVersion must be positive");
+        }
+        if (command.getMemberRemarks() == null) {
+            throw new IllegalArgumentException("memberRemarks is required");
+        }
+    }
+
+    private static void validateMemberRemarks(
+            TeamDefinition team, Map<String, String> memberRemarks) {
+        Set<String> expected = team.getMembers().stream()
+                .map(TeamMemberDefinition::getTeamMemberId)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        if (!expected.equals(memberRemarks.keySet())) {
+            throw new IllegalArgumentException(
+                    "memberRemarks must contain every Team member exactly once");
+        }
+        for (Map.Entry<String, String> entry : memberRemarks.entrySet()) {
+            String remark = entry.getValue();
+            if (remark != null && remark.length() > 200) {
+                throw new IllegalArgumentException(
+                        "member remark must not exceed 200 characters");
+            }
         }
     }
 

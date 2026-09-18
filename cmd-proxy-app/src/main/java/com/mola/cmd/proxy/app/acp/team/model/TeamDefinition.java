@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -128,6 +129,31 @@ public final class TeamDefinition {
                 state, version + 1L, transportGroup, createRequestId, newMembers,
                 createdAt, timestamp, deletedAt, lastError, deleteRequestId,
                 mixedPlacement, roster, mode, captainTeamMemberId);
+    }
+
+    public TeamDefinition withMemberRemarks(Map<String, String> memberRemarks,
+                                            long timestamp) {
+        if (state.isTerminal()) {
+            throw new IllegalStateException("terminal team cannot update member remarks");
+        }
+        List<TeamMemberDefinition> updatedMembers = new ArrayList<>();
+        for (TeamMemberDefinition member : members) {
+            updatedMembers.add(member.withRemark(
+                    memberRemarks.get(member.getTeamMemberId())));
+        }
+        List<TeamContactRef> updatedRoster = new ArrayList<>();
+        for (TeamContactRef contact : getRoster()) {
+            String remark = memberRemarks.containsKey(contact.getTargetTeamMemberId())
+                    ? memberRemarks.get(contact.getTargetTeamMemberId())
+                    : contact.getRemark();
+            updatedRoster.add(new TeamContactRef(contact.getTargetTeamMemberId(),
+                    contact.getTargetAcpClientId(), contact.getDisplayName(), remark,
+                    contact.getOrder()));
+        }
+        return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
+                state, version + 1L, transportGroup, createRequestId, updatedMembers,
+                createdAt, timestamp, deletedAt, lastError, deleteRequestId,
+                mixedPlacement, updatedRoster, mode, captainTeamMemberId);
     }
 
     public TeamDefinition withTransportGroup(String newTransportGroup, long timestamp) {

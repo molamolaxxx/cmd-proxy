@@ -47,9 +47,7 @@ public class TalkToContextInjector {
 
         StringBuilder sb = new StringBuilder();
         sb.append("\n<agent-team>\n");
-        sb.append("你是 Agent 团队的一员。你可以通过 cmd-proxy MCP 的 talk_to 工具向团队中的其他 Agent 发送异步消息。");
-        sb.append("消息发送后你不需要等待回复，可以继续当前工作。\n");
-        sb.append("目标 Agent 忙碌时消息会排队，对方空闲后自动收到。\n\n");
+        sb.append("你是 Agent 团队的一员。你可以通过 ACP harness 的 talk_to MCP 工具向团队中的其他 Agent 发送消息。\n\n");
         sb.append("同一发送者的兼容队列消息可能被合并为一个批量 turn；")
                 .append("请统一处理，不要为每条消息分别发送确认。\n\n");
         appendRuntimeConstraints(sb);
@@ -111,19 +109,14 @@ public class TalkToContextInjector {
         }
 
         if (hasContacts) {
-            sb.append("\n与 dispatch_subagent 的区别：\n");
-            sb.append("- talk_to: 异步发送，不等待结果，目标在自己的上下文中处理\n");
-            sb.append("- dispatch_subagent: 同步等待结果，创建临时进程执行\n");
             sb.append("\n");
             sb.append("发送消息时直接调用 talk_to MCP 工具，并从上方通讯录选择准确 target。\n");
         } else {
             sb.append("你的通讯录为空，但其他已注册的 Agent 仍可能通过 ACP harness 向你发送消息，这是正常的系统行为。\n");
-            sb.append("收到消息时请正常阅读、处理并回复。\n\n");
+            sb.append("收到消息时请正常阅读并按需处理。\n\n");
             sb.append("回复时调用 talk_to MCP 工具。\n");
             sb.append("注意：target 必须使用来信中标注的发送者名称。\n");
         }
-        sb.append("不要在回复正文中模拟工具调用或输出 Action JSON。\n");
-
         sb.append("</agent-team>\n");
         return sb.toString();
     }
@@ -137,7 +130,6 @@ public class TalkToContextInjector {
     protected static void appendRuntimeConstraints(StringBuilder sb) {
         sb.append("重要运行时约束：发出 talk_to 后，不要使用 Bash、PowerShell、Python 或其他脚本通过 wait、sleep、while 循环、轮询文件/日志/进程状态等方式等待对方回复。"
                 + "这类等待会占用当前 turn；在等待脚本结束前，已入队的 Agent 消息无法被处理。\n\n");
-        sb.append("补充语义：talk_to 的“已发送”或“已入队”仅表示路由层已接收消息，不表示接收方已处理，也不表示你会在当前 turn 内获得回复。\n\n");
         sb.append("通信约束：收到消息不代表必须回复。禁止发送“收到”、“好的”、“谢谢”、")
                 .append("“我会处理”等纯确认消息。只有在产生最终结果、新事实、")
                 .append("明确阻塞或必须回答问题时才回复；最终结果默认结束通信链。\n\n");

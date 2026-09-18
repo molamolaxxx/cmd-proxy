@@ -11,6 +11,8 @@ public class CmdProxyToolCardSuppressionTest {
     @Test
     public void suppressesOnlyCmdProxyActionTools() {
         assertTrue(AcpClient.isCmdProxyActionToolCall(
+                "mcp__acp-harness-runtime__talk_to", new JsonObject()));
+        assertTrue(AcpClient.isCmdProxyActionToolCall(
                 "mcp__cmd-proxy-runtime__talk_to", new JsonObject()));
         assertTrue(AcpClient.isCmdProxyActionToolCall(
                 "cmd_proxy dispatch_subagent", new JsonObject()));

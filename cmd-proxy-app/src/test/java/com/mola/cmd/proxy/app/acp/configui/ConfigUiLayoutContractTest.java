@@ -64,13 +64,45 @@ public class ConfigUiLayoutContractTest {
     }
 
     @Test
-    public void keepsChannelSaveAndSingleRefreshActionsExplicitlySeparated() throws Exception {
+    public void channelSaveAutomaticallyAppliesOnlyTheSavedChannel() throws Exception {
         String html = loadConfigUi();
 
         assertTrue(html.contains("onclick=\"saveConfig(false)\""));
         assertTrue(html.contains("保存并应用到此渠道"));
         assertTrue(html.contains("previousChannelId:previousId,channelId:channelId"));
         assertTrue(html.contains("/api/refresh-channel"));
+        assertTrue(html.contains("async function saveChannelDialog()"));
+        assertFalse(html.contains("await applyChannelConfig(insertIndex)"));
+        assertTrue(html.contains("消息渠道已创建并保存"));
+        assertTrue(html.contains("applyChannelConfig(insertIndex).then(function()"));
+        assertTrue(html.contains("/api/item-refresh-status"));
+        assertTrue(html.contains("itemOperationPending('channels'"));
+        assertTrue(html.contains("async function toggleChannelEnabled(i,enabled)"));
+        assertTrue(html.contains("await applyChannelConfig(i)"));
+        assertTrue(html.contains("onchange=\"toggleChannelEnabled('+i+',this.checked)"));
+        assertTrue(html.contains("hourglass_top':'refresh'"));
+    }
+
+    @Test
+    public void automaticallyPersistsRobotDialogsAndCarriesRuntimeIdentityOnRefresh()
+            throws Exception {
+        String html = loadConfigUi();
+
+        assertTrue(html.contains("async function saveRobot()"));
+        assertFalse(html.contains("await applyRobotConfig(insertIndex)"));
+        assertTrue(html.contains("智能体已添加并保存"));
+        assertTrue(html.contains("applyRobotConfig(insertIndex).then(function()"));
+        assertTrue(html.contains("itemOperationPending('robots'"));
+        assertTrue(html.contains("itemRefreshMessage('robots'"));
+        assertTrue(html.contains("async function toggleRobot(i,enabled)"));
+        assertTrue(html.contains("await applyRobotConfig(i)"));
+        assertTrue(html.contains("onchange=\"toggleRobot('+i+',this.checked)"));
+        assertTrue(html.contains("Object.defineProperty(robot,'_runtimeName'"));
+        assertTrue(html.contains("previousName:previousName,name:name"));
+        assertTrue(html.contains("onclick=\"refreshRobot('+i+')\""));
+        assertTrue(html.contains("async function deleteRobot(i)"));
+        assertTrue(html.contains("智能体已删除并保存"));
+        assertTrue(html.contains("if(!ok){config.robots.splice(i,0,robot)"));
     }
 
     @Test
@@ -105,9 +137,10 @@ public class ConfigUiLayoutContractTest {
 
         assertTrue(html.contains("data-page=\"sessions\""));
         assertTrue(html.contains("id=\"page-sessions\""));
-        assertTrue(html.contains("title=\"开启会话\""));
-        assertTrue(html.indexOf("title=\"开启会话\"")
-                < html.indexOf("title=\"保存并应用到此智能体\""));
+        assertTrue(html.contains("canOpen?'开启会话':'点击查看为何无法开启会话'"));
+        assertTrue(html.contains("robot.onlyTeamMember"));
+        assertTrue(html.contains("请从 Fast Team 的团队会话中操作"));
+        assertTrue(html.contains("会话已开启"));
         assertTrue(html.contains("/api/starweave/v1/sessions/"));
         assertTrue(html.contains("function restoreStarweaveSession()"));
         assertTrue(html.contains("id=\"starRestoreDialog\""));
@@ -134,6 +167,9 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("new EventSource(url)"));
         assertTrue(html.contains("id=\"starFileInput\""));
         assertTrue(html.contains("function uploadStarweaveFiles("));
+        assertTrue(html.contains("onpaste=\"handleStarFilePaste(event)\""));
+        assertTrue(html.contains("function handleStarFilePaste(event)"));
+        assertTrue(html.contains("uploadStarweaveFiles(files)"));
         int filesCopied = html.indexOf("files=Array.prototype.slice.call(fileList||[])");
         int inputCleared = html.indexOf("if(input)input.value=''", filesCopied);
         assertTrue(filesCopied >= 0 && inputCleared > filesCopied);
@@ -187,6 +223,7 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("session-sidebar.open"));
         assertTrue(html.contains("data-page=\"teams\""));
         assertTrue(html.contains("/api/starweave/v1/teams/create"));
+        assertTrue(html.contains("/api/starweave/v1/teams/update"));
         assertTrue(html.contains("/api/starweave/v1/teams/sources"));
         assertTrue(html.contains("选择团队成员智能体（1–6 个）"));
         assertTrue(html.contains("class=\"chip team-member-chip'+(selected?' selected':'')+'\""));
@@ -195,7 +232,9 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("source.onlyTeamMember?'<span class=\"team-member-role\">仅 Team</span>'"));
         assertTrue(html.contains("id=\"starTeamSelectedMembers\""));
         assertTrue(html.contains("class=\"star-team-basics\""));
-        assertTrue(html.contains("成员职责与队长"));
+        assertFalse(html.contains("成员职责与队长"));
+        assertFalse(html.contains("备注只描述成员在本团队中的职责"));
+        assertFalse(html.contains("可选择已生效或仅 Team 使用的智能体"));
         assertTrue(html.contains("function renderStarTeamSelectedMembers("));
         assertTrue(html.contains("function updateStarTeamMemberRemark("));
         assertTrue(html.contains("starTeamDraft={sources:[],remarks:Object.create(null),memberIds:Object.create(null),mode:'NORMAL',captainKey:''}"));
@@ -207,6 +246,12 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("function starTeamSourceKey("));
         assertTrue(html.contains("coordinated:!!source.coordinated"));
         assertTrue(html.contains("remark:starTeamDraft.remarks[input.value]||''"));
+        assertTrue(html.contains("id=\"starTeamEditDialog\""));
+        assertTrue(html.contains("title=\"修改队伍\""));
+        assertTrue(html.contains("function openStarweaveTeamEditDialog("));
+        assertTrue(html.contains("function saveStarweaveTeamEdit("));
+        assertTrue(html.contains("目前仅支持修改成员备注"));
+        assertTrue(html.contains("请为所有成员新建会话后生效"));
         assertTrue(html.contains(".star-team-selected-members{display:grid;gap:8px;max-height:"));
         assertTrue(html.contains(".star-team-basics,.star-team-selected-member{grid-template-columns:1fr;gap:7px}"));
         assertFalse(html.contains("value=\"'+esc(source.remark"));
@@ -217,8 +262,15 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("<div class=\"filter-empty\"><span class=\"material-icons\">groups</span><p>暂无 Starweave 团队</p>"));
         assertFalse(html.contains("<strong>暂无 Starweave 团队</strong>"));
         assertTrue(html.contains("all.slice(0,3)"));
-        assertTrue(html.contains("请点击「团队会话」查看"));
-        assertTrue(html.contains("class=\"btn btn-secondary btn-sm team-session-entry\""));
+        assertTrue(html.contains("data-member-id=\"'+esc(member.teamMemberId)+'\""));
+        assertTrue(html.contains("onclick=\"openTeamSessionPreview(this)\""));
+        assertTrue(html.contains("class=\"team-card-actions\""));
+        assertTrue(html.contains("aria-label=\"团队会话\""));
+        assertTrue(html.contains("runTeamBatchAction("));
+        assertTrue(html.contains("action==='newSession'"));
+        assertTrue(html.contains("member.state!=='READY'"));
+        assertTrue(html.contains("postTeamMemberAction(team,member,action)"));
+        assertFalse(html.contains("<span>version '+team.version+'</span>"));
         assertTrue(html.contains("id=\"teamSessionDialog\""));
         assertTrue(html.contains(".dialog.team-session-dialog{width:min(1440px,calc(100vw - 56px))"));
         assertTrue(html.contains("grid-template-columns:300px minmax(0,1fr)"));
@@ -236,6 +288,9 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("if(!member.sessionId){showSnackbar('成员会话正在同步，请稍候');return}"));
         assertTrue(html.contains("function restoreTeamSession("));
         assertTrue(html.contains("function uploadTeamSessionFiles("));
+        assertTrue(html.contains("onpaste=\"handleTeamSessionFilePaste(event)\""));
+        assertTrue(html.contains("function handleTeamSessionFilePaste(event)"));
+        assertTrue(html.contains("uploadTeamSessionFiles(files)"));
         assertTrue(html.contains("/api/starweave/v1/teams/uploads"));
         assertTrue(html.contains("id=\"teamSessionFileDialog\""));
         assertTrue(html.contains("function openTeamSessionResources("));
@@ -273,6 +328,21 @@ public class ConfigUiLayoutContractTest {
         assertFalse(html.contains("team-member-check"));
         assertTrue(html.contains(".team-member-chip.selected{background:var(--sw-primary)"));
         assertTrue(html.contains("onchange=\"toggleStarTeamMember(this)\""));
+    }
+
+    @Test
+    public void importAndFilePreviewDialogsExposeActionableFeedback() throws Exception {
+        String html = loadConfigUi();
+
+        assertTrue(html.contains("id=\"agentImportFileGroup\""));
+        assertTrue(html.contains("id=\"agentImportKindsGroup\""));
+        assertTrue(html.contains("function validateAgentImportSelection(reveal)"));
+        assertTrue(html.contains("state.validationShown=true"));
+        assertTrue(html.contains("result.classList.add('error')"));
+        assertTrue(html.contains("document.getElementById('agentImportSubmit').disabled=!state||state.busy"));
+        assertTrue(html.contains("id=\"fileLinkDownloadButton\""));
+        assertTrue(html.contains("function downloadFileLinkPreview()"));
+        assertTrue(html.contains("#fileLinkPreviewDialog{z-index:360}"));
     }
 
     private static int countOccurrences(String source, String needle) {
@@ -372,13 +442,17 @@ public class ConfigUiLayoutContractTest {
     }
 
     @Test
-    public void keepsEnableControlInTheSummaryAndUsesRobotReferenceSelectors() throws Exception {
+    public void keepsEnableControlAndAllowsSelfSubAgentAndRemoteContactInput() throws Exception {
         String html = loadConfigUi();
 
         assertTrue(html.contains("class=\"agent-enable-control\">'+toggle+"));
-        assertTrue(html.contains("function configuredRobotOptions(selected)"));
-        assertTrue(html.contains("index===editIdx"));
+        assertTrue(html.contains("function configuredRobotOptions(selected,includeSelf)"));
+        assertTrue(html.contains("!includeSelf&&index===editIdx"));
         assertTrue(html.contains("aria-label=\"选择子智能体\""));
+        assertTrue(html.contains("configuredRobotOptions(s.name||'',true)"));
+        assertTrue(html.contains("可以选择当前智能体，以创建 self-fork"));
+        assertTrue(html.contains("aria-label=\"远程联系人智能体名称\""));
+        assertTrue(html.contains("placeholder=\"输入远程智能体名称\""));
         assertTrue(html.contains("aria-label=\"选择联系人智能体\""));
         assertTrue(html.contains("configuredRobotOptions(s.name||'')"));
         assertTrue(html.contains("openRobotDialog('+i+',\\'copy\\')"));

@@ -31,7 +31,7 @@ public final class ActionToolService {
     public String execute(String toolName, JsonObject arguments) throws Exception {
         Handler handler = handlers.get(toolName);
         if (handler == null) {
-            throw new IllegalArgumentException("Unknown cmd-proxy tool: " + toolName);
+            throw new IllegalArgumentException("Unknown ACP harness tool: " + toolName);
         }
         return handler.execute(arguments == null ? new JsonObject() : arguments);
     }

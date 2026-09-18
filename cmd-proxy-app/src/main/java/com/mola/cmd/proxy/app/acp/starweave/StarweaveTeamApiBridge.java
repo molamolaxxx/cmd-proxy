@@ -15,6 +15,7 @@ import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCommand;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamQuery;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamCommandResult;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamRemarksUpdateCommand;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -22,6 +23,8 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -254,6 +257,32 @@ public final class StarweaveTeamApiBridge {
         return result(current.manager.delete(command));
     }
 
+    public static JSONObject update(JSONObject request) {
+        Runtime current = requireRuntime();
+        if (request == null) throw new IllegalArgumentException("request body is required");
+        if (request.getBooleanValue("coordinated")) {
+            if (current.gateway == null) {
+                throw new IllegalStateException("Starweave Team coordinator is unavailable");
+            }
+            return success(current.gateway.mutate("update", new JSONObject(request)));
+        }
+        JSONObject remarksValue = request.getJSONObject("memberRemarks");
+        if (remarksValue == null) {
+            throw new IllegalArgumentException("memberRemarks is required");
+        }
+        Map<String, String> memberRemarks = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : remarksValue.entrySet()) {
+            Object value = entry.getValue();
+            memberRemarks.put(entry.getKey(), value == null ? "" : String.valueOf(value));
+        }
+        TeamRemarksUpdateCommand command = new TeamRemarksUpdateCommand(
+                TeamDefinition.SCHEMA_VERSION,
+                textOr(request.getString("requestId"), UUID.randomUUID().toString()),
+                current.ownerId, required(request.getString("teamId"), "teamId"),
+                request.getLong("expectedVersion"), memberRemarks);
+        return result(current.manager.updateRemarks(command));
+    }
+
     public static JSONObject member(JSONObject request) {
         Runtime current = requireRuntime();
         if (request == null) throw new IllegalArgumentException("request body is required");
@@ -354,6 +383,26 @@ public final class StarweaveTeamApiBridge {
                 ? current.manager.previewSessionResource(requestId, command,
                 request.getString("resourceId"))
                 : current.manager.listSessionResources(requestId, command));
+    }
+
+    public static JSONObject previewTextFile(JSONObject request) {
+        Runtime current = requireRuntime();
+        if (request == null) throw new IllegalArgumentException("request is required");
+        if (request.getBooleanValue("coordinated")) {
+            JSONObject rejected = new JSONObject(true);
+            rejected.put("accepted", false);
+            rejected.put("code", "REMOTE_FILE_PREVIEW_UNSUPPORTED");
+            rejected.put("message", "跨实例团队成员暂不支持文件预览");
+            return rejected;
+        }
+        String teamId = required(request.getString("teamId"), "teamId");
+        String memberId = required(request.getString("teamMemberId"), "teamMemberId");
+        currentSessionId(current, teamId, memberId, request.getString("sessionId"));
+        TeamMemberCommand command = resourceCommand(current, request);
+        String requestId = textOr(request.getString("requestId"), UUID.randomUUID().toString());
+        com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult preview =
+                current.manager.readTextFile(requestId, command);
+        return JSON.parseObject(GSON.toJson(preview));
     }
 
     public static com.mola.cmd.proxy.app.acp.team.TeamResourcePayload downloadResource(

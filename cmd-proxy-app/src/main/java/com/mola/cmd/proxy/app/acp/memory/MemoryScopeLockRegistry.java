@@ -11,6 +11,13 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class MemoryScopeLockRegistry {
 
+    private static final ConcurrentHashMap<String, ReentrantLock> STORAGE_LOCKS = new ConcurrentHashMap<>();
+
+    public static ReentrantLock lockForStoragePath(java.nio.file.Path path) {
+        return STORAGE_LOCKS.computeIfAbsent(path.toAbsolutePath().normalize().toString(),
+                ignored -> new ReentrantLock(true));
+    }
+
     private final ConcurrentHashMap<String, ReentrantLock> locks =
             new ConcurrentHashMap<>();
 
@@ -18,7 +25,7 @@ public final class MemoryScopeLockRegistry {
                                  String workspacePath) {
         String storageKey = fileStore.getStorageKey(workspacePath);
         return locks.computeIfAbsent(storageKey,
-                ignored -> new ReentrantLock(true));
+                ignored -> lockForStoragePath(java.nio.file.Paths.get(storageKey)));
     }
 
     int size() {

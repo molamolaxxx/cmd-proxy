@@ -19,6 +19,9 @@ public class ScheduleContextInjectorTest {
         assertTrue(scheduled.contains("schedule_task MCP 工具"));
         assertTrue(scheduled.contains("manage_schedule MCP 工具"));
         assertFalse(scheduled.contains("\"action\""));
+        assertFalse(scheduled.contains("groupName"));
+        assertFalse(scheduled.contains("标准5位cron表达式"));
+        assertFalse(scheduled.contains("tasks 数组"));
         assertEquals(normal, scheduled);
     }
 

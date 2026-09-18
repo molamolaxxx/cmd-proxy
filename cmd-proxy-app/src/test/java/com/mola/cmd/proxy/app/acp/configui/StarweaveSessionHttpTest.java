@@ -2,9 +2,19 @@ package com.mola.cmd.proxy.app.acp.configui;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveIdentity;
+import com.mola.cmd.proxy.app.acp.starweave.StarweaveTeamApiBridge;
+import com.mola.cmd.proxy.app.acp.team.MapTeamSourceRobotResolver;
+import com.mola.cmd.proxy.app.acp.team.TeamClientRegistry;
+import com.mola.cmd.proxy.app.acp.team.TeamManager;
+import com.mola.cmd.proxy.app.acp.team.TeamStore;
+import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -17,6 +27,9 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.Assert.*;
 
 public class StarweaveSessionHttpTest {
+    @Rule
+    public final TemporaryFolder temporary = new TemporaryFolder();
+
     private ConfigUiServer server;
     private String baseUrl;
     private int port;
@@ -65,12 +78,60 @@ public class StarweaveSessionHttpTest {
     }
 
     @Test
+    public void filePreviewRouteUsesTheStarweaveEnvelopeWhenRuntimeIsUnavailable()
+            throws Exception {
+        Response response = request("POST", "/api/starweave/v1/sessions/file-preview",
+                "{\"requestId\":\"preview-http-1\",\"groupId\":\"g\","
+                        + "\"sessionId\":\"s\",\"generation\":1,"
+                        + "\"target\":\"README.md\"}", null);
+
+        assertEquals(503, response.status);
+        JSONObject body = JSON.parseObject(response.body);
+        assertFalse(body.getBooleanValue("accepted"));
+        assertEquals("SERVICE_UNAVAILABLE", body.getString("code"));
+        assertEquals("preview-http-1", body.getString("requestId"));
+    }
+
+    @Test
     public void validatesSseGenerationBeforeOpeningStream() throws Exception {
         Response response = request("GET",
                 "/api/starweave/v1/sessions/stream?groupId=g&sessionId=s&generation=0",
                 null, null);
         assertEquals(400, response.status);
         assertEquals("INVALID_GENERATION", JSON.parseObject(response.body).getString("code"));
+    }
+
+    @Test
+    public void updatesTeamRemarksThroughTheRealHttpRoute() throws Exception {
+        String instanceId = "http-team-edit";
+        TeamStore store = new TeamStore(temporary.newFolder("teams").toPath());
+        TeamManager manager = new TeamManager(store, new TeamClientRegistry(),
+                new MapTeamSourceRobotResolver(java.util.Collections.emptyMap()));
+        store.saveTeam(TeamDefinition.creating("team-http",
+                StarweaveIdentity.ownerId(instanceId), "HTTP Team",
+                "team-acp-" + instanceId, "create-http",
+                java.util.Arrays.asList(
+                        new TeamMemberDefinition("member-a", "source-a", "A", "A",
+                                "old a", "fingerprint-a"),
+                        new TeamMemberDefinition("member-b", "source-b", "B", "B",
+                                "old b", "fingerprint-b")), 100L));
+        manager.recoverPersistedDefinitions();
+        StarweaveTeamApiBridge.install(manager, instanceId,
+                java.util.Collections::emptyList);
+        try {
+            Response response = request("POST", "/api/starweave/v1/teams/update",
+                    "{\"requestId\":\"http-update\",\"teamId\":\"team-http\","
+                            + "\"expectedVersion\":1,\"memberRemarks\":{"
+                            + "\"member-a\":\"new a\",\"member-b\":\"new b\"}}", null);
+
+            assertEquals(200, response.status);
+            assertTrue(JSON.parseObject(response.body).getBooleanValue("accepted"));
+            assertEquals("new a", store.loadTeam("team-http").get()
+                    .getMembers().get(0).getRemark());
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
     }
 
     private Response request(String method, String path, String body,

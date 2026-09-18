@@ -22,7 +22,7 @@ public class AcpClientTalkToCircuitLifecycleTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
 
     @Test
-    public void nativeToolFanoutKeepsOneCascadeAndEmitsOneTerminationCard() throws Exception {
+    public void nativeToolFanoutRejectsSenderOverflowWithoutTerminatingCascade() throws Exception {
         Harness h = new Harness();
         Method tool = AcpClient.class.getDeclaredMethod("executeMcpTalkTo", JsonObject.class);
         tool.setAccessible(true);
@@ -38,28 +38,12 @@ public class AcpClientTalkToCircuitLifecycleTest {
             args.addProperty("_depth", i % 2 == 0 ? 0 : 999);
             result = (String) tool.invoke(h.client, args);
         }
-        assertTrue(result.startsWith("[TALK_TO_CIRCUIT_OPENED]"));
-        assertEquals(2, Collections.frequency(h.events, "TALK_TO_SEND"));
-        assertEquals(1, Collections.frequency(h.events, "TALK_TO_CIRCUIT_OPENED"));
-        assertEquals(2, h.dispatcher.accepted);
+        assertTrue(result.contains("SENDER_LIMIT"));
+        assertTrue(result.contains("通信链保持可用"));
+        assertEquals(5, Collections.frequency(h.events, "TALK_TO_SEND"));
+        assertEquals(0, Collections.frequency(h.events, "TALK_TO_CIRCUIT_OPENED"));
+        assertEquals(5, h.dispatcher.accepted);
         assertEquals("", h.protocol.toString());
-    }
-
-    @Test
-    public void legacyCapturedActionStopsWithoutSendingAFollowupPrompt() throws Exception {
-        Harness h = new Harness();
-        PromptOptions options = PromptOptions.defaults();
-        options.addTalkToParent("sender", new TalkToTrace(null, null, null, 5,
-                System.currentTimeMillis()));
-        Method direct = AcpClient.class.getDeclaredMethod("handleTalkToDirect",
-                String.class, String.class, AcpResponseListener.class, PromptOptions.class);
-        direct.setAccessible(true);
-        assertEquals(true, direct.invoke(h.client,
-                "{\"action\":\"talk_to\",\"target\":\"third-member\",\"content\":\"forward\",\"_depth\":0}",
-                "", h.listener, options));
-        assertEquals(0, h.dispatcher.accepted);
-        assertEquals(Arrays.asList("TALK_TO_CIRCUIT_OPENED", "complete"), h.events);
-        assertEquals("No session/prompt may be emitted after circuit opening", "", h.protocol.toString());
     }
 
     @Test
@@ -115,7 +99,11 @@ public class AcpClientTalkToCircuitLifecycleTest {
                 String group, List<ContactRef> contacts, AuthPrincipalContext principal) {
             TalkToCircuitBreaker.Admission admission = circuitBreaker.admit(
                     request.getParentTrace(), sender, request.getTarget());
-            if (!admission.isAccepted()) return circuitOpenResult(admission, sender, request.getTarget());
+            if (!admission.isAccepted()) {
+                return admission.isCircuitOpen()
+                        ? circuitOpenResult(admission, sender, request.getTarget())
+                        : admissionRejectedResult(admission, sender, request.getTarget());
+            }
             accepted++;
             return "[talkTo 结果]\n已成功投递";
         }

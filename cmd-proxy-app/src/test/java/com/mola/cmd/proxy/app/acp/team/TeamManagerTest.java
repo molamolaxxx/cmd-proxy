@@ -6,6 +6,8 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
 import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamRemarksUpdateCommand;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamCommandResult;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
 import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToDispatcher;
 import org.junit.Rule;
@@ -13,6 +15,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.junit.Assert.*;
 
@@ -102,6 +106,48 @@ public class TeamManagerTest {
         assertTrue(dispatcher.deliver(new TalkToRequest(
                 "member-2", "after close", 0), "member-1", "", null)
                 .contains("not accepting"));
+    }
+
+    @Test
+    public void updatesAndPersistsAllMemberRemarksIdempotently() throws Exception {
+        TeamStore store = store();
+        store.saveTeam(definition("team-edit"));
+        TeamManager manager = new TeamManager(store, new TeamClientRegistry());
+        manager.recoverPersistedDefinitions();
+        Map<String, String> remarks = new LinkedHashMap<>();
+        remarks.put("member-1", "负责需求分析");
+        remarks.put("member-2", "负责技术实现");
+        TeamRemarksUpdateCommand command = new TeamRemarksUpdateCommand(
+                "1", "update-remarks-1", "owner-1", "team-edit", 1L, remarks);
+
+        TeamCommandResult first = manager.updateRemarks(command);
+        TeamCommandResult repeated = manager.updateRemarks(command);
+
+        assertTrue(first.isAccepted());
+        assertTrue(repeated.isAccepted());
+        assertEquals(2L, first.getTeamVersion().longValue());
+        TeamDefinition persisted = store.loadTeam("team-edit").get();
+        assertEquals(2L, persisted.getVersion());
+        assertEquals("负责需求分析", persisted.getMembers().get(0).getRemark());
+        assertEquals("负责技术实现", persisted.getRoster().get(1).getRemark());
+    }
+
+    @Test
+    public void rejectsPartialRemarkUpdates() throws Exception {
+        TeamStore store = store();
+        store.saveTeam(definition("team-partial"));
+        TeamManager manager = new TeamManager(store, new TeamClientRegistry());
+        manager.recoverPersistedDefinitions();
+        Map<String, String> remarks = new LinkedHashMap<>();
+        remarks.put("member-1", "only one");
+
+        TeamCommandResult result = manager.updateRemarks(
+                new TeamRemarksUpdateCommand("1", "update-partial", "owner-1",
+                        "team-partial", 1L, remarks));
+
+        assertFalse(result.isAccepted());
+        assertEquals("VALIDATION_ERROR", result.getCode());
+        assertEquals(1L, store.loadTeam("team-partial").get().getVersion());
     }
 
     private TeamStore store() throws Exception {

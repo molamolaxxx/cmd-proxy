@@ -18,7 +18,7 @@ import java.util.Set;
 public final class CmdProxyMcpHttpHandler implements HttpHandler {
 
     public static final String PATH = "/mcp";
-    public static final String SERVER_NAME = "cmd-proxy-runtime";
+    public static final String SERVER_NAME = "acp-harness-runtime";
     public static final String AUTH_SESSION_HEADER = "X-Cmd-Proxy-Auth-Session-Id";
     private static final String PROTOCOL_VERSION = "2025-06-18";
     private static final int MAX_REQUEST_BYTES = 1024 * 1024;
@@ -131,42 +131,76 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
     public static JsonArray tools(Set<String> availableTools) {
         JsonArray tools = new JsonArray();
         if (availableTools.contains("dispatch_subagent")) tools.add(tool("dispatch_subagent",
-                "Dispatch one or more configured sub-agents in parallel and return aggregated results.",
-                objectSchema("tasks", arrayOf(objectWithRequired(
+                "将一个或多个相互独立的任务派发给可用子 Agent。tasks 中的任务可并行执行，"
+                        + "同一 Agent 可被派发多个独立任务；调用将在全部任务结束后聚合返回结果。",
+                objectSchema("tasks", described(arrayOf(objectWithRequired(
                         new String[]{"agent", "title", "prompt"},
-                        property("agent", "string"), property("title", "string"),
-                        property("prompt", "string"))))));
+                        objectProperty("agent", described(stringSchema(),
+                                "目标子 Agent 的准确名称，必须使用系统上下文提供的可用 Agent 名称。")),
+                        objectProperty("title", described(stringSchema(),
+                                "任务的简短标题，用于区分并行任务，建议使用 2～6 个字。")),
+                        objectProperty("prompt", described(stringSchema(),
+                                "交给子 Agent 的完整任务说明，应包含目标、必要上下文、输出要求和约束。")))),
+                        "要派发的任务列表。每个数组元素会创建一个独立任务实例。"))));
 
         JsonObject scheduleTask = objectWithRequired(new String[]{"title", "prompt", "schedule"},
-                property("title", "string"), property("prompt", "string"),
-                objectProperty("schedule", objectWithRequired(new String[]{"type", "expr"},
-                        property("type", "string"), property("expr", "string"))));
-        JsonObject createSchema = objectSchema("tasks", arrayOf(scheduleTask));
-        addProperty(createSchema, "groupName", stringSchema());
+                objectProperty("title", described(stringSchema(),
+                        "任务标题，用于识别和管理定时任务。")),
+                objectProperty("prompt", described(stringSchema(),
+                        "任务触发时提交给 Agent 的完整执行要求。")),
+                objectProperty("schedule", described(scheduleSchema(),
+                        "任务的调度配置。")));
+        JsonObject createSchema = objectSchema("tasks", described(arrayOf(scheduleTask),
+                "要创建的任务列表。一次调用可以创建多个独立定时任务。"));
+        JsonObject groupNameSchema = stringSchema();
+        groupNameSchema.addProperty("description",
+                "可选的会话分组，应用于本次 tasks 数组内的全部任务。默认省略；"
+                        + "仅当用户明确要求多个任务或多次执行共享会话时设置，禁止自行生成。"
+                        + "省略时每次执行使用新会话；固定值会跨任务、跨日期和进程重启持续复用同一会话。"
+                        + "支持日期模板，例如 daily-{yyyyMMdd} 表示同一自然日的执行共享一个会话，"
+                        + "跨日自动使用新会话；模板在每次计划触发时按系统时区解析。");
+        addProperty(createSchema, "groupName", groupNameSchema);
         if (availableTools.contains("schedule_task")) {
-            tools.add(tool("schedule_task", "Create one or more scheduled tasks.", createSchema));
+            tools.add(tool("schedule_task",
+                    "创建一个或多个定时任务。tasks 中每项分别提供 title、prompt 和 schedule，"
+                            + "并分别保存和执行；可选 groupName 应用于本次调用中的全部任务。",
+                    createSchema));
         }
 
-        JsonObject manage = objectSchema("operation", stringSchema());
-        addProperty(manage, "taskId", stringSchema());
+        JsonObject manage = objectSchema("operation", enumStringSchema(
+                new String[]{"list", "cancel", "update"},
+                "操作类型：list 查询任务，cancel 取消任务，update 更新任务。"));
+        addProperty(manage, "taskId", described(stringSchema(),
+                "目标任务 ID。cancel 和 update 时必填，list 时省略。"));
         JsonObject updates = new JsonObject();
         updates.addProperty("type", "object");
         JsonObject updateProps = new JsonObject();
-        updateProps.add("title", stringSchema());
-        updateProps.add("prompt", stringSchema());
-        updateProps.add("schedule", objectWithRequired(new String[]{"type", "expr"},
-                property("type", "string"), property("expr", "string")));
+        updateProps.add("title", described(stringSchema(), "新的任务标题。"));
+        updateProps.add("prompt", described(stringSchema(), "新的任务执行要求。"));
+        updateProps.add("schedule", described(scheduleSchema(),
+                "新的调度配置，必须同时提供 type 和 expr。"));
         updates.add("properties", updateProps);
-        addProperty(manage, "updates", updates);
+        updates.addProperty("additionalProperties", false);
+        addProperty(manage, "updates", described(updates,
+                "update 操作要修改的字段，只需传入需要变更的部分。"));
         if (availableTools.contains("manage_schedule")) {
-            tools.add(tool("manage_schedule", "List, cancel, or update scheduled tasks.", manage));
+            tools.add(tool("manage_schedule",
+                    "查询、取消或更新当前 Agent 所属的定时任务。operation 决定具体操作。",
+                    manage));
         }
 
         JsonObject talkTo = objectWithRequired(new String[]{"target", "content"},
-                property("target", "string"), property("content", "string"));
-        addProperty(talkTo, "_depth", schema("integer"));
+                objectProperty("target", described(stringSchema(),
+                        "消息目标。必须使用系统上下文中列出的准确 target；回复绑定信道时使用上下文明确提供的目标。"
+                                + "禁止自行猜测名称、ID 或路由。")),
+                objectProperty("content", described(stringSchema(),
+                        "要发送的完整消息内容。应直接包含结果、新事实、问题或阻塞信息，"
+                                + "不要发送“收到”“好的”“谢谢”等纯确认消息。")));
         if (availableTools.contains("talk_to")) {
-            tools.add(tool("talk_to", "Asynchronously send a message to a configured contact, Team member, or bound channel reply target.",
+            tools.add(tool("talk_to",
+                    "向系统上下文列出的 Agent、Team 成员或当前绑定的信道回复目标异步发送消息。"
+                            + "目标忙碌时消息可能进入队列；工具返回“已发送”或“已入队”只表示路由层已经接收，"
+                            + "不表示目标已处理，也不保证当前 turn 内获得回复。发送后可以继续当前工作。",
                     talkTo));
         }
         return tools;
@@ -207,10 +241,6 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
         return schema;
     }
 
-    private static JsonObject property(String name, String type) {
-        return objectProperty(name, schema(type));
-    }
-
     private static JsonObject objectProperty(String name, JsonObject value) {
         JsonObject property = new JsonObject();
         property.add(name, value);
@@ -225,6 +255,28 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
 
     private static JsonObject stringSchema() {
         return schema("string");
+    }
+
+    private static JsonObject described(JsonObject schema, String description) {
+        schema.addProperty("description", description);
+        return schema;
+    }
+
+    private static JsonObject enumStringSchema(String[] values, String description) {
+        JsonObject schema = described(stringSchema(), description);
+        JsonArray allowed = new JsonArray();
+        for (String value : values) allowed.add(value);
+        schema.add("enum", allowed);
+        return schema;
+    }
+
+    private static JsonObject scheduleSchema() {
+        return objectWithRequired(new String[]{"type", "expr"},
+                objectProperty("type", enumStringSchema(new String[]{"cron", "once"},
+                        "调度类型。cron 表示周期任务，once 表示一次性任务。")),
+                objectProperty("expr", described(stringSchema(),
+                        "调度表达式。cron 使用标准五位 cron 表达式；once 使用 ISO 时间戳或 "
+                                + "+30s、+30m、+2h、+1d 等相对时间。")));
     }
 
     private static JsonObject arrayOf(JsonObject item) {

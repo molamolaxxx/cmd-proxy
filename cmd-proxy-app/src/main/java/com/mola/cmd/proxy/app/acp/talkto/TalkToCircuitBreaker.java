@@ -9,9 +9,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class TalkToCircuitBreaker {
     public static final int MAX_HOPS = 5;
     public static final int MAX_MESSAGES = 12;
-    public static final int MAX_MESSAGES_PER_SENDER = 2;
-    public static final int MAX_MESSAGES_PER_EDGE = 2;
-    public static final long CASCADE_TTL_MS = 10L * 60L * 1000L;
+    public static final int MAX_MESSAGES_PER_SENDER = 5;
+    public static final int MAX_MESSAGES_PER_EDGE = 5;
+    public static final long CASCADE_TTL_MS = 2L * 60L * 60L * 1000L;
 
     private final ConcurrentHashMap<String, CascadeState> cascades =
             new ConcurrentHashMap<>();
@@ -22,7 +22,7 @@ public final class TalkToCircuitBreaker {
         TalkToTrace trace = parent == null ? TalkToTrace.root() : parent.next();
         CascadeState state = stateFor(trace);
         synchronized (state) {
-            if (state.open) return Admission.rejected(trace, state.reason);
+            if (state.open) return Admission.rejected(trace, state.reason, true);
             if (state.startedAt > now + 60_000L) {
                 return open(state, trace, "INVALID_STARTED_AT");
             }
@@ -37,12 +37,14 @@ public final class TalkToCircuitBreaker {
             }
             int senderCount = count(state.senderCounts, sender);
             if (senderCount >= MAX_MESSAGES_PER_SENDER) {
-                return open(state, trace, "SENDER_LIMIT");
+                return Admission.rejected(trace, "SENDER_LIMIT", false,
+                        senderCount, MAX_MESSAGES_PER_SENDER);
             }
             String edge = clean(sender) + "→" + clean(target);
             int edgeCount = count(state.edgeCounts, edge);
             if (edgeCount >= MAX_MESSAGES_PER_EDGE) {
-                return open(state, trace, "EDGE_LIMIT");
+                return Admission.rejected(trace, "EDGE_LIMIT", false,
+                        edgeCount, MAX_MESSAGES_PER_EDGE);
             }
             state.messages++;
             state.senderCounts.put(clean(sender), senderCount + 1);
@@ -108,7 +110,7 @@ public final class TalkToCircuitBreaker {
         cleanup(System.currentTimeMillis());
         CascadeState state = stateFor(trace);
         synchronized (state) {
-            return state.open ? Admission.rejected(trace, state.reason)
+            return state.open ? Admission.rejected(trace, state.reason, true)
                     : open(state, trace, reason);
         }
     }
@@ -145,7 +147,7 @@ public final class TalkToCircuitBreaker {
     private Admission open(CascadeState state, TalkToTrace trace, String reason) {
         state.open = true;
         state.reason = reason;
-        return Admission.rejected(trace, reason);
+        return Admission.rejected(trace, reason, true);
     }
 
     private void cleanup(long now) {
@@ -188,28 +190,43 @@ public final class TalkToCircuitBreaker {
         private final TalkToTrace trace;
         private final String reason;
         private final int messageCount;
+        private final boolean circuitOpen;
+        private final int current;
+        private final int limit;
         private final java.util.concurrent.atomic.AtomicBoolean rolledBack =
                 new java.util.concurrent.atomic.AtomicBoolean();
 
         private Admission(boolean accepted, TalkToTrace trace, String reason,
-                          int messageCount) {
+                          int messageCount, boolean circuitOpen, int current, int limit) {
             this.accepted = accepted;
             this.trace = trace;
             this.reason = reason;
             this.messageCount = messageCount;
+            this.circuitOpen = circuitOpen;
+            this.current = current;
+            this.limit = limit;
         }
 
         private static Admission accepted(TalkToTrace trace, int count) {
-            return new Admission(true, trace, null, count);
+            return new Admission(true, trace, null, count, false, count, MAX_MESSAGES);
         }
 
-        private static Admission rejected(TalkToTrace trace, String reason) {
-            return new Admission(false, trace, reason, 0);
+        private static Admission rejected(TalkToTrace trace, String reason,
+                                          boolean circuitOpen) {
+            return new Admission(false, trace, reason, 0, circuitOpen, -1, -1);
+        }
+
+        private static Admission rejected(TalkToTrace trace, String reason,
+                                          boolean circuitOpen, int current, int limit) {
+            return new Admission(false, trace, reason, 0, circuitOpen, current, limit);
         }
 
         public boolean isAccepted() { return accepted; }
         public TalkToTrace getTrace() { return trace; }
         public String getReason() { return reason; }
         public int getMessageCount() { return messageCount; }
+        public boolean isCircuitOpen() { return circuitOpen; }
+        public int getCurrent() { return current; }
+        public int getLimit() { return limit; }
     }
 }

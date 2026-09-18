@@ -106,7 +106,7 @@ public final class ChannelTalkToMessage extends TalkToMessage {
                 + "本次消息已绑定其原始信道会话。需要向当前会话发送回复时，请调用 talk_to MCP 工具，"
                 + "并将 target 指定为“回复”。同一逻辑 turn 可以回复多次：系统首次优先使用精准回复，"
                 + "后续自动发送到本 turn 绑定的群聊或单聊，不会使用默认主动推送目标。"
-                + "不要选择或猜测其他信道 target，也不要输出 Action JSON。\n";
+                + "不要选择或猜测其他信道 target。\n";
     }
 
     private static ChannelTurnContext turnContext(String replyTarget, String channelId,

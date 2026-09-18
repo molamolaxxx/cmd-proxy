@@ -199,6 +199,27 @@ public class TeamMemberCommandTest {
     }
 
     @Test
+    public void sourceRobotRefreshRebuildsAndReopensAffectedTeamMember()
+            throws Exception {
+        Fixture fixture = fixture();
+        TestClient previous = fixture.current.get();
+
+        int refreshed = fixture.manager.refreshSourceRobot("acp-Robot_One");
+
+        assertEquals(1, refreshed);
+        assertTrue(previous.closed);
+        assertNotSame(previous, fixture.current.get());
+        assertEquals(AbstractAcpClient.State.READY, fixture.current.get().getState());
+        assertEquals("new-session", fixture.current.get().getSessionId());
+        assertFalse(fixture.lastOptions.get().isForceNewSession());
+        assertNull(fixture.lastOptions.get().getTargetRestoreSessionId());
+        assertEquals(TeamMemberState.READY,
+                fixture.manager.getRuntime("team-1").get().getDefinition()
+                        .getMembers().get(0).getState());
+        fixture.manager.close();
+    }
+
+    @Test
     public void automaticIdleRotationPublishesMemberSessionChanged() throws Exception {
         Fixture fixture = fixture();
         AutoNewSessionConfig config = new AutoNewSessionConfig();
@@ -264,6 +285,58 @@ public class TeamMemberCommandTest {
                         .getMembers().get(0).getState());
         assertTrue(fixture.events.stream().anyMatch(event ->
                 event.getType().name().equals("SCHEDULE_EVENT")));
+        fixture.manager.close();
+    }
+
+    @Test
+    public void teamScheduleRepairsStaleBusyMemberWhenClientIsReady()
+            throws Exception {
+        Fixture fixture = fixture();
+        ScheduleOwnerKey owner = ScheduleOwnerKey.team(
+                "owner-1", "team-1", "member-1", "Robot One");
+        fixture.manager.onMemberState(
+                "team-1", "member-1", TeamMemberState.BUSY, null);
+        assertEquals(AbstractAcpClient.State.READY,
+                fixture.current.get().getState());
+
+        assertFalse(fixture.manager.executeScheduledPrompt(
+                owner, "task-grace", "[定时任务触发] wait"));
+        assertEquals(TeamMemberState.BUSY,
+                fixture.manager.getRuntime("team-1").get().getDefinition()
+                        .getMembers().get(0).getState());
+
+        java.lang.reflect.Field field = TeamManager.class.getDeclaredField(
+                "scheduleStateMismatchSince");
+        field.setAccessible(true);
+        Map<String, Long> mismatches = (Map<String, Long>) field.get(fixture.manager);
+        mismatches.put("team-1:member-1", 0L);
+
+        assertTrue(fixture.manager.executeScheduledPrompt(
+                owner, "task-stale", "[定时任务触发] repair"));
+        assertEquals("[定时任务触发] repair", fixture.current.get().message);
+        assertEquals(TeamMemberState.BUSY,
+                fixture.manager.getRuntime("team-1").get().getDefinition()
+                        .getMembers().get(0).getState());
+        fixture.manager.close();
+    }
+
+    @Test
+    public void teamScheduleDoesNotRepairAnActuallyBusyClient()
+            throws Exception {
+        Fixture fixture = fixture();
+        ScheduleOwnerKey owner = ScheduleOwnerKey.team(
+                "owner-1", "team-1", "member-1", "Robot One");
+        TestClient active = fixture.current.get();
+        active.setClientState(AbstractAcpClient.State.BUSY);
+        fixture.manager.onMemberState(
+                "team-1", "member-1", TeamMemberState.BUSY, null);
+
+        assertFalse(fixture.manager.executeScheduledPrompt(
+                owner, "task-active", "[定时任务触发] must wait"));
+        assertSame(active, fixture.current.get());
+        assertEquals(TeamMemberState.BUSY,
+                fixture.manager.getRuntime("team-1").get().getDefinition()
+                        .getMembers().get(0).getState());
         fixture.manager.close();
     }
 
@@ -397,6 +470,7 @@ public class TeamMemberCommandTest {
         private String message;
         private List<Map<String, String>> files;
         private boolean cancelled;
+        private boolean closed;
         private PromptOptions promptOptions;
         private boolean allowAutomaticRotation;
 
@@ -439,6 +513,7 @@ public class TeamMemberCommandTest {
 
         @Override
         public void close() throws IOException {
+            closed = true;
             state.set(AbstractAcpClient.State.CLOSED);
         }
     }
