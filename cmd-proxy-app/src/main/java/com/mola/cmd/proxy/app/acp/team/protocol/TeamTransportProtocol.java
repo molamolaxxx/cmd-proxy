@@ -16,6 +16,7 @@ public final class TeamTransportProtocol {
     public static final String TRANSPORT_PREFIX = "team-acp-";
     public static final String DESCRIBE_COMMAND = "acpTeamDescribe";
     public static final String CREATE_COMMAND = "acpTeamCreate";
+    public static final String UPDATE_MEMBERS_COMMAND = "acpTeamUpdateMembers";
     public static final String LIST_COMMAND = "acpTeamList";
     public static final String GET_COMMAND = "acpTeamGet";
     public static final String DELETE_COMMAND = "acpTeamDelete";

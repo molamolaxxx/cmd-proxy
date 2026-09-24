@@ -120,6 +120,7 @@ public class StarweaveTeamGatewayTest {
     public void concurrentIdenticalQueriesShareOneCoordinatorRequest() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         CountDownLatch sent = new CountDownLatch(1);
+        CountDownLatch joined = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         final StarweaveTeamGateway[] holder = new StarweaveTeamGateway[1];
         holder[0] = new StarweaveTeamGateway("instance-b", "team-acp-instance-b",
@@ -134,7 +135,7 @@ public class StarweaveTeamGatewayTest {
             }
             holder[0].acceptResult("rpc-result", new String[]{
                     accepted(request.getCmdId()).toJSONString()});
-        });
+        }, operation -> joined.countDown());
         ready(holder[0]);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
@@ -143,6 +144,7 @@ public class StarweaveTeamGatewayTest {
             assertTrue(sent.await(1, TimeUnit.SECONDS));
             Future<JSONObject> second = executor.submit(() ->
                     holder[0].query("list", new JSONObject(true)));
+            assertTrue(joined.await(1, TimeUnit.SECONDS));
             release.countDown();
             first.get(1, TimeUnit.SECONDS);
             second.get(1, TimeUnit.SECONDS);

@@ -41,7 +41,9 @@ public class AcpSyncRobotsReconnectTest {
         JsonObject discovery = JsonParser.parseString(
                 reconnected.get("teamDiscovery")).getAsJsonObject();
         assertTrue(discovery.get("businessCommandsReady").getAsBoolean());
-        assertEquals(17, discovery.getAsJsonArray("commands").size());
+        assertEquals(18, discovery.getAsJsonArray("commands").size());
+        assertTrue(discovery.getAsJsonArray("commands").toString()
+                .contains(TeamTransportProtocol.UPDATE_MEMBERS_COMMAND));
         assertTrue(discovery.getAsJsonArray("commands").toString()
                 .contains(TeamTransportProtocol.GET_SESSION_HISTORY_COMMAND));
         assertTrue(discovery.getAsJsonArray("commands").toString()

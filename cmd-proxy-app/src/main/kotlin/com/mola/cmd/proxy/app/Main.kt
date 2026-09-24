@@ -353,6 +353,7 @@ private fun startConfigUiServer(config: JSONObject) {
                 reloadChannel(previousChannelId, channelId)
             }
         )
+        server.setMemoryDreamHandler(AcpProxy::memoryDreamStatus, AcpProxy::triggerMemoryDream)
         server.start()
     } catch (e: Exception) {
         log.error("ConfigUI 启动失败, port={}", actualPort, e)

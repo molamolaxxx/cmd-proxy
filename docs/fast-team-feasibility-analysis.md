@@ -107,7 +107,7 @@ MolaChat 提出的不可变 UUID 方案与 cmd-proxy 架构兼容，且应提升
 
 V1 历史推荐：**入口为 chatter 级；纯本机 V1 仅列当前 cmd-proxy 实例、当前 chatter
 可见且已启动的普通 ACP robot，BUSY 可选（因为会新建 Team client），
-ERROR/disabled/onlySubAgent 不可选；1～6 人；队名去首尾空格后 1～40 字，允许重名但
+ERROR/disabled/onlySubAgent 不可选；1～10 人；队名去首尾空格后 1～40 字，允许重名但
 用 teamId 唯一识别。** 跨实例混选不改变该纯本机路径，其当前范围以文首链接的混选
 MVP 基线为准。
 
@@ -391,7 +391,7 @@ FAILED                 DELETING
 
 ### Phase 1：最小可用 Team
 
-- MolaChat Teams 弹框：当前 chatter、1～6 个本地普通 robot、队名。
+- MolaChat Teams 弹框：当前 chatter、1～10 个本地普通 robot、队名。
 - `acpTeamCreate/Get/Send/Cancel/Delete` 和统一 TeamEvent。
 - 全有或全无创建；Team 内临时白名单 talkTo；切换视图不关闭 client。
 - 自动进入 Team 聚合页；删除后回主会话。
@@ -399,7 +399,7 @@ FAILED                 DELETING
 
 ### Phase 1M：本机与 Remote ACP 混选 MVP（当前新增范围）
 
-- 纯本机 1～6 人继续走 V1；混选必须至少一个可信本机成员和至少一个 remote 成员。
+- 纯本机 1～10 人继续走 V1；混选必须至少一个可信本机成员和至少一个 remote 成员。
 - participants 为本机加 N 个 remote cmd-proxy，`N >= 1`，不限制为单个 remote；全队
   成员总数仍不超过 6。
 - 采用 MolaChat 轻量全局记录、复用 V1 TeamDefinition 作为本地 fragment、直接 create

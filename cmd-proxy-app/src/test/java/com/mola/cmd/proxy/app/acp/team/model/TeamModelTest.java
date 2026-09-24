@@ -3,7 +3,9 @@ package com.mola.cmd.proxy.app.acp.team.model;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 
 import static org.junit.Assert.*;
 
@@ -60,6 +62,27 @@ public class TeamModelTest {
 
         assertEquals(1, definition.getMembers().size());
         assertEquals("member-1", definition.getMembers().get(0).getTeamMemberId());
+    }
+
+    @Test
+    public void definitionAcceptsTenMembersAndRejectsEleven() {
+        List<TeamMemberDefinition> members = new ArrayList<>();
+        for (int i = 1; i <= 10; i++) {
+            members.add(member("member-" + i, "Member " + i));
+        }
+        TeamDefinition definition = TeamDefinition.creating(
+                "team-10", "owner-1", "Ten", "team-acp-instance", "request-10",
+                members, 100L);
+        assertEquals(10, definition.getMembers().size());
+
+        members.add(member("member-11", "Member 11"));
+        try {
+            TeamDefinition.creating("team-11", "owner-1", "Eleven",
+                    "team-acp-instance", "request-11", members, 100L);
+            fail("eleven members must exceed the Team limit");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("between 1 and 10"));
+        }
     }
 
     @Test

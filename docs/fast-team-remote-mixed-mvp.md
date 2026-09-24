@@ -15,7 +15,7 @@
 
 - 至少选择一个当前 owner 的本机 cmd-proxy ACP；
 - 至少选择一个 remote cmd-proxy ACP，可以来自一个或多个 remote 实例；
-- Team 通用成员数仍为 1～6；混选 Team 因必须同时包含本机和 remote，实际至少 2 人；
+- Team 通用成员数为 1～10；混选 Team 因必须同时包含本机和 remote，实际至少 2 人；
   同一来源 ACP 在同一 Team 中不重复；
 - 禁止只选择 remote ACP 创建 Team；
 - 纯本机成员组队继续走现有单实例 V1，不强制升级为混选协议。
@@ -151,7 +151,7 @@ cmd-proxy 完整权威管理。
 - `mixedPlacement=true`；
 - 全队 `roster[{teamMemberId,acpClientId,displayName,remark,order}]`。
 
-cmd-proxy 必须校验 local members 都在 roster 中、ID/顺序唯一、roster 为 1～6 人；
+cmd-proxy 必须校验 local members 都在 roster 中、ID/顺序唯一、roster 为 1～10 人；
 `mixedPlacement=true` 时 MolaChat 还必须保证全局 roster 同时包含可信本机与 remote
 placement，因此混选自然至少 2 人。roster 随本地 TeamDefinition 持久化。没有
 `mixedPlacement/roster` 的旧请求保持现有语义。
@@ -192,7 +192,7 @@ MVP 中发送方工具立即得到“已提交 Team 网关”，实际投递结�
 
 ### 5.1 Create：直接创建 + 补偿式 saga
 
-1. MolaChat 验证 token 和最新 discovery candidate，确认通用成员总数 1～6；混选请求
+1. MolaChat 验证 token 和最新 discovery candidate，确认通用成员总数 1～10；混选请求
    必须包含可信本机 placement，且至少包含一个 remote placement，所以实际至少 2 人。
    remote 可以来自多个不同 cmd-proxy；remote-only 请求后端拒绝。
 2. 生成全局 teamId/teamMemberId，按 instanceId 分组，在任何 RPC 前持久化全局
@@ -329,7 +329,7 @@ DELETED或丢弃 participant placement。
 
 ## 8. MVP 验收
 
-1. 纯本机 1～6 人 Team 创建、send、session、talkTo、delete 与重启恢复保持原行为。
+1. 纯本机 1～10 人 Team 创建、send、session、talkTo、delete 与重启恢复保持原行为。
 2. 本机 1 人 + remote 1 人创建成功；本机和 remote 各只启动自己的 member，MolaChat
    全局 Team 在两个 fragment READY 后才 READY。
 3. 本机成员 + 两个不同 remote 实例成员创建成功，member 命令分别命中正确 transport；

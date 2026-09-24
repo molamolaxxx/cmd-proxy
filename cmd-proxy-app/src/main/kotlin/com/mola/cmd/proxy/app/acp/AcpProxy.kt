@@ -77,6 +77,37 @@ import java.util.concurrent.atomic.AtomicReference
 
 object AcpProxy {
 
+    /** ConfigUI 记忆查看弹窗的手动整理入口，使用当前运行的记忆 manager。 */
+    private fun memoryDreamOwner(robotName: String): Pair<MemoryManager, String>? {
+        val configured = configuredRobotRegistry[robotName] ?: return null
+        val owners = registry.getGroupIdsByRobot(robotName).asSequence() +
+            globalGroupRobotRegistry.entries.asSequence()
+                .filter { it.value.name == robotName }.map { it.key } +
+            sequenceOf("subagent:$robotName")
+        return owners.distinct().mapNotNull { groupId ->
+            val manager = memoryManagers.get(groupId).orElse(null)
+            val workspace = registry.getClient(groupId)?.workspacePath ?: configured.workDir
+            if (manager == null || workspace.isNullOrBlank()) null
+            else Pair(manager, workspace)
+        }.firstOrNull()
+    }
+
+    @JvmStatic
+    fun memoryDreamStatus(robotName: String): Map<String, Boolean> {
+        val owner = memoryDreamOwner(robotName)
+        return mapOf(
+            "available" to (owner?.first?.canDream() ?: false),
+            "running" to (owner?.let { it.first.isDreaming(it.second) } ?: false)
+        )
+    }
+
+    @JvmStatic
+    fun triggerMemoryDream(robotName: String): Boolean {
+        val owner = memoryDreamOwner(robotName)
+            ?: throw IllegalStateException("该智能体没有正在运行的记忆服务")
+        return owner.first.triggerDreamIfIdle(owner.second)
+    }
+
     private val log: Logger = LoggerFactory.getLogger(AcpProxy::class.java)
 
     private val registry: AcpClientRegistry = AcpClientRegistry.getInstance()
@@ -616,6 +647,14 @@ object AcpProxy {
                 "Create a persisted Fast Team definition"
             ) { param ->
                 teamCommandHandler?.handleCreate(param.cmdId, param.cmdArgs)
+                    ?: teamUnavailableResult(param.cmdId)
+            }
+            CmdReceiver.register(
+                TeamTransportProtocol.UPDATE_MEMBERS_COMMAND,
+                teamTransportDescriptor.transportGroup,
+                "Update Fast Team membership and renew member sessions"
+            ) { param ->
+                teamCommandHandler?.handleUpdateMembers(param.cmdId, param.cmdArgs)
                     ?: teamUnavailableResult(param.cmdId)
             }
             CmdReceiver.register(

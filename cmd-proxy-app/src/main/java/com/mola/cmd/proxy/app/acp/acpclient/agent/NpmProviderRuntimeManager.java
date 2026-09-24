@@ -386,7 +386,7 @@ public final class NpmProviderRuntimeManager {
         for (Map<String, String> environment : candidates) {
             try {
                 RuntimeInstall installed = ensureExactInstalled(
-                        distribution, latest, prepareInstallerEnvironment(environment));
+                        distribution, latest, environment);
                 verifyInstalled(distribution, installed.home, latest);
                 writeDefaultVersion(distribution, latest);
                 logger.info("Provider 自动 latest 已准备完成, provider={}, previous={}, latest={}; 下次 ACP 启动生效",
@@ -420,13 +420,14 @@ public final class NpmProviderRuntimeManager {
         return environment;
     }
 
-    private Map<String, String> prepareInstallerEnvironment(
+    Map<String, String> prepareInstallerEnvironment(
             Map<String, String> source) {
         Map<String, String> environment = source == null
                 ? new LinkedHashMap<>() : new LinkedHashMap<>(source);
-        String home = System.getProperty("user.home");
-        environment.put("PATH", PathResolver.enrichPath(home,
-                environment.get("PATH") == null ? "" : environment.get("PATH")));
+        String inheritedPath = pathValue(environment);
+        String path = isWindows() ? inheritedPath : PathResolver.enrichPath(
+                System.getProperty("user.home"), inheritedPath);
+        putPath(environment, path);
         return environment;
     }
 
@@ -487,8 +488,7 @@ public final class NpmProviderRuntimeManager {
 
     private void runNpmInstall(Distribution distribution, String version, Path prefix,
                                Map<String, String> environment) throws IOException {
-        Map<String, String> effective = environment == null
-                ? new LinkedHashMap<>() : new LinkedHashMap<>(environment);
+        Map<String, String> effective = prepareInstallerEnvironment(environment);
         String registry = firstNonBlank(effective.get("npm_config_registry"),
                 effective.get("NPM_CONFIG_REGISTRY"), DEFAULT_REGISTRY);
         String npm = locateCommand(platformCommand("npm"), effective.get("PATH"));
@@ -1104,14 +1104,37 @@ public final class NpmProviderRuntimeManager {
         }
     }
 
-    private void prependPath(Map<String, String> environment, String directory) {
-        String current = environment.get("PATH");
+    void prependPath(Map<String, String> environment, String directory) {
+        String current = pathValue(environment);
         if (current == null || current.trim().isEmpty()) {
-            environment.put("PATH", directory);
+            putPath(environment, directory);
         } else if (!Arrays.asList(current.split(Pattern.quote(File.pathSeparator)))
                 .contains(directory)) {
-            environment.put("PATH", directory + File.pathSeparator + current);
+            putPath(environment, directory + File.pathSeparator + current);
+        } else if (isWindows()) {
+            putPath(environment, current);
         }
+    }
+
+    private String pathValue(Map<String, String> environment) {
+        String path = environment.get("PATH");
+        if (isWindows() && (path == null || path.trim().isEmpty())) {
+            for (Map.Entry<String, String> entry : environment.entrySet()) {
+                if ("PATH".equalsIgnoreCase(entry.getKey())
+                        && entry.getValue() != null
+                        && !entry.getValue().trim().isEmpty()) {
+                    return entry.getValue();
+                }
+            }
+        }
+        return path == null ? "" : path;
+    }
+
+    private void putPath(Map<String, String> environment, String path) {
+        if (isWindows()) {
+            environment.keySet().removeIf(key -> "PATH".equalsIgnoreCase(key));
+        }
+        environment.put("PATH", path);
     }
 
     private void copyEnvironment(Map<String, String> source, Map<String, String> target) {
@@ -1119,7 +1142,13 @@ public final class NpmProviderRuntimeManager {
                 "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
                 "NPM_CONFIG_REGISTRY", "npm_config_registry")) {
             String value = source.get(key);
-            if (value != null && !value.trim().isEmpty()) target.put(key, value);
+            if (value != null && !value.trim().isEmpty()) {
+                if ("PATH".equals(key)) {
+                    putPath(target, value);
+                } else {
+                    target.put(key, value);
+                }
+            }
         }
     }
 

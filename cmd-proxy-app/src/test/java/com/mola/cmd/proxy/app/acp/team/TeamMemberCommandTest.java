@@ -120,6 +120,27 @@ public class TeamMemberCommandTest {
     }
 
     @Test
+    public void historyRestoresAttachmentNamesOnUserMessages() throws Exception {
+        Fixture fixture = fixture();
+        fixture.current.get().getHistoryManager().addUserMessage(
+                "please inspect", com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.UserOrigin.USER,
+                Arrays.asList("screen.png", "notes.txt"));
+
+        Map<String, String> result = fixture.handler.handleGetSessionHistory(
+                "rpc-history-attachments", one(basePayload()));
+
+        JsonObject message = json(result).getAsJsonArray("messages")
+                .get(0).getAsJsonObject();
+        assertEquals("USER", message.get("role").getAsString());
+        assertEquals("please inspect", message.get("content").getAsString());
+        assertEquals("screen.png", message.getAsJsonArray("attachments")
+                .get(0).getAsJsonObject().get("fileName").getAsString());
+        assertEquals("notes.txt", message.getAsJsonArray("attachments")
+                .get(1).getAsJsonObject().get("fileName").getAsString());
+        fixture.manager.close();
+    }
+
+    @Test
     public void busyMemberCancelSendsCurrentSessionCancel() throws Exception {
         Fixture fixture = fixture();
         fixture.current.get().setClientState(AbstractAcpClient.State.BUSY);

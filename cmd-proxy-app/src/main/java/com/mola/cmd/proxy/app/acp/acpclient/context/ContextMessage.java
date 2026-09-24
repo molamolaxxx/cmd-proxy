@@ -2,6 +2,10 @@ package com.mola.cmd.proxy.app.acp.acpclient.context;
 
 import com.google.gson.JsonObject;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 /**
  * ACP 会话上下文中的单条消息记录。
  * <p>
@@ -27,6 +31,8 @@ public class ContextMessage {
     private final Role role;
     private final String content;
     private final UserOrigin userOrigin;
+    /** Original file names attached to this USER prompt; content remains in the session files dir. */
+    private final List<String> attachments;
 
     // ---- TOOL 专用字段 ----
     private final String toolCallId;
@@ -46,10 +52,18 @@ public class ContextMessage {
 
     /** Constructs a USER message whose internal origin remains available to UI projections. */
     public ContextMessage(Role role, String content, UserOrigin userOrigin) {
+        this(role, content, userOrigin, Collections.emptyList());
+    }
+
+    /** Constructs a USER / ASSISTANT message with UI-restorable attachment metadata. */
+    public ContextMessage(Role role, String content, UserOrigin userOrigin,
+                          List<String> attachments) {
         this.role = role;
         this.content = content;
         this.userOrigin = role == Role.USER
                 ? (userOrigin == null ? UserOrigin.USER : userOrigin) : null;
+        this.attachments = role == Role.USER && attachments != null && !attachments.isEmpty()
+                ? Collections.unmodifiableList(new ArrayList<>(attachments)) : null;
         this.toolCallId = null;
         this.toolName = null;
         this.status = null;
@@ -65,6 +79,7 @@ public class ContextMessage {
         this.role = Role.TOOL;
         this.content = null;
         this.userOrigin = null;
+        this.attachments = null;
         this.toolCallId = toolCallId;
         this.toolName = toolName;
         this.status = status;
@@ -78,6 +93,7 @@ public class ContextMessage {
         this.role = Role.EVENT;
         this.content = null;
         this.userOrigin = null;
+        this.attachments = null;
         this.toolCallId = null;
         this.toolName = null;
         this.status = null;
@@ -97,6 +113,9 @@ public class ContextMessage {
     public Role getRole() { return role; }
     public String getContent() { return content; }
     public UserOrigin getUserOrigin() { return userOrigin; }
+    public List<String> getAttachments() {
+        return attachments == null ? Collections.emptyList() : attachments;
+    }
     public boolean isVisibleUserMessage() {
         return role != Role.USER || userOrigin == null || userOrigin == UserOrigin.USER;
     }

@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Request/reply bridge from the local Starweave REST facade to the trusted
@@ -36,6 +37,7 @@ public final class StarweaveTeamGateway {
     private final long queryTimeoutMillis;
     private final long mutationTimeoutMillis;
     private final CallbackSender callbackSender;
+    private final Consumer<String> sharedQueryObserver;
     private final Map<String, CompletableFuture<JSONObject>> pending =
             new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<JSONObject>> inFlightQueries =
@@ -51,6 +53,14 @@ public final class StarweaveTeamGateway {
     StarweaveTeamGateway(String instanceId, String transportGroup,
                          long queryTimeoutMillis, long mutationTimeoutMillis,
                          CallbackSender callbackSender) {
+        this(instanceId, transportGroup, queryTimeoutMillis, mutationTimeoutMillis,
+                callbackSender, ignored -> { });
+    }
+
+    StarweaveTeamGateway(String instanceId, String transportGroup,
+                         long queryTimeoutMillis, long mutationTimeoutMillis,
+                         CallbackSender callbackSender,
+                         Consumer<String> sharedQueryObserver) {
         this.instanceId = required(instanceId, "instanceId");
         this.ownerId = StarweaveIdentity.ownerId(instanceId);
         this.transportGroup = required(transportGroup, "transportGroup");
@@ -61,6 +71,8 @@ public final class StarweaveTeamGateway {
         this.mutationTimeoutMillis = mutationTimeoutMillis;
         this.callbackSender = java.util.Objects.requireNonNull(
                 callbackSender, "callbackSender");
+        this.sharedQueryObserver = java.util.Objects.requireNonNull(
+                sharedQueryObserver, "sharedQueryObserver");
     }
 
     public JSONObject query(String operation, JSONObject payload) {
@@ -70,6 +82,7 @@ public final class StarweaveTeamGateway {
         CompletableFuture<JSONObject> mine = new CompletableFuture<>();
         CompletableFuture<JSONObject> existing = inFlightQueries.putIfAbsent(operation, mine);
         if (existing != null) {
+            sharedQueryObserver.accept(operation);
             return awaitSharedQuery(operation, existing);
         }
         try {

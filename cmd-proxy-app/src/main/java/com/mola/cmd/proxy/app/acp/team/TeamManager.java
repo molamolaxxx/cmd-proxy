@@ -632,6 +632,205 @@ public final class TeamManager implements AutoCloseable {
         }
     }
 
+    /** Replaces the local roster and renews every surviving member's session. */
+    public TeamCommandResult updateMembers(TeamMembersUpdateCommand command) {
+        String requestId = command == null ? "" : command.getRequestId();
+        try {
+            validateMembersUpdate(command);
+        } catch (IllegalArgumentException e) {
+            return TeamCommandResult.error(requestId, TeamErrorCode.VALIDATION_ERROR,
+                    e.getMessage());
+        }
+        String payloadHash = sha256(gson.toJson(command));
+        synchronized (requestLocks.computeIfAbsent(requestId, ignored -> new Object())) {
+            try {
+                Optional<TeamOperationRecord> previous = store.loadOperation(requestId);
+                if (previous.isPresent()) {
+                    TeamOperationRecord record = previous.get();
+                    if (record.getOperation() != TeamOperationRecord.Operation.UPDATE_MEMBERS
+                            || !payloadHash.equals(record.getPayloadHash())) {
+                        return TeamCommandResult.error(requestId,
+                                TeamErrorCode.IDEMPOTENCY_CONFLICT,
+                                "requestId already used with different operation or payload");
+                    }
+                    if (record.getResultSnapshot() != null
+                            && !record.getResultSnapshot().trim().isEmpty()) {
+                        return TeamCommandResult.fromSnapshotJson(record.getResultSnapshot());
+                    }
+                    return TeamCommandResult.error(requestId,
+                            TeamErrorCode.VERSION_CONFLICT,
+                            "Previous roster update is still being recovered");
+                }
+                TeamRuntime runtime = teams.get(command.getTeamId());
+                if (runtime == null) {
+                    return TeamCommandResult.error(requestId, TeamErrorCode.NOT_FOUND,
+                            "Team not found");
+                }
+                runtime.getOperationLock().lock();
+                try {
+                    TeamDefinition current = runtime.getDefinition();
+                    if (!command.getOwnerChatterId().equals(current.getOwnerChatterId())) {
+                        return TeamCommandResult.error(requestId, TeamErrorCode.UNAUTHORIZED,
+                                "Team does not belong to ownerChatterId");
+                    }
+                    if (current.isMixedPlacement()) {
+                        return TeamCommandResult.error(requestId, TeamErrorCode.VALIDATION_ERROR,
+                                "Mixed Team roster must be updated by its coordinator");
+                    }
+                    if (current.getState() != TeamState.READY || startupCoordinator == null) {
+                        return TeamCommandResult.error(requestId, TeamErrorCode.TEAM_NOT_READY,
+                                "Team is not READY for roster update");
+                    }
+                    if (command.getExpectedVersion() == null
+                            || command.getExpectedVersion() != current.getVersion()) {
+                        return TeamCommandResult.error(requestId, TeamErrorCode.VERSION_CONFLICT,
+                                "expectedVersion does not match current Team version");
+                    }
+                    if (command.getMembers().size() > limits.getMaxMembersPerTeam()) {
+                        return TeamCommandResult.error(requestId, TeamErrorCode.QUOTA_EXCEEDED,
+                                "Team members exceed maxMembersPerTeam");
+                    }
+                    Set<String> desiredIds = new HashSet<>();
+                    for (TeamMemberCreateSpec spec : command.getMembers()) {
+                        desiredIds.add(spec.getTeamMemberId());
+                    }
+                    Map<String, TeamMemberDefinition> oldById = new LinkedHashMap<>();
+                    for (TeamMemberDefinition member : current.getMembers()) {
+                        oldById.put(member.getTeamMemberId(), member);
+                        AcpClient client = clientRegistry.get(current.getTeamId(),
+                                member.getTeamMemberId()).orElse(null);
+                        boolean failedWithoutClient = member.getState() == TeamMemberState.ERROR
+                                && client == null;
+                        if (!failedWithoutClient && (member.getState() != TeamMemberState.READY
+                                || client == null
+                                || client.getState() != AbstractAcpClient.State.READY)) {
+                            return TeamCommandResult.error(requestId, TeamErrorCode.MEMBER_BUSY,
+                                    "Every active Team member must be READY");
+                        }
+                    }
+                    List<TeamMemberDefinition> desired = new ArrayList<>();
+                    for (TeamMemberCreateSpec spec : command.getMembers()) {
+                        TeamMemberDefinition old = oldById.get(spec.getTeamMemberId());
+                        if (old != null) {
+                            if (!old.getSourceGroupId().equals(spec.getSourceGroupId())
+                                    || !old.getSourceRobotId().equals(spec.getSourceRobotId())) {
+                                throw new IllegalArgumentException(
+                                        "Existing teamMemberId cannot change source");
+                            }
+                            desired.add(old.withRemark(spec.getRemark()).withOrder(spec.getOrder()));
+                        } else {
+                            desired.add(resolveMembers(Collections.singletonList(spec),
+                                    current.getOwnerChatterId(), false).get(0));
+                        }
+                    }
+                    if (current.isCaptainMode()
+                            && !desiredIds.contains(current.getCaptainTeamMemberId())) {
+                        throw new IllegalArgumentException("Team captain cannot be removed");
+                    }
+                    if (activeMemberCount() - current.getMembers().size() + desired.size()
+                            > limits.getMaxTotalMembers()) {
+                        return TeamCommandResult.error(requestId, TeamErrorCode.QUOTA_EXCEEDED,
+                                "Team members exceed maxTotalMembers");
+                    }
+                    List<TeamContactRef> roster = new ArrayList<>();
+                    for (TeamMemberDefinition member : desired) {
+                        roster.add(TeamContactRef.from(member));
+                    }
+                    TeamDefinition next = current.withRosterMembers(
+                            desired, roster, System.currentTimeMillis());
+                    store.saveOperation(new TeamOperationRecord(requestId,
+                            TeamOperationRecord.Operation.UPDATE_MEMBERS, payloadHash,
+                            command.getTeamId(), TeamOperationRecord.Status.ACCEPTED,
+                            null, System.currentTimeMillis(),
+                            System.currentTimeMillis() + OPERATION_TTL_MILLIS));
+                    store.saveTeam(next);
+                    if (!runtime.publishNextDefinition(next)) {
+                        throw new IOException("Team version changed before roster publish");
+                    }
+                    Map<String, String> failures = new LinkedHashMap<>();
+                    for (TeamMemberDefinition old : current.getMembers()) {
+                        if (desiredIds.contains(old.getTeamMemberId())) continue;
+                        TeamTalkToDispatcher dispatcher = talkToDispatchers.get(current.getTeamId());
+                        if (dispatcher != null) dispatcher.removeMember(old.getTeamMemberId());
+                        if (scheduleTaskManager != null) {
+                            scheduleTaskManager.cleanupOwner(ScheduleOwnerKey.team(
+                                    current.getOwnerChatterId(), current.getTeamId(),
+                                    old.getTeamMemberId(), old.getSourceRobotName()));
+                        }
+                        AcpClient removed = clientRegistry.remove(current.getTeamId(),
+                                old.getTeamMemberId()).orElse(null);
+                        if (removed != null) {
+                            try { removed.close(); }
+                            catch (IOException e) {
+                                logger.warn("Removed Team member client close failed, teamId={}, memberId={}",
+                                        current.getTeamId(), old.getTeamMemberId(), e);
+                            }
+                        }
+                    }
+                    for (TeamMemberDefinition member : desired) {
+                        String memberId = member.getTeamMemberId();
+                        try {
+                            publishMemberState(runtime, memberId, TeamMemberState.STARTING, null);
+                            AcpClient old = clientRegistry.remove(current.getTeamId(), memberId)
+                                    .orElse(null);
+                            if (old != null) {
+                                try { old.close(); }
+                                catch (IOException e) {
+                                    logger.warn("Old Team member client close failed, teamId={}, memberId={}",
+                                            current.getTeamId(), memberId, e);
+                                }
+                            }
+                            TeamMemberDefinition starting = findMember(runtime.getDefinition(), memberId);
+                            AcpClient replacement = startupCoordinator.replaceMember(
+                                    runtime, starting, TeamMemberStartOptions.newSession());
+                            if (!clientRegistry.register(current.getTeamId(), memberId, replacement)) {
+                                replacement.close();
+                                throw new IllegalStateException("duplicate Team member client");
+                            }
+                            publishMemberState(runtime, memberId, TeamMemberState.READY, null);
+                        } catch (Exception e) {
+                            failures.put(memberId, safeMessage(e));
+                            try {
+                                publishMemberState(runtime, memberId, TeamMemberState.ERROR,
+                                        TeamError.of(TeamErrorCode.CLIENT_START_FAILED,
+                                                safeMessage(e), true));
+                            } catch (Exception ignored) { }
+                        }
+                    }
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("team", runtime.getDefinition());
+                    data.put("sessionFailures", failures);
+                    data.put("sessionsCreated", desired.size() - failures.size());
+                    TeamCommandResult result = TeamCommandResult.success(requestId,
+                            failures.isEmpty() ? "UPDATED" : "PARTIAL",
+                            failures.isEmpty() ? "Team roster and sessions updated"
+                                    : "Team roster updated with member session failures",
+                            runtime.getDefinition().getVersion(), data);
+                    store.saveOperation(new TeamOperationRecord(requestId,
+                            TeamOperationRecord.Operation.UPDATE_MEMBERS, payloadHash,
+                            command.getTeamId(), TeamOperationRecord.Status.SUCCEEDED,
+                            gson.toJson(result), System.currentTimeMillis(),
+                            System.currentTimeMillis() + OPERATION_TTL_MILLIS));
+                    publishEvent(runtime, TeamEventType.TEAM_MEMBERS_UPDATED, data);
+                    return result;
+                } finally {
+                    runtime.getOperationLock().unlock();
+                }
+            } catch (TeamSourceResolutionException e) {
+                return TeamCommandResult.error(requestId, e.getCode(), e.getMessage());
+            } catch (TeamStore.VersionConflictException e) {
+                return TeamCommandResult.error(requestId, TeamErrorCode.VERSION_CONFLICT,
+                        e.getMessage());
+            } catch (IllegalArgumentException e) {
+                return TeamCommandResult.error(requestId, TeamErrorCode.VALIDATION_ERROR,
+                        e.getMessage());
+            } catch (Exception e) {
+                return TeamCommandResult.error(requestId, TeamErrorCode.INTERNAL_ERROR,
+                        safeMessage(e));
+            }
+        }
+    }
+
     public TeamCommandResult list(TeamQuery query) {
         try {
             ensureOpen();
@@ -1252,6 +1451,15 @@ public final class TeamManager implements AutoCloseable {
                             continue;
                         } else {
                             value.put("content", content);
+                            if (!message.getAttachments().isEmpty()) {
+                                List<Map<String, Object>> attachments = new ArrayList<>();
+                                for (String fileName : message.getAttachments()) {
+                                    Map<String, Object> attachment = new LinkedHashMap<>();
+                                    attachment.put("fileName", fileName);
+                                    attachments.add(attachment);
+                                }
+                                value.put("attachments", attachments);
+                            }
                         }
                     }
                 }
@@ -2542,13 +2750,17 @@ public final class TeamManager implements AutoCloseable {
         }
         route.runtime.getOperationLock().lock();
         try {
-            AcpClient old = requireReadyClient(route);
+            AcpClient old = options.isForceNewSession()
+                    && route.member.getState() == TeamMemberState.ERROR
+                    ? clientRegistry.get(route.team.getTeamId(),
+                            route.member.getTeamMemberId()).orElse(null)
+                    : requireReadyClient(route);
             publishMemberState(route.runtime, route.member.getTeamMemberId(),
                     com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.STARTING, null);
             clientRegistry.remove(route.team.getTeamId(), route.member.getTeamMemberId());
-            try {
-                old.close();
-            } catch (IOException ignored) {
+            if (old != null) {
+                try { old.close(); }
+                catch (IOException ignored) { }
             }
             TeamMemberDefinition starting = findMember(
                     route.runtime.getDefinition(), route.member.getTeamMemberId());
@@ -3003,8 +3215,8 @@ public final class TeamManager implements AutoCloseable {
         }
         requireText(transportGroup, "transportGroup");
         List<TeamMemberCreateSpec> members = command.getMembers();
-        if (members == null || members.isEmpty() || members.size() > 6) {
-            throw new IllegalArgumentException("members size must be between 1 and 6");
+        if (members == null || members.isEmpty() || members.size() > 10) {
+            throw new IllegalArgumentException("members size must be between 1 and 10");
         }
         Set<String> memberIds = new HashSet<>();
         Set<String> sourceGroups = new HashSet<>();
@@ -3026,9 +3238,9 @@ public final class TeamManager implements AutoCloseable {
         }
         List<TeamRosterMemberSpec> roster = command.getRoster();
         if (command.isMixedPlacement()) {
-            if (roster == null || roster.size() < 2 || roster.size() > 6) {
+            if (roster == null || roster.size() < 2 || roster.size() > 10) {
                 throw new IllegalArgumentException(
-                        "mixed Team roster size must be between 2 and 6");
+                        "mixed Team roster size must be between 2 and 10");
             }
             Set<String> rosterIds = new HashSet<>();
             Set<Integer> rosterOrders = new HashSet<>();
@@ -3107,6 +3319,36 @@ public final class TeamManager implements AutoCloseable {
                 && command.getExpectedVersion().longValue() < 1L) {
             throw new IllegalArgumentException(
                     "expectedVersion must be positive");
+        }
+    }
+
+    private static void validateMembersUpdate(TeamMembersUpdateCommand command) {
+        if (command == null) throw new IllegalArgumentException("update payload is required");
+        requireSchema(command.getSchemaVersion());
+        requireSafeId(command.getRequestId(), "requestId");
+        requireSafeId(command.getTeamId(), "teamId");
+        requireText(command.getOwnerChatterId(), "ownerChatterId");
+        List<TeamMemberCreateSpec> members = command.getMembers();
+        if (members == null || members.isEmpty() || members.size() > 10) {
+            throw new IllegalArgumentException("members size must be between 1 and 10");
+        }
+        Set<String> ids = new HashSet<>();
+        Set<String> groups = new HashSet<>();
+        Set<Integer> orders = new HashSet<>();
+        for (TeamMemberCreateSpec member : members) {
+            if (member == null) throw new IllegalArgumentException("member is required");
+            requireSafeId(member.getTeamMemberId(), "teamMemberId");
+            requireText(member.getSourceRobotId(), "sourceRobotId");
+            requireText(member.getSourceGroupId(), "sourceGroupId");
+            if (member.getOrder() < 0 || !ids.add(member.getTeamMemberId())
+                    || !groups.add(member.getSourceGroupId())
+                    || !orders.add(member.getOrder())) {
+                throw new IllegalArgumentException(
+                        "member ids, source groups and orders must be unique");
+            }
+            if (member.getRemark() != null && member.getRemark().length() > 200) {
+                throw new IllegalArgumentException("member remark is too long");
+            }
         }
     }
 

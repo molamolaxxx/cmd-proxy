@@ -23,6 +23,10 @@ import java.util.concurrent.locks.ReentrantLock;
  * 所有整理任务异步执行，不阻塞主对话流。
  */
 public class MemoryDreamer {
+    private static final java.util.concurrent.ConcurrentMap<String, Object> ACTIVE_SCOPES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentMap<String, Object> ownedScopes =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final Logger logger = LoggerFactory.getLogger(MemoryDreamer.class);
     private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
@@ -41,7 +45,7 @@ public class MemoryDreamer {
                 t.setDaemon(true);
                 return t;
             },
-            new ThreadPoolExecutor.DiscardOldestPolicy()
+            new ThreadPoolExecutor.AbortPolicy()
     );
 
     public MemoryDreamer(MemoryConfig config, MemoryFileStore fileStore, AcpRobotParam robotParam) {
@@ -87,12 +91,31 @@ public class MemoryDreamer {
     /**
      * 异步提交整理任务。
      */
-    public void submitDream(String workspacePath) {
+    public boolean submitDream(String workspacePath) {
+        String scope = fileStore.getStorageKey(workspacePath);
+        Object admission = new Object();
+        if (ACTIVE_SCOPES.putIfAbsent(scope, admission) != null) return false;
+        ownedScopes.put(scope, admission);
         try {
-            dreamQueue.submit(() -> doDream(workspacePath));
+            dreamQueue.submit(() -> {
+                try {
+                    doDream(workspacePath);
+                } finally {
+                    ACTIVE_SCOPES.remove(scope, admission);
+                    ownedScopes.remove(scope, admission);
+                }
+            });
+            return true;
         } catch (RejectedExecutionException e) {
+            ACTIVE_SCOPES.remove(scope, admission);
+            ownedScopes.remove(scope, admission);
             logger.warn("整理队列已满，跳过本次整理");
+            return false;
         }
+    }
+
+    public boolean isDreaming(String workspacePath) {
+        return ACTIVE_SCOPES.containsKey(fileStore.getStorageKey(workspacePath));
     }
 
     private void doDream(String workspacePath) {
@@ -396,10 +419,10 @@ public class MemoryDreamer {
         try {
             if (!dreamQueue.awaitTermination(config.getSubClientTimeout() * 2L, TimeUnit.SECONDS)) {
                 logger.warn("整理队列关闭超时，强制终止");
-                dreamQueue.shutdownNow();
+                shutdownNow();
             }
         } catch (InterruptedException e) {
-            dreamQueue.shutdownNow();
+            shutdownNow();
             Thread.currentThread().interrupt();
         }
     }
@@ -407,5 +430,7 @@ public class MemoryDreamer {
     /** 立即取消整理任务，不参与进程 stop 的等待。 */
     public void shutdownNow() {
         dreamQueue.shutdownNow();
+        ownedScopes.forEach((scope, admission) -> ACTIVE_SCOPES.remove(scope, admission));
+        ownedScopes.clear();
     }
 }

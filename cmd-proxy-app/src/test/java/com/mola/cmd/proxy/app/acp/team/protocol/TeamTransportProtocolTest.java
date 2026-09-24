@@ -23,6 +23,19 @@ public class TeamTransportProtocolTest {
     }
 
     @Test
+    public void limitsAllowTenMembersPerTeam() {
+        TeamLimits limits = new TeamLimits(1, 10, 10);
+
+        assertEquals(10, limits.getMaxMembersPerTeam());
+        try {
+            new TeamLimits(1, 11, 11);
+            fail("eleven members per Team must be rejected");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("between 1 and 10"));
+        }
+    }
+
+    @Test
     public void derivesStableInstanceScopedTransportGroup() {
         TeamTransportDescriptor descriptor =
                 TeamTransportDescriptor.forInstance("home-mola-.cmd-proxy");
@@ -123,8 +136,9 @@ public class TeamTransportProtocolTest {
                 TeamTransportDescriptor.readyForBusiness("instance-a");
 
         assertTrue(descriptor.isBusinessCommandsReady());
-        assertEquals(17, descriptor.getCommands().size());
+        assertEquals(18, descriptor.getCommands().size());
         assertTrue(descriptor.getCommands().contains("acpTeamCreate"));
+        assertTrue(descriptor.getCommands().contains("acpTeamUpdateMembers"));
         assertTrue(descriptor.getCommands().contains("acpTeamList"));
         assertTrue(descriptor.getCommands().contains("acpTeamGet"));
         assertTrue(descriptor.getCommands().contains("acpTeamDelete"));

@@ -607,6 +607,11 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
         return inbox.size();
     }
 
+    public void removeMember(String teamMemberId) {
+        LinkedBlockingQueue<QueuedMessage> removed = inboxes.remove(teamMemberId);
+        if (removed != null) removed.clear();
+    }
+
     public int dedupSize() {
         cleanExpiredDedup(clock.getAsLong());
         return recentMessages.size();

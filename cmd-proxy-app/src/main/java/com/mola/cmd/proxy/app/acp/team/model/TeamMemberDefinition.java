@@ -91,6 +91,12 @@ public final class TeamMemberDefinition {
                 newRemark, configFingerprint, state, sessionId, lastError);
     }
 
+    public TeamMemberDefinition withOrder(int newOrder) {
+        return new TeamMemberDefinition(teamMemberId, robotId, acpClientId, robotGroup,
+                sourceRobotId, sourceGroupId, sourceRobotName, displayName, avatar, newOrder,
+                remark, configFingerprint, state, sessionId, lastError);
+    }
+
     public String getTeamMemberId() {
         return teamMemberId;
     }

@@ -4,6 +4,7 @@ import org.junit.Test;
 import org.junit.Rule;
 import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,7 +12,9 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertFalse;
@@ -98,6 +101,43 @@ public class NpmProviderRuntimeManagerTest {
         } finally {
             restoreProperty("os.name", oldOsName);
             restoreProperty("os.arch", oldOsArch);
+        }
+    }
+
+    @Test
+    public void windowsInstallerPreservesMixedCaseInheritedPath() throws Exception {
+        String oldOsName = System.getProperty("os.name");
+        try {
+            System.setProperty("os.name", "Windows 11");
+            String nodeDirectory = temporaryFolder.newFolder("node-bin").getAbsolutePath();
+            Map<String, String> inherited = new LinkedHashMap<>();
+            inherited.put("Path", nodeDirectory);
+
+            Map<String, String> prepared = manager.prepareInstallerEnvironment(inherited);
+
+            assertEquals(nodeDirectory, prepared.get("PATH"));
+            assertFalse(prepared.containsKey("Path"));
+            assertEquals(nodeDirectory, inherited.get("Path"));
+        } finally {
+            restoreProperty("os.name", oldOsName);
+        }
+    }
+
+    @Test
+    public void windowsRuntimePathKeepsInheritedDirectoriesWithoutDuplicateKey() {
+        String oldOsName = System.getProperty("os.name");
+        try {
+            System.setProperty("os.name", "Windows 11");
+            Map<String, String> environment = new LinkedHashMap<>();
+            environment.put("Path", "node-bin");
+
+            manager.prependPath(environment, "provider-bin");
+
+            assertEquals("provider-bin" + File.pathSeparator + "node-bin",
+                    environment.get("PATH"));
+            assertFalse(environment.containsKey("Path"));
+        } finally {
+            restoreProperty("os.name", oldOsName);
         }
     }
 

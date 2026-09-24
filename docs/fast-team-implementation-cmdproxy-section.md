@@ -375,7 +375,7 @@ TeamScheduleRegistry
 默认配额建议：
 
 - 每 chatter 最多 5 个活跃 Team；
-- 每 Team 1～6 个 member；
+- 每 Team 1～10 个 member；
 - 每 cmd-proxy 实例最多 20 个 Team client；
 - 同时启动 ACP 进程最多 4 个；
 - 每 member talkTo inbox 10 条，TTL 30 分钟。
@@ -800,7 +800,7 @@ Phase 0 统一回归证据（2026-07-30）：执行
 ### Phase 1：Team 权威模型与 transport
 
 - [x] FT-CMD-101：实现 TeamDefinition、TeamMemberDefinition、状态与错误模型。
-  - 完成证据：`TeamModelTest` 5/5 通过；覆盖稳定 member identity、1～6 人及 memberId 唯一约束、Team version 递增、终态保护、结构化错误和 tombstone。
+  - 完成证据：`TeamModelTest` 5/5 通过；覆盖稳定 member identity、1～10 人及 memberId 唯一约束、Team version 递增、终态保护、结构化错误和 tombstone。
   - 实际模型：`schemaVersion=1`；`robotId=acpClientId=team-acp-{teamMemberId}`；`robotGroup=team-acp`；成员同时固化 `sourceRobotId`、`sourceGroupId`、`avatar`、`order`、来源配置快照 fingerprint；Team/Member 状态及 15 个标准错误码已固化。
   - 验证命令：`mvn -pl cmd-proxy-app -am -Dtest=TeamModelTest -Dsurefire.failIfNoSpecifiedTests=false test`
   - 修改文件：`team/model/TeamDefinition.java`、`TeamMemberDefinition.java`、`TeamState.java`、`TeamMemberState.java`、`TeamError.java`、`TeamErrorCode.java`、`TeamOperationRecord.java`、`TeamTombstone.java`、`TeamModelTest.java`。
@@ -1275,7 +1275,7 @@ cmdproxy：
 | 环境变量 | JVM property | 默认值 | 语义 |
 |---|---|---:|---|
 | `CMD_PROXY_TEAM_MAX_ACTIVE_TEAMS` | `cmd.proxy.team.maxActiveTeams` | 20 | 实例同时存在的非终态 Team 上限 |
-| `CMD_PROXY_TEAM_MAX_MEMBERS_PER_TEAM` | `cmd.proxy.team.maxMembersPerTeam` | 6 | 单 Team 成员上限，合法范围 1～6 |
+| `CMD_PROXY_TEAM_MAX_MEMBERS_PER_TEAM` | `cmd.proxy.team.maxMembersPerTeam` | 10 | 单 Team 成员上限，合法范围 1～10 |
 | `CMD_PROXY_TEAM_MAX_TOTAL_MEMBERS` | `cmd.proxy.team.maxTotalMembers` | 100 | 实例全部非终态 Team 成员总上限 |
 
 超过任一上限返回已有 `QUOTA_EXCEEDED`，结果仍写入 requestId operation 快照，保持
@@ -1346,7 +1346,7 @@ CMD_PROXY_HOME=/home/mola/.cmd-proxy \
 CMD_PROXY_RPC_PORT=10020 \
 CMD_PROXY_CONFIG_UI_PORT=10528 \
 CMD_PROXY_TEAM_MAX_ACTIVE_TEAMS=20 \
-CMD_PROXY_TEAM_MAX_MEMBERS_PER_TEAM=6 \
+CMD_PROXY_TEAM_MAX_MEMBERS_PER_TEAM=10 \
 CMD_PROXY_TEAM_MAX_TOTAL_MEMBERS=100 \
 java -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar acp
 ```
@@ -1373,7 +1373,7 @@ cd /home/mola/IdeaProjects/molachat
 
 1. Teams 弹框能看到至少 2 个普通 `robotGroup=acp` 候选；刷新后
    `/team` list/get 与 cmdproxy 权威定义一致。
-2. 发起 1～6 人纯本机 Team，首次 HTTP/RPC 返回 ACCEPTED；事件或轮询进入 READY 后
+2. 发起 1～10 人纯本机 Team，首次 HTTP/RPC 返回 ACCEPTED；事件或轮询进入 READY 后
    MolaChat 自动进入队伍模式，只展示该 Team 的 `robotGroup=team-acp` 成员。
 3. 对两个成员分别验证文本、文件、cancel/new/list/restore session、status 和
    context usage；消息事件不得串到普通 robot 或另一 Team。
@@ -1593,7 +1593,7 @@ Failures 0、Errors 0、Skipped 0，`BUILD SUCCESS`。
 用户已确认 1A+2B 并授权开发：纯本机 ACP-only Team 继续走 V1；mixed Team 必须
 由 MolaChat 保证至少一个可信 home/local member 和至少一个 remote member，remote
 可来自多个 cmd-proxy，remote-only 禁止。cmd-proxy fragment 只包含本实例 local
-members，同时持久化同一份 1～6 人全局 `roster`。
+members，同时持久化同一份 1～10 人全局 `roster`。
 
 - B 侧以 `AcpRobotParam.teamSharedWithChatterIds` 为 standing allowlist，remote source
   group 为 `team-shared-{instanceId}-{sourceRobotId}`，不写普通 `visibleChatterIds`；

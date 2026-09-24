@@ -169,6 +169,22 @@ public class ConversationHistoryManagerTest {
     }
 
     @Test
+    public void userAttachmentNamesSurviveFlushAndReload() throws Exception {
+        Path root = temporaryFolder.newFolder("attachment-sessions").toPath();
+        AcpClientIdentity identity = teamIdentity("team/team-1/member-attachments");
+        ConversationHistoryManager writer = new ConversationHistoryManager(identity, root);
+        writer.addUserMessage("please inspect", ContextMessage.UserOrigin.USER,
+                java.util.Arrays.asList("screen.png", "notes.txt"));
+        writer.addAssistantMessage("done");
+        writer.flushTurn("session-attachments");
+
+        ConversationHistoryManager reader = new ConversationHistoryManager(identity, root);
+        ContextMessage message = reader.getFullHistory("session-attachments").get(0);
+        assertEquals(java.util.Arrays.asList("screen.png", "notes.txt"),
+                message.getAttachments());
+    }
+
+    @Test
     public void repeatedSessionDirectoryScansDoNotLeakFileDescriptors()
             throws Exception {
         Path procFds = Paths.get("/proc/self/fd");

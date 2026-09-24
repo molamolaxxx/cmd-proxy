@@ -421,12 +421,17 @@ public class StarweaveTeamApiBridgeTest {
         StarweaveTeamApiBridge.install(manager, instanceId,
                 () -> java.util.Collections.singletonList(localSource), holder[0]);
         try {
-            JSONArray sources = StarweaveTeamApiBridge.sources()
-                    .getJSONArray("sources");
+            JSONObject discovery = StarweaveTeamApiBridge.sources();
+            JSONArray sources = discovery.getJSONArray("sources");
             assertEquals(2, sources.size());
             assertEquals("team-acp-" + instanceId,
                     sources.getJSONObject(0).getString("transportGroup"));
             assertTrue(sources.getJSONObject(0).getBooleanValue("coordinated"));
+            JSONArray localSources = discovery.getJSONArray("localSources");
+            assertEquals(1, localSources.size());
+            assertFalse(localSources.getJSONObject(0).getBooleanValue("coordinated"));
+            assertEquals(localSource.getSourceGroupId(),
+                    localSources.getJSONObject(0).getString("sourceGroupId"));
 
             JSONArray members = new JSONArray();
             for (int i = 0; i < sources.size(); i++) {

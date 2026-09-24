@@ -131,6 +131,18 @@ public final class TeamDefinition {
                 mixedPlacement, roster, mode, captainTeamMemberId);
     }
 
+    public TeamDefinition withRosterMembers(List<TeamMemberDefinition> newMembers,
+                                            List<TeamContactRef> newRoster,
+                                            long timestamp) {
+        if (state != TeamState.READY) {
+            throw new IllegalStateException("only READY Team can update members");
+        }
+        return new TeamDefinition(schemaVersion, teamId, ownerChatterId, name,
+                state, version + 1L, transportGroup, createRequestId, newMembers,
+                createdAt, timestamp, deletedAt, lastError, deleteRequestId,
+                mixedPlacement, newRoster, mode, captainTeamMemberId);
+    }
+
     public TeamDefinition withMemberRemarks(Map<String, String> memberRemarks,
                                             long timestamp) {
         if (state.isTerminal()) {
@@ -193,8 +205,8 @@ public final class TeamDefinition {
 
     private static List<TeamMemberDefinition> copyAndValidateMembers(
             List<TeamMemberDefinition> members) {
-        if (members == null || members.isEmpty() || members.size() > 6) {
-            throw new IllegalArgumentException("members size must be between 1 and 6");
+        if (members == null || members.isEmpty() || members.size() > 10) {
+            throw new IllegalArgumentException("members size must be between 1 and 10");
         }
         List<TeamMemberDefinition> copy = new ArrayList<>(members);
         Set<String> ids = new HashSet<>();
@@ -225,8 +237,8 @@ public final class TeamDefinition {
         } else {
             result.addAll(roster);
         }
-        if (result.isEmpty() || result.size() > 6) {
-            throw new IllegalArgumentException("roster size must be between 1 and 6");
+        if (result.isEmpty() || result.size() > 10) {
+            throw new IllegalArgumentException("roster size must be between 1 and 10");
         }
         Set<String> ids = new HashSet<>();
         Set<Integer> orders = new HashSet<>();

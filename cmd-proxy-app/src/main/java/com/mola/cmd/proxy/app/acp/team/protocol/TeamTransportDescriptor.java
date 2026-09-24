@@ -47,6 +47,7 @@ public final class TeamTransportDescriptor {
                 ? Collections.unmodifiableList(Arrays.asList(
                         TeamTransportProtocol.DESCRIBE_COMMAND,
                         TeamTransportProtocol.CREATE_COMMAND,
+                        TeamTransportProtocol.UPDATE_MEMBERS_COMMAND,
                         TeamTransportProtocol.LIST_COMMAND,
                         TeamTransportProtocol.GET_COMMAND,
                         TeamTransportProtocol.DELETE_COMMAND,

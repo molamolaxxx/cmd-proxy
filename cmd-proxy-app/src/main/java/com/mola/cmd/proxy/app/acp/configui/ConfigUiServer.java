@@ -9,7 +9,6 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderType;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager;
-import com.mola.cmd.proxy.app.acp.common.PathResolver;
 import com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveRequestDeduplicator;
@@ -55,6 +54,7 @@ import java.util.function.Consumer;
 import java.util.function.BiFunction;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
+import java.util.function.Function;
 import java.util.Map;
 import java.util.UUID;
 
@@ -80,6 +80,10 @@ public class ConfigUiServer {
     private final Supplier<List<Map<String, Object>>> channelBindingTargetSupplier;
     private final BiConsumer<String, String> refreshChannelCallback;
     private final AgentResourceBrowser agentResourceBrowser = new AgentResourceBrowser();
+    private Function<String, Map<String, Boolean>> memoryDreamStatus =
+            ignored -> { throw new IllegalStateException("记忆服务未运行"); };
+    private Function<String, Boolean> memoryDreamTrigger =
+            ignored -> { throw new IllegalStateException("记忆服务未运行"); };
     private final StarweaveRequestDeduplicator starweaveRequests =
             new StarweaveRequestDeduplicator();
     private HttpServer server;
@@ -213,6 +217,12 @@ public class ConfigUiServer {
         this.refreshChannelCallback = refreshChannelCallback;
     }
 
+    public void setMemoryDreamHandler(Function<String, Map<String, Boolean>> status,
+                                      Function<String, Boolean> trigger) {
+        this.memoryDreamStatus = java.util.Objects.requireNonNull(status);
+        this.memoryDreamTrigger = java.util.Objects.requireNonNull(trigger);
+    }
+
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
         executor = Executors.newFixedThreadPool(4);
@@ -272,6 +282,8 @@ public class ConfigUiServer {
                 proxied(this::handleAgentResourceTree));
         server.createContext("/api/agent-resources/content",
                 proxied(this::handleAgentResourceContent));
+        server.createContext("/api/agent-resources/dream",
+                proxied(this::handleAgentMemoryDream));
         server.createContext("/api/starweave/v1/sessions",
                 proxied(this::handleStarweaveSessions));
         server.createContext("/api/starweave/v1/sessions/open",
@@ -851,9 +863,6 @@ public class ConfigUiServer {
             }
             String version = request == null ? null : request.getString("version");
             Map<String, String> environment = new java.util.LinkedHashMap<>(System.getenv());
-            String home = System.getProperty("user.home");
-            environment.put("PATH", PathResolver.enrichPath(home,
-                    environment.get("PATH") == null ? "" : environment.get("PATH")));
             NpmProviderRuntimeManager.InstallJob job =
                     manager.startInstall(type, version, environment);
             sendResponse(exchange, 202, "application/json",
@@ -2322,6 +2331,41 @@ public class ConfigUiServer {
             logger.warn("读取智能体资源内容失败", e);
             sendResponse(exchange, 500, "application/json",
                     JSON.toJSONString(apiError("RESOURCE_READ_FAILED", e.getMessage())));
+        }
+    }
+
+    private void handleAgentMemoryDream(HttpExchange exchange) throws IOException {
+        String method = exchange.getRequestMethod();
+        if (!"GET".equalsIgnoreCase(method) && !"POST".equalsIgnoreCase(method)) {
+            sendResponse(exchange, 405, "text/plain", "Method Not Allowed");
+            return;
+        }
+        try {
+            AcpRobotParam robot = findConfiguredRobot(param(exchange, "robot"));
+            JSONObject result = new JSONObject(true);
+            result.put("ok", true);
+            if ("POST".equalsIgnoreCase(method)) {
+                if (!memoryDreamTrigger.apply(robot.getName())) {
+                    boolean running = Boolean.TRUE.equals(
+                            memoryDreamStatus.apply(robot.getName()).get("running"));
+                    sendResponse(exchange, running ? 409 : 503, "application/json",
+                            JSON.toJSONString(apiError(running ? "DREAM_RUNNING" : "DREAM_QUEUE_FULL",
+                                    running ? "记忆正在整理中，请稍候" : "记忆整理队列已满，请稍后重试")));
+                    return;
+                }
+            }
+            result.putAll(memoryDreamStatus.apply(robot.getName()));
+            sendResponse(exchange, 200, "application/json", JSON.toJSONString(result));
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_RESOURCE_REQUEST", e.getMessage())));
+        } catch (IllegalStateException e) {
+            sendResponse(exchange, 422, "application/json",
+                    JSON.toJSONString(apiError("DREAM_UNAVAILABLE", e.getMessage())));
+        } catch (Exception e) {
+            logger.warn("记忆整理操作失败", e);
+            sendResponse(exchange, 500, "application/json",
+                    JSON.toJSONString(apiError("DREAM_FAILED", e.getMessage())));
         }
     }
 

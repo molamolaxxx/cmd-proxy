@@ -33,6 +33,9 @@ const context = vm.createContext({
 vm.runInContext(section('function parseStarFilePreviewTarget', 'function fileLinkContext'), context)
 vm.runInContext(section('function inlineMarkdown', 'function splitMarkdownTableRow'), context)
 vm.runInContext(section('function esc(s)', '// 服务设置区域'), context)
+vm.runInContext(section('function messageAttachmentsHtml', 'function renderStarweaveEvents'), context)
+vm.runInContext(section('function teamHistoryItemHtml', 'function teamLiveItemHtml'), context)
+vm.runInContext(section('function teamLiveItemHtml', 'function renderTeamSessionMessages'), context)
 
 test('parses local file links and line numbers without confusing remote ports', () => {
     assert.deepEqual(JSON.parse(JSON.stringify(
@@ -67,6 +70,65 @@ test('binds the shared viewer to ordinary and team session message roots', () =>
     assert.match(html, /#fileLinkPreviewDialog\{z-index:360\}/)
 })
 
+test('renders attachment names in live and restored team user bubbles', () => {
+    context.teamPersistedEventHtml = () => ''
+    context.teamTalkToCardHtml = () => ''
+    context.renderMarkdown = value => value
+    context.normalized = value => value
+    context.taskEventCardHtml = () => ''
+    context.eventCardHtml = () => ''
+
+    const restored = context.teamHistoryItemHtml({
+        role: 'USER',
+        content: 'please inspect',
+        attachments: [{fileName: 'screen.png'}, {fileName: '<notes>.txt'}]
+    })
+    const live = context.teamLiveItemHtml({
+        kind: 'user',
+        text: 'please inspect',
+        attachments: [{fileName: 'screen.png'}]
+    })
+
+    assert.match(restored, /message-attachments/)
+    assert.match(restored, /screen\.png/)
+    assert.match(restored, /&lt;notes&gt;\.txt/)
+    assert.match(live, /screen\.png/)
+})
+
+test('keeps ready upload metadata on the optimistic team user bubble', async () => {
+    const input = {value: 'please inspect'}
+    const member = {state: 'READY', sessionId: 'session-1'}
+    const sent = []
+    const sendContext = vm.createContext({
+        teamSession: {
+            uploads: [{uploadId: 'upload-1', fileName: 'screen.png', size: 128}],
+            liveItems: []
+        },
+        selectedTeamSessionMember: () => member,
+        document: {getElementById: id => id === 'teamSessionInput' ? input : null},
+        teamSessionPost: async (action, body) => sent.push({action, body}),
+        showSnackbar() {},
+        renderTeamSessionMembers() {},
+        renderTeamSessionDetail() {},
+        connectTeamSessionStream() {}
+    })
+    vm.runInContext(section('async function sendTeamSessionMessage',
+        'function teamSessionKeydown'), sendContext)
+
+    await sendContext.sendTeamSessionMessage()
+
+    assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{
+        action: 'send',
+        body: {message: 'please inspect', sessionId: 'session-1', uploadIds: ['upload-1']}
+    }])
+    assert.deepEqual(JSON.parse(JSON.stringify(sendContext.teamSession.liveItems)), [{
+        kind: 'user',
+        text: 'please inspect',
+        attachments: [{fileName: 'screen.png', size: 128}]
+    }])
+    assert.equal(sendContext.teamSession.uploads.length, 0)
+})
+
 test('runs a new session action for every ready team member and blocks stale rosters', async () => {
     const calls = []
     const messages = []
@@ -76,6 +138,7 @@ test('runs a new session action for every ready team member and blocks stale ros
         renderStarweaveTeams() {},
         loadStarweaveTeams: async () => {},
         refreshChannelBindingTargets: async () => {},
+        showConfirm: async () => true,
         showSnackbar(message) { messages.push(message) },
         postTeamMemberAction: async (team, member, action) => {
             calls.push([team.teamId, member.teamMemberId, action])

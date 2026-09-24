@@ -6,6 +6,7 @@ import com.google.gson.JsonParseException;
 import com.mola.cmd.proxy.app.acp.team.model.TeamErrorCode;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamCommandResult;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamCreateCommand;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamMembersUpdateCommand;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamDeleteCommand;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamQuery;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberCommand;
@@ -32,6 +33,16 @@ public final class TeamCommandHandler {
         try {
             TeamCreateCommand command = parseSingleArg(args, TeamCreateCommand.class);
             return manager.create(command, transportGroup).toResultMap();
+        } catch (IllegalArgumentException e) {
+            return validationError(rpcRequestId, e).toResultMap();
+        }
+    }
+
+    public Map<String, String> handleUpdateMembers(String rpcRequestId, String[] args) {
+        try {
+            TeamMembersUpdateCommand command = parseSingleArg(args,
+                    TeamMembersUpdateCommand.class);
+            return manager.updateMembers(command).toResultMap();
         } catch (IllegalArgumentException e) {
             return validationError(rpcRequestId, e).toResultMap();
         }

@@ -16,6 +16,7 @@ import com.mola.cmd.proxy.app.acp.team.protocol.TeamQuery;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamCommandResult;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamMemberSourceDescriptor;
 import com.mola.cmd.proxy.app.acp.team.protocol.TeamRemarksUpdateCommand;
+import com.mola.cmd.proxy.app.acp.team.protocol.TeamMembersUpdateCommand;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -142,6 +143,7 @@ public final class StarweaveTeamApiBridge {
             value.put("coordinated", false);
             values.add(value);
         }
+        JSONArray localSources = copyArray(values);
         if (current.gateway != null) {
             try {
                 JSONArray coordinated = current.gateway.query(
@@ -174,6 +176,7 @@ public final class StarweaveTeamApiBridge {
         }
         JSONObject result = new JSONObject(true);
         result.put("sources", values);
+        result.put("localSources", localSources);
         if (coordinatorDelayed) {
             markCoordinatorDelayed(result);
         } else if (coordinatorFailed) {
@@ -190,8 +193,8 @@ public final class StarweaveTeamApiBridge {
         Runtime current = requireRuntime();
         JSONArray requestedMembers = request == null ? null : request.getJSONArray("members");
         if (requestedMembers == null || requestedMembers.isEmpty()
-                || requestedMembers.size() > 6) {
-            throw new IllegalArgumentException("members size must be between 1 and 6");
+                || requestedMembers.size() > 10) {
+            throw new IllegalArgumentException("members size must be between 1 and 10");
         }
         boolean coordinated = false;
         for (int i = 0; i < requestedMembers.size(); i++) {
@@ -265,6 +268,26 @@ public final class StarweaveTeamApiBridge {
                 throw new IllegalStateException("Starweave Team coordinator is unavailable");
             }
             return success(current.gateway.mutate("update", new JSONObject(request)));
+        }
+        JSONArray requestedMembers = request.getJSONArray("members");
+        if (requestedMembers != null) {
+            List<TeamMemberCreateSpec> members = new ArrayList<>();
+            for (int i = 0; i < requestedMembers.size(); i++) {
+                JSONObject requested = requestedMembers.getJSONObject(i);
+                String groupId = required(requested.getString("sourceGroupId"),
+                        "members.sourceGroupId");
+                members.add(new TeamMemberCreateSpec(
+                        required(requested.getString("teamMemberId"),
+                                "members.teamMemberId"),
+                        required(requested.getString("sourceRobotId"),
+                                "members.sourceRobotId"), groupId, i,
+                        requested.getString("remark")));
+            }
+            return result(current.manager.updateMembers(new TeamMembersUpdateCommand(
+                    TeamDefinition.SCHEMA_VERSION,
+                    textOr(request.getString("requestId"), UUID.randomUUID().toString()),
+                    current.ownerId, required(request.getString("teamId"), "teamId"),
+                    request.getLong("expectedVersion"), members)));
         }
         JSONObject remarksValue = request.getJSONObject("memberRemarks");
         if (remarksValue == null) {

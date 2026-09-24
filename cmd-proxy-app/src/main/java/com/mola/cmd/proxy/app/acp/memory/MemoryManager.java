@@ -259,6 +259,21 @@ public class MemoryManager implements MemoryManagerBridge {
         dreamer.submitDream(workspacePath);
     }
 
+    public boolean triggerDreamIfIdle(String workspacePath) {
+        if (!canDream()) {
+            throw new IllegalStateException("该智能体未启用可写记忆整理");
+        }
+        return dreamer.submitDream(workspacePath);
+    }
+
+    public boolean canDream() {
+        return config.isWriteEnabled() && dreamer != null;
+    }
+
+    public boolean isDreaming(String workspacePath) {
+        return dreamer != null && dreamer.isDreaming(workspacePath);
+    }
+
     /**
      * 检查并触发自动整理。
      */

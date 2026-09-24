@@ -181,6 +181,13 @@ public class ConversationHistoryManager {
         currentTurn.add(new ContextMessage(ContextMessage.Role.USER, content, origin));
     }
 
+    /** Records a user prompt together with the original names of this turn's attachments. */
+    public synchronized void addUserMessage(String content, ContextMessage.UserOrigin origin,
+                                            List<String> attachments) {
+        currentTurn.add(new ContextMessage(
+                ContextMessage.Role.USER, content, origin, attachments));
+    }
+
     /** 记录一条 agent 回答 */
     public synchronized void addAssistantMessage(String content) {
         currentTurn.add(new ContextMessage(ContextMessage.Role.ASSISTANT, content));
@@ -816,6 +823,14 @@ public class ConversationHistoryManager {
             if (msg.getRole() == ContextMessage.Role.USER && msg.getUserOrigin() != null) {
                 obj.addProperty("userOrigin", msg.getUserOrigin().name());
             }
+            if (msg.getRole() == ContextMessage.Role.USER
+                    && !msg.getAttachments().isEmpty()) {
+                JsonArray attachments = new JsonArray();
+                for (String fileName : msg.getAttachments()) {
+                    attachments.add(fileName);
+                }
+                obj.add("attachments", attachments);
+            }
         }
         return obj;
     }
@@ -848,6 +863,14 @@ public class ConversationHistoryManager {
                 // Old or unknown values remain visible rather than silently losing user data.
             }
         }
-        return new ContextMessage(role, content, origin);
+        List<String> attachments = new ArrayList<>();
+        if (obj.has("attachments") && obj.get("attachments").isJsonArray()) {
+            for (JsonElement attachment : obj.getAsJsonArray("attachments")) {
+                if (attachment != null && attachment.isJsonPrimitive()) {
+                    attachments.add(attachment.getAsString());
+                }
+            }
+        }
+        return new ContextMessage(role, content, origin, attachments);
     }
 }

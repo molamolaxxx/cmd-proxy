@@ -542,6 +542,22 @@ public class AcpClient extends AbstractAcpClient {
                 newImagePaths.add(path);
             }
         }
+        List<String> attachmentNames = new ArrayList<>();
+        if (files != null) {
+            for (Map<String, String> file : files) {
+                if (file != null) attachmentNames.addAll(file.keySet());
+            }
+        }
+        if (localFiles != null) {
+            for (String localFile : localFiles) {
+                if (localFile == null || localFile.trim().isEmpty()) continue;
+                try {
+                    attachmentNames.add(java.nio.file.Paths.get(localFile).getFileName().toString());
+                } catch (RuntimeException ignored) {
+                    attachmentNames.add(localFile);
+                }
+            }
+        }
 
         AcpResponseListener guardedListener = new LifecycleGuardedAcpResponseListener(
                 outputListener, () -> isLifecycleGenerationActive(generation));
@@ -561,7 +577,7 @@ public class AcpClient extends AbstractAcpClient {
                                 authSessionId, authContext, effectiveOptions.getAuthTurnId());
                     }
                     sendPrompt(userInput, historyManager.getFileAbsolutePaths(), newImagePaths,
-                            guardedListener, effectiveOptions);
+                            attachmentNames, guardedListener, effectiveOptions);
                     releaseMcpAuthBinding(effectiveOptions);
                     if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
                         notifyAfterTurnReady();
@@ -931,10 +947,13 @@ public class AcpClient extends AbstractAcpClient {
 
 
     private void sendPrompt(String userInput, Collection<String> filePaths, AcpResponseListener listener) throws IOException {
-        sendPrompt(userInput, filePaths, Collections.emptySet(), listener, PromptOptions.defaults());
+        sendPrompt(userInput, filePaths, Collections.emptySet(), Collections.emptyList(),
+                listener, PromptOptions.defaults());
     }
 
-    private void sendPrompt(String userInput, Collection<String> filePaths, Collection<String> newImagePaths, AcpResponseListener listener, PromptOptions options) throws IOException {
+    private void sendPrompt(String userInput, Collection<String> filePaths,
+                            Collection<String> newImagePaths, List<String> attachmentNames,
+                            AcpResponseListener listener, PromptOptions options) throws IOException {
         JsonObject params = new JsonObject();
         params.addProperty("sessionId", sessionId);
 
@@ -1060,7 +1079,7 @@ public class AcpClient extends AbstractAcpClient {
         AtomicReference<IOException> stdinWriteError = new AtomicReference<>();
         sendJsonInBackground(request, stdinWriteError);
 
-        historyManager.addUserMessage(userInput, historyOrigin(options));
+        historyManager.addUserMessage(userInput, historyOrigin(options), attachmentNames);
 
         // 流式读取
         StringBuilder fullResponse = new StringBuilder();
