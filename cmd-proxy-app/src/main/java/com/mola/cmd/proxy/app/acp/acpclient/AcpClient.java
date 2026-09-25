@@ -166,6 +166,15 @@ public class AcpClient extends AbstractAcpClient {
     /** 当前 session 最后一条用户或 assistant 消息时间；无消息时为 0。 */
     private final AtomicLong lastMessageAt = new AtomicLong(0L);
 
+    /** 最近一次真正处于可接收请求状态的时间，用于计算空闲时长。 */
+    private final AtomicLong lastActivityAt = new AtomicLong(0L);
+
+    /** 睡眠期间命中自动新会话时，延迟到下一次唤醒再创建。 */
+    private final AtomicBoolean newSessionOnWake = new AtomicBoolean(false);
+
+    /** 睡眠唤醒并创建新会话后，通知持有者同步外部会话身份（可为 null）。 */
+    private volatile SessionRotationListener sessionRotationListener;
+
     /** Codex/Claude/Kiro 压缩完成后置为 true，下一次 prompt 完整重注入 ACP harness。 */
     private final AtomicBoolean acpHarnessReinjectionPending = new AtomicBoolean(false);
 
@@ -258,6 +267,20 @@ public class AcpClient extends AbstractAcpClient {
         this.recoverTurnFailureToReady = recoverTurnFailureToReady;
     }
 
+    /**
+     * 注册睡眠唤醒轮转回调：当 {@link #wakeIfSleeping()} 按延迟标记创建全新会话时，
+     * 以旧/新 sessionId 通知持有者同步其外部会话索引，保证后续请求不会命中过期身份。
+     */
+    public void setSessionRotationListener(SessionRotationListener sessionRotationListener) {
+        this.sessionRotationListener = sessionRotationListener;
+    }
+
+    /** 睡眠唤醒触发本地新会话时的一次性通知。 */
+    @FunctionalInterface
+    public interface SessionRotationListener {
+        void onSessionRotatedOnWake(String previousSessionId, String newSessionId);
+    }
+
     public boolean isRestoredSession() {
         return restoredSession;
     }
@@ -265,6 +288,11 @@ public class AcpClient extends AbstractAcpClient {
     @Override
     public void start() throws IOException {
         super.start();
+        lastActivityAt.set(System.currentTimeMillis());
+        notifySessionReady();
+    }
+
+    private void notifySessionReady() {
         Runnable callback = afterSessionReady;
         if (callback != null) {
             try {
@@ -272,6 +300,99 @@ public class AcpClient extends AbstractAcpClient {
             } catch (RuntimeException e) {
                 logger.warn("session READY 后处理失败, sessionId={}", sessionId, e);
             }
+        }
+    }
+
+    /**
+     * 会话身份轮转属于投影同步，不参与生命周期回滚；同步失败只记录告警，
+     * 避免已经成功启动的运行态被错误地退回 SLEEP。
+     */
+    private void notifySessionRotatedOnWake(String previousSessionId, String newSessionId) {
+        SessionRotationListener listener = sessionRotationListener;
+        if (listener == null) return;
+        try {
+            listener.onSessionRotatedOnWake(previousSessionId, newSessionId);
+        } catch (RuntimeException e) {
+            logger.warn("睡眠唤醒会话轮转通知失败, previousSessionId={}, newSessionId={}",
+                    previousSessionId, newSessionId, e);
+        }
+    }
+
+    /** Atomically sleeps an idle READY client without closing its logical resources. */
+    public synchronized boolean sleepIfIdle(long nowMillis, long idleMillis) {
+        long observed = lastActivityAt.get();
+        if (!agentProvider.supportsSessionLoad() || observed <= 0L
+                || nowMillis < observed || nowMillis - observed < idleMillis
+                || !state.compareAndSet(State.READY, State.SLEEP)) {
+            return false;
+        }
+        lifecycleBoundary();
+        releaseRuntimeForSleep();
+        logger.info("ACP client 已进入睡眠, logicalId={}, sessionId={}", groupId, sessionId);
+        return true;
+    }
+
+    /** Marks a sleeping client to create a fresh session on its next wake. */
+    public synchronized boolean markNewSessionOnWake() {
+        if (getState() != State.SLEEP) return false;
+        newSessionOnWake.set(true);
+        return true;
+    }
+
+    /** Wakes a sleeping client in-place. Concurrent callers share the same lifecycle lock. */
+    public synchronized boolean wakeIfSleeping() throws IOException {
+        if (getState() != State.SLEEP) return false;
+        boolean createNew = newSessionOnWake.getAndSet(false);
+        String sleepingSessionId = sessionId;
+        int sleepingTurnCount = historyManager.getTurnCount();
+        int sleepingInitialTurnCount = initialTurnCount;
+        List<ContextMessage> sleepingHistory = createNew && sleepingSessionId != null
+                ? historyManager.getFullHistory(sleepingSessionId) : Collections.emptyList();
+        if (createNew) {
+            historyManager.reset();
+            initialTurnCount = 0;
+            lastMessageAt.set(0L);
+        }
+        forceNewSession = createNew;
+        targetRestoreSessionId = null;
+        restoredSession = false;
+        long startedAt = System.currentTimeMillis();
+        try {
+            wakeRuntimeSession();
+            forceNewSession = false;
+            if (createNew) {
+                notifySessionRotatedOnWake(sleepingSessionId, sessionId);
+            }
+            lastActivityAt.set(System.currentTimeMillis());
+            notifySessionReady();
+            if (createNew && memoryManager != null && sleepingSessionId != null
+                    && sleepingTurnCount > sleepingInitialTurnCount) {
+                historyManager.markMemoryExtractionPending(
+                        sleepingSessionId, sleepingTurnCount);
+                memoryManager.submitExtractFull(
+                        sleepingSessionId, workspacePath,
+                        sleepingHistory,
+                        () -> {
+                            historyManager.clearMemoryExtractionPending(
+                                    sleepingSessionId, sleepingTurnCount);
+                            memoryManager.incrementSessionCount(workspacePath);
+                        },
+                        error -> logger.warn(
+                                "睡眠轮转后的记忆提取未完成，保留 pending, sessionId={}",
+                                sleepingSessionId, error));
+            }
+            getLiveOutputListener().onLifecycleEvent(
+                    "AGENT_WAKE", "SLEEP", "READY",
+                    System.currentTimeMillis() - startedAt, createNew);
+            return true;
+        } catch (IOException | RuntimeException failure) {
+            newSessionOnWake.compareAndSet(false, createNew);
+            if (createNew && sleepingSessionId != null) {
+                historyManager.restoreState(sleepingSessionId);
+                initialTurnCount = sleepingInitialTurnCount;
+                lastMessageAt.set(historyManager.getLastMessageAt(sleepingSessionId));
+            }
+            throw failure;
         }
     }
 
@@ -519,15 +640,25 @@ public class AcpClient extends AbstractAcpClient {
             outputListener.onError(new IllegalArgumentException("用户输入不能为空"));
             return;
         }
-
         final PromptOptions effectiveOptions = options == null ? PromptOptions.defaults() : options;
         if (!effectiveOptions.isInboundTalkTo()) consecutiveInboxTurns.set(0);
-        long generation = currentLifecycleGeneration();
-        if (!compareAndSetStateIfActive(generation, State.READY, State.BUSY)) {
-            releaseChannelTurn(effectiveOptions);
-            outputListener.onError(new IllegalStateException(
-                    "当前 client 状态不允许发送消息: " + state.get()));
-            return;
+        final long generation;
+        synchronized (this) {
+            if (getState() == State.SLEEP) {
+                try {
+                    wakeIfSleeping();
+                } catch (IOException | RuntimeException failure) {
+                    outputListener.onError(new IOException("唤醒智能体失败", failure));
+                    return;
+                }
+            }
+            generation = currentLifecycleGeneration();
+            if (!compareAndSetStateIfActive(generation, State.READY, State.BUSY)) {
+                releaseChannelTurn(effectiveOptions);
+                outputListener.onError(new IllegalStateException(
+                        "当前 client 状态不允许发送消息: " + state.get()));
+                return;
+            }
         }
         acceptedPromptOptions.set(effectiveOptions);
         lastMessageAt.set(System.currentTimeMillis());
@@ -580,6 +711,7 @@ public class AcpClient extends AbstractAcpClient {
                             attachmentNames, guardedListener, effectiveOptions);
                     releaseMcpAuthBinding(effectiveOptions);
                     if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
+                        lastActivityAt.set(System.currentTimeMillis());
                         notifyAfterTurnReady();
                         // 中断式 pending 优先；仍为 READY 时才检查 inbox。
                         if (getState() == State.READY) {
@@ -658,6 +790,7 @@ public class AcpClient extends AbstractAcpClient {
             listener.onError(error);
         }
         if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
+            lastActivityAt.set(System.currentTimeMillis());
             notifyAfterTurnReady();
             if (getState() == State.READY) checkAndDeliverInbox();
         } else {
@@ -1188,6 +1321,21 @@ public class AcpClient extends AbstractAcpClient {
         return lastMessageAt.get();
     }
 
+    public long getLastActivityAt() {
+        return lastActivityAt.get();
+    }
+
+    /** Test/subclass seam for deterministic lifecycle timing. */
+    protected void markActivityAt(long timestampMillis) {
+        lastActivityAt.set(timestampMillis);
+    }
+
+    public boolean isIdleForAutoSleep(long nowMillis, long idleMillis) {
+        long last = lastActivityAt.get();
+        return state.get() == State.READY && last > 0L
+                && nowMillis >= last && nowMillis - last >= idleMillis;
+    }
+
     public boolean hasSessionMessages() {
         return lastMessageAt.get() > 0L;
     }
@@ -1376,6 +1524,11 @@ public class AcpClient extends AbstractAcpClient {
                 message, agentProvider.getName(), sessionId);
     }
 
+    /** Rebuilds dynamic ACP harness capabilities on the next accepted prompt. */
+    public void requestAcpHarnessReinjection() {
+        acpHarnessReinjectionPending.set(true);
+    }
+
     /**
      * 排空迟到 chunk（OpenCode ACP bug workaround：session/update 通知可能在
      * end_turn RPC response 之后送达）。
@@ -1424,9 +1577,7 @@ public class AcpClient extends AbstractAcpClient {
             return request;
         }
         String target = request.getTarget();
-        if (!CHANNEL_REPLY_TARGET.equals(target) && !target.startsWith("channel:")) {
-            return request;
-        }
+        if (!CHANNEL_REPLY_TARGET.equals(target)) return request;
         options.markChannelReplyAttempt();
         return new TalkToRequest(context.getReplyTarget(), request.getContent(),
                 request.getDepth(), request.getParentTrace());
@@ -1434,7 +1585,7 @@ public class AcpClient extends AbstractAcpClient {
 
     private static String unresolvedChannelReplyResult() {
         return "[talkTo 结果]\n发送失败：当前 turn 没有可唯一恢复的原始信道会话，"
-                + "已拒绝按最近对象或 defaultChatId 猜测发送。";
+                + "已拒绝按最近对象或主动推送目标猜测发送。";
     }
 
     public void onTalkToCircuitOpened(String result) {

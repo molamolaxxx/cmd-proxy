@@ -17,9 +17,9 @@ public class WeComProtocolTest {
                 body, "single", "张三", "user-1", "你好"));
         assertEquals("研发群", WeComChannelAdapter.discoveredDisplayName(
                 body, "group", "张三", "user-1", "你好"));
-        assertEquals("消息：帮我看一下发布状态", WeComChannelAdapter.discoveredDisplayName(
+        assertEquals("未提供群名", WeComChannelAdapter.discoveredDisplayName(
                 new JsonObject(), "group", "张三", "user-1", "帮我看一下发布状态"));
-        assertEquals("消息：你好", WeComChannelAdapter.discoveredDisplayName(
+        assertEquals("user-1", WeComChannelAdapter.discoveredDisplayName(
                 new JsonObject(), "single", "", "user-1", "你好"));
         assertEquals("未提供群名", WeComChannelAdapter.discoveredDisplayName(
                 new JsonObject(), "group", "张三", "user-1", ""));

@@ -11,6 +11,20 @@ import static org.junit.Assert.assertTrue;
 
 public class ConfigUiLayoutContractTest {
     @Test
+    public void exposesAutoSleepAndTreatsSleepAsOperable() throws Exception {
+        String html = loadConfigUi();
+
+        assertTrue(html.contains("自动睡眠"));
+        assertTrue(html.contains("id=\"dAutoSleep\""));
+        assertTrue(html.contains("id=\"dAutoSleepIdle\""));
+        assertTrue(html.contains("autoSleep:{enabled:false,idleMinutes:30}"));
+        assertTrue(html.contains("function isAgentOperable(state)"));
+        assertTrue(html.contains("state==='READY'||state==='SLEEP'"));
+        assertTrue(html.contains(".session-status.sleep"));
+        assertTrue(html.contains("LIFECYCLE_EVENT:['','wb_sunny','智能体已唤醒']"));
+    }
+
+    @Test
     public void exposesSearchablePaginatedChannelMessageArchiveDialog() throws Exception {
         String html = loadConfigUi();
 
@@ -284,7 +298,7 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("aria-label=\"团队会话\""));
         assertTrue(html.contains("runTeamBatchAction("));
         assertTrue(html.contains("action==='newSession'"));
-        assertTrue(html.contains("member.state!=='READY'"));
+        assertTrue(html.contains("!isAgentOperable(member.state)"));
         assertTrue(html.contains("postTeamMemberAction(team,member,action)"));
         assertFalse(html.contains("<span>version '+team.version+'</span>"));
         assertTrue(html.contains("id=\"teamSessionDialog\""));
@@ -295,7 +309,7 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("function loadTeamSessionSnapshot("));
         assertTrue(html.contains("function mergeTeamSessionMembers("));
         assertTrue(html.contains("function sendTeamSessionMessage("));
-        assertTrue(html.contains("var ready=member.state==='READY',retry=member.state==='ERROR',busy=member.state==='BUSY',canSend=ready"));
+        assertTrue(html.contains("var ready=isAgentOperable(member.state),retry=member.state==='ERROR',busy=member.state==='BUSY',canSend=ready"));
         assertTrue(html.contains("队长模式：用户可选择任意成员继续其独立 ACP 会话"));
         assertFalse(html.contains("队长模式下普通队员会话仅供查看"));
         assertFalse(html.contains("队长模式下附件只能发送给队长"));

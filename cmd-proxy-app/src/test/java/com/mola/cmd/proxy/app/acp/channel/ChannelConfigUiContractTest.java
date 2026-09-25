@@ -11,7 +11,7 @@ import static org.junit.Assert.assertTrue;
 
 public class ChannelConfigUiContractTest {
     @Test
-    public void defaultTargetIsAUserSelectedDiscoveryDropdown() throws Exception {
+    public void outboundTargetsAreAnEditableDiscoveryBackedList() throws Exception {
         InputStream input = getClass().getResourceAsStream("/configui/index.html");
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         byte[] buffer = new byte[4096];
@@ -31,11 +31,23 @@ public class ChannelConfigUiContractTest {
         assertTrue(html.contains("消息渠道已删除并保存"));
         assertTrue(html.contains("if(!ok){config.channels.splice(i,0,channel)"));
         assertTrue(html.contains("var ok=await saveConfig(true)"));
-        assertTrue(html.contains("<select onchange=\"channelDialogDraft.defaultChatId=this.value"));
-        assertTrue(html.contains("不设置默认目标"));
-        assertTrue(html.contains("系统不会自动选择"));
-        assertTrue(html.contains("targets.map"));
-        assertFalse(html.contains("<input value=\"'+esc(ch.defaultChatId||'')+'\""));
+        assertTrue(html.contains("function normalizeChannelOutboundTargets("));
+        assertTrue(html.contains("function isValidChannelOutboundTargetId("));
+        assertTrue(html.contains("目标 ID 只能包含中文、字母、数字、下划线和短横线"));
+        assertTrue(html.contains("outboundTargets:[defaultChannelOutboundTarget(id)]"));
+        assertTrue(html.contains("function setChannelDraftId("));
+        assertTrue(html.contains("oninput=\"setChannelDraftId(this.value)\""));
+        assertTrue(html.contains("function renderChannelOutboundTargetList("));
+        assertTrue(html.contains("function refreshChannelKnownTargets("));
+        assertTrue(html.contains("setInterval(refreshChannelKnownTargets,2000)"));
+        assertTrue(html.contains("function stopChannelKnownTargetsRefresh("));
+        assertTrue(html.contains("最新来信排在最前"));
+        assertTrue(html.contains("添加推送目标"));
+        assertTrue(html.contains("Agent 选择提示"));
+        assertTrue(html.contains("暂不选择企微会话"));
+        assertTrue(html.contains("function addChannelOutboundTarget("));
+        assertTrue(html.contains("function removeChannelOutboundTarget("));
+        assertFalse(html.contains("channelDialogDraft.defaultChatId=this.value"));
         assertTrue(html.contains("<label>用户行为</label><select onchange=\"channelDialogDraft.userBehavior=this.value"));
         assertTrue(html.contains("<option value=\"QUEUE\""));
         assertTrue(html.contains("<option value=\"INTERRUPT\""));

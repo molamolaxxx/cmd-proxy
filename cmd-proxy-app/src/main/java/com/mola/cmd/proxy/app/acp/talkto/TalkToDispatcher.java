@@ -20,6 +20,7 @@ import com.mola.cmd.proxy.client.resp.CmdResponseContent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Collections;
 import java.util.List;
@@ -294,6 +295,17 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
                 authPrincipalContext, circuit.getTrace());
 
         // 8. 检查目标状态并投递
+        if (targetClient.getState() == AbstractAcpClient.State.SLEEP) {
+            try {
+                targetClient.wakeIfSleeping();
+            } catch (IOException | RuntimeException wakeFailure) {
+                recentMessages.remove(dedupKey, now);
+                circuitBreaker.rollback(circuit,
+                        senderGroupId == null ? senderName : senderGroupId, targetGroupId);
+                return "[talkTo 结果]\n发送失败：唤醒 " + target + " 失败："
+                        + wakeFailure.getMessage();
+            }
+        }
         if (targetClient.getState() == AbstractAcpClient.State.READY) {
             // 直接投递：先推送来信卡片到目标前端
             pushIncomingMessageCard(targetClient, senderName, content);
@@ -496,6 +508,14 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
             return InboundDeliveryResult.rejected("TalkTo cascade is closed or expired");
         }
         synchronized (targetClient) {
+            if (targetClient.getState() == AbstractAcpClient.State.SLEEP) {
+                try {
+                    targetClient.wakeIfSleeping();
+                } catch (IOException | RuntimeException wakeFailure) {
+                    return InboundDeliveryResult.rejected(
+                            "agent wake failed: " + wakeFailure.getMessage());
+                }
+            }
             if (targetClient.getState() == AbstractAcpClient.State.READY) {
                 pushIncomingMessageCard(targetClient, message);
                 sendInboundMessage(targetClient, message);
@@ -583,9 +603,8 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         if (options.isRestoredChannelContinuation()) {
             prompt += "\n[信道续接]\n"
                     + "这条内部回信关联到你此前收到的原始外部信道消息。"
-                    + "请结合回信内容完成原任务；需要向原始信道发送结果时，"
-                    + "使用 talk_to 并将 target 指定为“回复”。"
-                    + "不要选择或猜测稳定信道 target。\n";
+                    + "原始会话仍绑定为“回复”；请结合回信内容完成原任务，"
+                    + "并按 ACP harness 的 <external-channel> 规则处理。\n";
         }
         if (message.getLocalAttachments().isEmpty()) {
             targetClient.send(prompt, null, options);

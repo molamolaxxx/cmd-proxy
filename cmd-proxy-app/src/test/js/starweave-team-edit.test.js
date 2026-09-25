@@ -30,6 +30,7 @@ function fixture(state = 'READY') {
         starTeams: {items: [team]}, teamBatchOperations: Object.create(null),
         starTeamEditDraft: null, esc: value => String(value || ''),
         normalized: value => String(value || '').toLowerCase(),
+        isAgentOperable: value => value === 'READY' || value === 'SLEEP',
         starTeamSourceKey: source => [source.cmdProxyInstanceId || '',
             source.sourceGroupId || '', source.sourceRobotId || ''].join('|'),
         starRequestId: () => 'request-123456789',

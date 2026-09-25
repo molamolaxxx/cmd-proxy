@@ -195,6 +195,18 @@ public final class AcpResponseContentRenderer {
                 + "\n\n</div></details>\n");
     }
 
+    public void onLifecycleEvent(String eventType, String fromState, String toState,
+                                 long durationMillis, boolean newSession) {
+        if (!"AGENT_WAKE".equals(eventType)) return;
+        sendCardContent("<details class=\"tool-call\">"
+                + "<summary>🌤️ ✅ 智能体已唤醒</summary>"
+                + "<div class=\"tool-call-body\">\n\n```\n"
+                + "状态：" + escapeHtml(fromState) + " → " + escapeHtml(toState)
+                + "\n\n耗时：" + durationMillis + " ms"
+                + (newSession ? "\n\n已按空闲轮转规则创建新会话。" : "")
+                + "\n```\n\n</div></details>\n");
+    }
+
     public void onComplete() {
         sendContent("", true);
     }

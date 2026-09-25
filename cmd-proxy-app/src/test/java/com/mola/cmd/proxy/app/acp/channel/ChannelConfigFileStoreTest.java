@@ -63,6 +63,17 @@ public class ChannelConfigFileStoreTest {
                     .getJSONObject(0).getString("displayName"));
             assertEquals("研发群", channel.getJSONArray("knownChatTargets")
                     .getJSONObject(1).getString("displayName"));
+
+            assertTrue(ChannelConfigFileStore.recordKnownChatTarget(
+                    file, "wecom-1", "group-1", "研发群", "group",
+                    "发布完成了吗", 1234L));
+            channel = read(file).getJSONArray("channels").getJSONObject(0);
+            assertEquals("group-1", channel.getJSONArray("knownChatTargets")
+                    .getJSONObject(0).getString("id"));
+            assertEquals("发布完成了吗", channel.getJSONArray("knownChatTargets")
+                    .getJSONObject(0).getString("lastMessagePreview"));
+            assertEquals(1234L, channel.getJSONArray("knownChatTargets")
+                    .getJSONObject(0).getLongValue("lastSeenAt"));
         } finally {
             Files.deleteIfExists(file);
         }
@@ -91,6 +102,36 @@ public class ChannelConfigFileStoreTest {
             assertEquals(1, channel.getJSONArray("knownChatTargets").size());
             assertEquals("group-1", channel.getJSONArray("knownChatTargets")
                     .getJSONObject(0).getString("id"));
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    public void uiSavePersistsConfiguredOutboundTargetsAndKeepsDiscoveredOptions() throws Exception {
+        Path file = Files.createTempFile("channel-outbound-targets", ".json");
+        try {
+            Files.write(file, ("{\"channels\":[{\"id\":\"wecom-1\","
+                    + "\"secret\":\"sensitive\",\"knownChatTargets\":[{"
+                    + "\"id\":\"group-1\",\"displayName\":\"研发群\","
+                    + "\"chatType\":\"group\"}]}]}"
+            ).getBytes(StandardCharsets.UTF_8));
+            JSONObject submitted = JSON.parseObject("{\"channels\":[{"
+                    + "\"id\":\"wecom-1\",\"secret\":\"********\","
+                    + "\"outboundTargets\":[{\"id\":\"release-group\","
+                    + "\"chatId\":\"group-1\",\"description\":\"发布通知\"}],"
+                    + "\"knownChatTargets\":[]}]}" );
+
+            ChannelConfigFileStore.saveUiConfig(file, submitted, "********");
+
+            JSONObject channel = read(file).getJSONArray("channels").getJSONObject(0);
+            assertEquals("release-group", channel.getJSONArray("outboundTargets")
+                    .getJSONObject(0).getString("id"));
+            assertEquals("group-1", channel.getJSONArray("outboundTargets")
+                    .getJSONObject(0).getString("chatId"));
+            assertEquals("研发群", channel.getJSONArray("knownChatTargets")
+                    .getJSONObject(0).getString("displayName"));
+            assertEquals("sensitive", channel.getString("secret"));
         } finally {
             Files.deleteIfExists(file);
         }

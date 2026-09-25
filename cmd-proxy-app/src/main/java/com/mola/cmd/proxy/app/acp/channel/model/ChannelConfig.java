@@ -1,6 +1,7 @@
 package com.mola.cmd.proxy.app.acp.channel.model;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class ChannelConfig {
@@ -24,6 +25,8 @@ public class ChannelConfig {
     private String wsUrl = "wss://openws.work.weixin.qq.com";
     /** Explicit proactive target for schedules and other non-channel-originated turns. */
     private String defaultChatId;
+    /** Explicit Agent-selectable proactive targets; null means a legacy defaultChatId config. */
+    private List<ChannelOutboundTarget> outboundTargets;
     /** System-owned options discovered from inbound conversations. */
     private List<ChannelChatTarget> knownChatTargets = new ArrayList<>();
     private ChannelBinding binding;
@@ -57,6 +60,20 @@ public class ChannelConfig {
     public void setWsUrl(String wsUrl) { this.wsUrl = wsUrl; }
     public String getDefaultChatId() { return defaultChatId; }
     public void setDefaultChatId(String defaultChatId) { this.defaultChatId = defaultChatId; }
+    public List<ChannelOutboundTarget> getOutboundTargets() { return outboundTargets; }
+    public void setOutboundTargets(List<ChannelOutboundTarget> outboundTargets) {
+        this.outboundTargets = outboundTargets;
+    }
+
+    /** Keeps legacy channel:&lt;channelId&gt; routing until the new list is explicitly saved. */
+    public List<ChannelOutboundTarget> effectiveOutboundTargets() {
+        if (outboundTargets != null) return outboundTargets;
+        if (defaultChatId == null || defaultChatId.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        return Collections.singletonList(new ChannelOutboundTarget(
+                id, defaultChatId, "企业微信默认主动推送目标"));
+    }
     public List<ChannelChatTarget> getKnownChatTargets() { return knownChatTargets; }
     public void setKnownChatTargets(List<ChannelChatTarget> knownChatTargets) {
         this.knownChatTargets = knownChatTargets == null ? new ArrayList<>() : knownChatTargets;

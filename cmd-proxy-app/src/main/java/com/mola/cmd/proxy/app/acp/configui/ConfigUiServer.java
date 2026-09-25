@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.mola.cmd.proxy.app.acp.channel.ChannelConfigFileStore;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelOutboundTarget;
 import com.mola.cmd.proxy.app.acp.channel.archive.ChannelMessageArchive;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
@@ -725,6 +726,13 @@ public class ConfigUiServer {
         }
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。
         json.remove("globalProxyEnabled");
+        String channelTargetError = validateChannelOutboundTargets(json);
+        if (channelTargetError != null) {
+            JSONObject error = new JSONObject(true);
+            error.put("error", channelTargetError);
+            sendResponse(exchange, 400, "application/json", JSON.toJSONString(error));
+            return;
+        }
         String externalTaskApiError = validateExternalTaskApis(json);
         if (externalTaskApiError != null) {
             JSONObject error = new JSONObject(true);
@@ -755,6 +763,49 @@ public class ConfigUiServer {
             return;
         }
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+    }
+
+    private String validateChannelOutboundTargets(JSONObject root) {
+        com.alibaba.fastjson.JSONArray channels = root.getJSONArray("channels");
+        if (channels == null) return null;
+        java.util.Set<String> targetIds = new java.util.HashSet<>();
+        for (int i = 0; i < channels.size(); i++) {
+            JSONObject channel = channels.getJSONObject(i);
+            if (channel == null) continue;
+            com.alibaba.fastjson.JSONArray targets = channel.getJSONArray("outboundTargets");
+            if (targets == null) {
+                String legacyChatId = trimmed(channel.getString("defaultChatId"));
+                if (legacyChatId.isEmpty()) continue;
+                String legacyId = trimmed(channel.getString("id"));
+                if (!targetIds.add(legacyId)) {
+                    return "duplicate channel outbound target id: " + legacyId;
+                }
+                continue;
+            }
+            for (int j = 0; j < targets.size(); j++) {
+                JSONObject target = targets.getJSONObject(j);
+                if (target == null) return "channel outbound target must be an object";
+                String id = trimmed(target.getString("id"));
+                String description = trimmed(target.getString("description"));
+                String chatId = trimmed(target.getString("chatId"));
+                if (!ChannelOutboundTarget.isValidId(id)) {
+                    return "channel outbound target id is invalid";
+                }
+                if (!targetIds.add(id)) {
+                    return "duplicate channel outbound target id: " + id;
+                }
+                if (description.isEmpty() || description.length() > 500) {
+                    return "channel outbound target description is invalid";
+                }
+                if (chatId.length() > 512) {
+                    return "channel outbound target chatId is invalid";
+                }
+                target.put("id", id);
+                target.put("description", description);
+                target.put("chatId", chatId);
+            }
+        }
+        return null;
     }
 
     /** Adds read-only DSH profile state to GET /api/config; POST strips it again. */

@@ -107,6 +107,7 @@ test('keeps ready upload metadata on the optimistic team user bubble', async () 
         selectedTeamSessionMember: () => member,
         document: {getElementById: id => id === 'teamSessionInput' ? input : null},
         teamSessionPost: async (action, body) => sent.push({action, body}),
+        isAgentOperable: state => state === 'READY' || state === 'SLEEP',
         showSnackbar() {},
         renderTeamSessionMembers() {},
         renderTeamSessionDetail() {},
@@ -138,6 +139,7 @@ test('runs a new session action for every ready team member and blocks stale ros
         renderStarweaveTeams() {},
         loadStarweaveTeams: async () => {},
         refreshChannelBindingTargets: async () => {},
+        isAgentOperable: state => state === 'READY' || state === 'SLEEP',
         showConfirm: async () => true,
         showSnackbar(message) { messages.push(message) },
         postTeamMemberAction: async (team, member, action) => {

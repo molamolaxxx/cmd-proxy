@@ -71,6 +71,13 @@ public final class LifecycleGuardedAcpResponseListener implements AcpResponseLis
     }
 
     @Override
+    public void onLifecycleEvent(String type, String from, String to,
+                                 long durationMillis, boolean newSession) {
+        forward("onLifecycleEvent", () -> delegate.onLifecycleEvent(
+                type, from, to, durationMillis, newSession));
+    }
+
+    @Override
     public void onComplete(String fullResponse) {
         forward("onComplete", () -> delegate.onComplete(fullResponse));
     }

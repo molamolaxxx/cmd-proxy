@@ -76,9 +76,16 @@ public class TeamTalkToContextInjectorTest {
         String context = injector.buildContext(
                 Collections.emptyList(), Collections.emptyMap(), "source-robot");
 
-        assertTrue(context.contains("绑定的外部信道联系人"));
+        assertTrue(context.contains("<external-channel>"));
+        assertFalse(context.contains("<external-channels>"));
+        assertFalse(context.contains("<external-channel-routing>"));
+        assertTrue(context.contains("可主动通知的目标"));
         assertTrue(context.contains("wecom-main（target: channel:wecom-main）: 外部信道"));
         assertTrue(context.contains("target: channel:wecom-main"));
+        assertTrue(context.contains("回复当前来信时，将 target 设为“回复”"));
+        assertTrue(context.contains("{\"target\":\"channel:wecom-main\",\"content\":\"通知内容\"}"));
+        assertFalse(context.contains("主动通知完成后"));
+        assertFalse(context.contains("channel:*"));
         assertTrue(context.contains("\"target\":\"member-2\""));
         assertTrue(context.contains("talk_to MCP 工具"));
         assertFalse(context.contains("\"action\""));
@@ -93,8 +100,11 @@ public class TeamTalkToContextInjectorTest {
         String context = injector.buildContext(
                 Collections.emptyList(), Collections.emptyMap(), "source-robot");
 
-        assertFalse(context.contains("绑定的外部信道联系人"));
-        assertFalse(context.contains("channel:"));
+        assertTrue(context.contains("当前未配置主动通知目标"));
+        assertFalse(context.contains("只有用户明确要求通知"));
+        assertFalse(context.contains("必须使用列表中完整、准确的 target"));
+        assertFalse(context.contains("主动通知完成后"));
+        assertFalse(context.contains("target: channel:"));
     }
 
     @Test

@@ -50,7 +50,7 @@ public class StarweaveTaskUiContractTest {
         assertFalse(externalTargets.contains("!team.coordinated"));
         assertTrue(html.contains("esc(item.name||'未命名团队')+' ['"));
         assertTrue(html.contains("esc(item.name||'未命名成员')+' ['"));
-        assertTrue(html.contains("esc(item.displayName||'未命名')+'</option>'"));
+        assertTrue(html.contains("esc(channelKnownTargetLabel(item))+'</option>'"));
         assertFalse(html.contains("item.id+' · '+item.name"));
         assertFalse(html.contains("(item.displayName||'未命名')+' · '+(item.id||'')"));
         assertFalse(html.contains("ID · 名称"));

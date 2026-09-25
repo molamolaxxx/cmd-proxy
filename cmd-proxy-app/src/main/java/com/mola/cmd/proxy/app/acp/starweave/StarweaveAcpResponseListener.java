@@ -90,6 +90,17 @@ public final class StarweaveAcpResponseListener implements AcpResponseListener {
     }
 
     @Override
+    public void onLifecycleEvent(String eventType, String fromState, String toState,
+                                 long durationMillis, boolean newSession) {
+        JSONObject payload = payload("eventType", eventType);
+        payload.put("fromState", fromState);
+        payload.put("toState", toState);
+        payload.put("durationMillis", durationMillis);
+        payload.put("newSession", newSession);
+        emit("LIFECYCLE_EVENT", payload);
+    }
+
+    @Override
     public void onComplete(String fullResponse) {
         emitTerminal("TURN_COMPLETED", new JSONObject(true));
     }

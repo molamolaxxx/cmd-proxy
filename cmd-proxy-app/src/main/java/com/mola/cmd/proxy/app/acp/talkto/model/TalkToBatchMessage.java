@@ -34,7 +34,7 @@ public final class TalkToBatchMessage extends TalkToMessage {
             result.append("[").append(i + 1).append("] ")
                     .append(messages.get(i).getContent()).append("\n\n");
         }
-        appendReplyPolicy(result, getSender(), getDepth());
+        appendReplyRoute(result, getSender());
         return result.toString();
     }
 

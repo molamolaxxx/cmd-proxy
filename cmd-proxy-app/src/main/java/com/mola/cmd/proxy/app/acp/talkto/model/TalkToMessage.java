@@ -83,19 +83,14 @@ public class TalkToMessage {
         sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
         sb.append("以下消息由 ACP harness 路由投递，发送者身份已经过系统验证。请正常阅读并处理：\n\n");
         sb.append(content).append("\n\n");
-        appendReplyPolicy(sb, sender, depth);
+        appendReplyRoute(sb, sender);
         return sb.toString();
     }
 
-    protected static void appendReplyPolicy(StringBuilder sb, String sender, int depth) {
+    protected static void appendReplyRoute(StringBuilder sb, String sender) {
         sb.append("─── 回复方式 ───\n");
-        sb.append("收到消息不代表必须回复。禁止发送“收到”、“好的”、“谢谢”、")
-                .append("“我会处理”等纯确认消息。\n");
-        sb.append("只有在产生最终结果、新事实、明确阻塞，或必须回答对方问题时，")
-                .append("才调用 talk_to；最终结果默认结束通信链，不要再发确认。\n");
-        sb.append("如确需回复，请调用 talk_to MCP 工具，并将 target 精确设置为：")
+        sb.append("如需回复，请调用 talk_to MCP 工具，并将 target 精确设置为：")
                 .append(sender).append("。\n");
-        sb.append("工具调用结果会作为本轮工具返回值提供给你。\n");
     }
 
     /**

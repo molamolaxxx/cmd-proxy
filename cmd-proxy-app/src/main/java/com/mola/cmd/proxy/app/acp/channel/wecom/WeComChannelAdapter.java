@@ -344,11 +344,13 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
                                          String userId, String senderName) {
         String targetId = "group".equals(chatType) ? chatId : userId;
         if (blank(targetId)) return;
+        String messagePreview = shortMessagePreview(body);
         String displayName = discoveredDisplayName(
-                body, chatType, senderName, userId, shortMessagePreview(body));
+                body, chatType, senderName, userId, messagePreview);
         try {
             if (ChannelConfigFileStore.recordKnownChatTarget(
-                    config.getId(), targetId, displayName, chatType)) {
+                    config.getId(), targetId, displayName, chatType,
+                    messagePreview, System.currentTimeMillis())) {
                 logger.info("channel proactive target discovered: channelId={}, chatType={}, targetId={}",
                         config.getId(), chatType, targetId);
             }
@@ -361,11 +363,10 @@ public final class WeComChannelAdapter extends WebSocketListener implements Chan
     static String discoveredDisplayName(JsonObject body, String chatType,
                                         String senderName, String userId,
                                         String messagePreview) {
-        String previewLabel = blank(messagePreview) ? "" : "消息：" + messagePreview;
         return "group".equals(chatType)
                 ? firstNonBlank(WeComProtocol.string(body, "chatname"),
-                        WeComProtocol.string(body, "chat_name"), previewLabel, "未提供群名")
-                : firstNonBlank(senderName, previewLabel, userId);
+                        WeComProtocol.string(body, "chat_name"), "未提供群名")
+                : firstNonBlank(senderName, userId, "未知用户");
     }
 
     static String shortMessagePreview(JsonObject body) {

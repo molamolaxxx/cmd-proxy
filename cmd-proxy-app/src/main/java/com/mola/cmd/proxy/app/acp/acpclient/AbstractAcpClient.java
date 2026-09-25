@@ -35,7 +35,7 @@ public abstract class AbstractAcpClient implements Closeable {
      * AcpClient 生命周期状态
      */
     public enum State {
-        CREATED, STARTING, READY, BUSY, ERROR, CLOSING, CLOSED
+        CREATED, STARTING, READY, SLEEP, BUSY, ERROR, CLOSING, CLOSED
     }
 
     private static final Logger logger = LoggerFactory.getLogger(AbstractAcpClient.class);
@@ -114,6 +114,11 @@ public abstract class AbstractAcpClient implements Closeable {
      */
     public void start() throws IOException {
         state.set(State.STARTING);
+        startRuntimeSession();
+    }
+
+    /** Starts one provider runtime and creates or restores its ACP session. */
+    protected void startRuntimeSession() throws IOException {
         try (AcpLaunchConcurrencyGuard.Lease ignored =
                      AcpLaunchConcurrencyGuard.acquire(
                              agentProvider, workspacePath, clientIdentity.getLogicalId())) {
@@ -140,6 +145,26 @@ public abstract class AbstractAcpClient implements Closeable {
         } catch (IOException e) {
             state.set(State.ERROR);
             throw e;
+        }
+    }
+
+    /** Releases only the provider runtime while retaining the logical client. */
+    protected void releaseRuntimeForSleep() {
+        closeCurrentSessionGracefully(State.READY);
+    }
+
+    /** Restarts a provider runtime for a logical client currently in SLEEP. */
+    protected void wakeRuntimeSession() throws IOException {
+        if (!state.compareAndSet(State.SLEEP, State.STARTING)) {
+            throw new IllegalStateException("当前 client 不处于 SLEEP: " + state.get());
+        }
+        try {
+            startRuntimeSession();
+        } catch (IOException | RuntimeException failure) {
+            closeCurrentProcess();
+            state.compareAndSet(State.ERROR, State.SLEEP);
+            state.compareAndSet(State.STARTING, State.SLEEP);
+            throw failure;
         }
     }
 
@@ -294,7 +319,7 @@ public abstract class AbstractAcpClient implements Closeable {
         logger.info("关闭 AbstractAcpClient, logicalId={}, transportGroup={}",
                 clientIdentity.getLogicalId(), clientIdentity.getTransportGroup());
         try {
-            closeCurrentSessionGracefully();
+            closeCurrentSessionGracefully(stateBeforeClose);
         } finally {
             state.set(State.CLOSED);
         }
@@ -303,7 +328,7 @@ public abstract class AbstractAcpClient implements Closeable {
     /**
      * 正常关闭：Provider session close → 必要时关闭 stdin → 等待 → destroy → destroyForcibly。
      */
-    private void closeCurrentSessionGracefully() {
+    private void closeCurrentSessionGracefully(State previousState) {
         Process currentProcess = process;
         boolean closeSent = false;
 
@@ -312,7 +337,7 @@ public abstract class AbstractAcpClient implements Closeable {
             JsonObject params = new JsonObject();
             params.addProperty("sessionId", sessionId);
             try {
-                if (stateBeforeClose == State.BUSY) {
+                if (previousState == State.BUSY) {
                     JsonObject cancelNotification = new JsonObject();
                     cancelNotification.addProperty("jsonrpc", JSONRPC_VERSION);
                     cancelNotification.addProperty("method", "session/cancel");
@@ -399,6 +424,11 @@ public abstract class AbstractAcpClient implements Closeable {
      */
     protected long currentLifecycleGeneration() {
         return lifecycleGeneration.get();
+    }
+
+    /** Invalidates callbacks belonging to a provider runtime that has just been released. */
+    protected void lifecycleBoundary() {
+        lifecycleGeneration.incrementAndGet();
     }
 
     /**

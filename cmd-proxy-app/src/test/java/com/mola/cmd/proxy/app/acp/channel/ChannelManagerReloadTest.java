@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.channel;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelOutboundTarget;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
@@ -112,6 +113,40 @@ public class ChannelManagerReloadTest {
         automatic.getBinding().setTeamMemberSelection(ChannelBinding.MEMBER_SELECTION_AFFINITY);
         automatic.getBinding().setTeamMemberId(null);
         ChannelManager manager = manager(factory, automatic);
+
+        manager.start();
+
+        assertEquals(ChannelStatus.CONNECTED, manager.getStatuses().get("channel-a"));
+        assertFalse(manager.getErrors().containsKey("channel-a"));
+        manager.close();
+    }
+
+    @Test
+    public void outboundTargetIdsAreUniqueAcrossChannels() {
+        RecordingFactory factory = new RecordingFactory();
+        ChannelConfig first = config("channel-a", "bot-a");
+        first.setOutboundTargets(Collections.singletonList(new ChannelOutboundTarget(
+                "release-group", "chat-a", "发布群")));
+        ChannelConfig second = config("channel-b", "bot-b");
+        second.setOutboundTargets(Collections.singletonList(new ChannelOutboundTarget(
+                "release-group", "chat-b", "另一个发布群")));
+        ChannelManager manager = manager(factory, first, second);
+
+        manager.start();
+
+        assertEquals(ChannelStatus.CONNECTED, manager.getStatuses().get("channel-a"));
+        assertTrue(manager.getErrors().get("channel-b")
+                .contains("duplicate channel outbound target id"));
+        manager.close();
+    }
+
+    @Test
+    public void outboundTargetIdAcceptsChineseCharacters() {
+        RecordingFactory factory = new RecordingFactory();
+        ChannelConfig channel = config("channel-a", "bot-a");
+        channel.setOutboundTargets(Collections.singletonList(new ChannelOutboundTarget(
+                "jira机器人", "chat-a", "Jira 运维通知")));
+        ChannelManager manager = manager(factory, channel);
 
         manager.start();
 

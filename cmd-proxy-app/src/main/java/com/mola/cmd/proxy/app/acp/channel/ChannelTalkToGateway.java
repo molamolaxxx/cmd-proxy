@@ -3,8 +3,10 @@ package com.mola.cmd.proxy.app.acp.channel;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelChatTarget;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelOutboundTarget;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToContactProvider;
 import com.mola.cmd.proxy.app.acp.talkto.ExternalTalkToGateway;
@@ -213,17 +215,18 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
     }
 
     private String deliverProactive(TalkToRequest request, String senderGroupId) {
-        String channelId = stableChannelId(request.getTarget());
-        if (channelId == null) return failure("回复路由不存在、已过期或已消费。");
-        ChannelConfig config = configs.get(channelId);
-        if (config == null || !config.isEnabled()) return failure("信道不存在或未启用。");
+        String targetId = stableTargetId(request.getTarget());
+        if (targetId == null) return failure("回复路由不存在、已过期或已消费。");
+        ProactiveTarget resolved = findProactiveTarget(targetId);
+        if (resolved == null) return failure("主动推送目标不存在或未启用。");
+        ChannelConfig config = resolved.config;
         if (senderGroupId == null
                 || !senderGroupId.equals(bindingOwnerKey(config.getBinding()))) {
             return failure("当前 ACP 不是该信道绑定的 client。");
         }
-        String chatId = trim(config.getDefaultChatId());
-        if (chatId.isEmpty()) return failure("信道未配置 defaultChatId，无法主动发送。");
-        ChannelAdapter adapter = adapters.get(channelId);
+        String chatId = trim(resolved.target.getChatId());
+        if (chatId.isEmpty()) return failure("主动推送目标未配置企微会话。");
+        ChannelAdapter adapter = adapters.get(config.getId());
         if (adapter == null) return failure("信道当前不可用。");
         ChannelSendResult result;
         try {
@@ -243,10 +246,12 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         List<ExternalTalkToContact> result = new ArrayList<>();
         for (ChannelConfig config : configs.values()) {
             if (!config.isEnabled()
-                    || !groupId.equals(bindingOwnerKey(config.getBinding()))
-                    || trim(config.getDefaultChatId()).isEmpty()) continue;
-            result.add(new ExternalTalkToContact(
-                    PREFIX + config.getId(), config.getId(), "企业微信默认主动推送目标"));
+                    || !groupId.equals(bindingOwnerKey(config.getBinding()))) continue;
+            for (ChannelOutboundTarget target : config.effectiveOutboundTargets()) {
+                if (!usable(target)) continue;
+                result.add(new ExternalTalkToContact(PREFIX + trim(target.getId()),
+                        proactiveDisplayName(config, target), trim(target.getDescription())));
+            }
         }
         result.sort(Comparator.comparing(ExternalTalkToContact::getTarget));
         return Collections.unmodifiableList(result);
@@ -268,10 +273,54 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         return error == null || error.trim().isEmpty() ? "unknown error" : error;
     }
 
-    private static String stableChannelId(String target) {
+    private ProactiveTarget findProactiveTarget(String targetId) {
+        for (ChannelConfig config : configs.values()) {
+            if (config == null || !config.isEnabled()) continue;
+            for (ChannelOutboundTarget target : config.effectiveOutboundTargets()) {
+                if (usable(target) && targetId.equals(trim(target.getId()))) {
+                    return new ProactiveTarget(config, target);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean usable(ChannelOutboundTarget target) {
+        return target != null && !trim(target.getId()).isEmpty()
+                && !trim(target.getChatId()).isEmpty()
+                && !trim(target.getDescription()).isEmpty();
+    }
+
+    private static String proactiveDisplayName(ChannelConfig config,
+                                               ChannelOutboundTarget target) {
+        String id = trim(target.getId());
+        String address = trim(target.getChatId());
+        ChannelChatTarget known = null;
+        if (config != null && config.getKnownChatTargets() != null) {
+            for (ChannelChatTarget candidate : config.getKnownChatTargets()) {
+                if (candidate != null && address.equals(trim(candidate.getId()))) {
+                    known = candidate;
+                    break;
+                }
+            }
+        }
+        if (known != null && "group".equals(trim(known.getChatType()))) {
+            return id + "【群聊】【群 ID：" + oneLine(address) + "】";
+        }
+        if (known != null && "single".equals(trim(known.getChatType()))) {
+            return id + "【单聊】【用户 ID：" + oneLine(address) + "】";
+        }
+        return id + "【企微会话】【会话 ID：" + oneLine(address) + "】";
+    }
+
+    private static String oneLine(String value) {
+        return trim(value).replace('\n', ' ').replace('\r', ' ');
+    }
+
+    private static String stableTargetId(String target) {
         if (target == null || !target.startsWith(PREFIX)) return null;
-        String channelId = target.substring(PREFIX.length());
-        return channelId.isEmpty() || channelId.contains(":") ? null : channelId;
+        String targetId = target.substring(PREFIX.length());
+        return targetId.isEmpty() || targetId.contains(":") ? null : targetId;
     }
 
     private static String trim(String value) {
@@ -319,6 +368,16 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
             this.expiresAt = expiresAt;
             this.ownerKey = ownerKey;
             this.preciseConsumed = preciseConsumed;
+        }
+    }
+
+    private static final class ProactiveTarget {
+        private final ChannelConfig config;
+        private final ChannelOutboundTarget target;
+
+        private ProactiveTarget(ChannelConfig config, ChannelOutboundTarget target) {
+            this.config = config;
+            this.target = target;
         }
     }
 }

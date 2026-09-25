@@ -152,6 +152,22 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
     }
 
     @Override
+    public void onLifecycleEvent(String eventType, String fromState, String toState,
+                                 long durationMillis, boolean newSession) {
+        renderer.onLifecycleEvent(eventType, fromState, toState, durationMillis, newSession);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("eventType", eventType);
+        data.put("fromState", fromState);
+        data.put("toState", toState);
+        data.put("durationMillis", durationMillis);
+        data.put("newSession", newSession);
+        persist(TeamEventType.LIFECYCLE_EVENT, data);
+        publish(TeamEventType.LIFECYCLE_EVENT, data);
+        stateObserver.onState(runtime.getDefinition().getTeamId(),
+                teamMemberId, TeamMemberState.READY, null);
+    }
+
+    @Override
     public void onComplete(String fullResponse) {
         renderer.onComplete();
     }

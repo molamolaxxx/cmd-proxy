@@ -71,6 +71,17 @@ public final class GatewayAcpResponseListener implements AcpResponseListener {
         publish("task.updated", taskId == null ? null : "task-" + taskId, payload, payload);
     }
 
+    @Override public void onLifecycleEvent(String eventType, String fromState,
+                                           String toState, long durationMillis,
+                                           boolean newSession) {
+        JSONObject payload = object("eventType", eventType);
+        payload.put("fromState", fromState);
+        payload.put("toState", toState);
+        payload.put("durationMillis", durationMillis);
+        payload.put("newSession", newSession);
+        publish("agent.lifecycle", "agent-wake", payload, payload);
+    }
+
     @Override public void onComplete(String fullResponse) {
         String marker = termination.getAndSet(null);
         JSONObject payload = object("finishReason",

@@ -119,6 +119,12 @@ public class DefaultAcpResponseListener implements AcpResponseListener {
         sendContent(card.toString(), false);
     }
 
+    @Override
+    public void onLifecycleEvent(String eventType, String fromState, String toState,
+                                 long durationMillis, boolean newSession) {
+        renderer.onLifecycleEvent(eventType, fromState, toState, durationMillis, newSession);
+    }
+
     private static String text(JsonObject value, String key, String fallback) {
         if (!value.has(key) || value.get(key).isJsonNull()) return fallback;
         String result = value.get(key).getAsString();

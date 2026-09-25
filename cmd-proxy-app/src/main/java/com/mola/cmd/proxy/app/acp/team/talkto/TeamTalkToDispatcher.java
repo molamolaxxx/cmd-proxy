@@ -26,6 +26,7 @@ import com.mola.cmd.proxy.app.acp.team.model.TeamState;
 import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 import com.google.gson.Gson;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -281,7 +282,19 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
                 team.getTeamId(), target.getTeamMemberId()).orElse(null);
         if (targetClient != null) {
             synchronized (targetClient) {
-                if (target.getState() == TeamMemberState.READY
+                if (target.getState() == TeamMemberState.SLEEP
+                        && targetClient.getState() == AbstractAcpClient.State.SLEEP) {
+                    try {
+                        targetClient.wakeIfSleeping();
+                        stateObserver.onState(team.getTeamId(), target.getTeamMemberId(),
+                                TeamMemberState.READY, null);
+                    } catch (IOException | RuntimeException wakeFailure) {
+                        return "[talkTo 结果]\n发送失败：目标成员唤醒失败："
+                                + wakeFailure.getMessage();
+                    }
+                }
+                if ((target.getState() == TeamMemberState.READY
+                        || target.getState() == TeamMemberState.SLEEP)
                         && targetClient.getState() == AbstractAcpClient.State.READY) {
                     stateObserver.onState(team.getTeamId(), target.getTeamMemberId(),
                             TeamMemberState.BUSY, null);
@@ -390,7 +403,19 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             return InboundDeliveryResult.rejected("Team member not ready");
         }
         synchronized (targetClient) {
-            if (target.getState() == TeamMemberState.READY
+            if (target.getState() == TeamMemberState.SLEEP
+                    && targetClient.getState() == AbstractAcpClient.State.SLEEP) {
+                try {
+                    targetClient.wakeIfSleeping();
+                    stateObserver.onState(runtime.getDefinition().getTeamId(), teamMemberId,
+                            TeamMemberState.READY, null);
+                } catch (IOException | RuntimeException wakeFailure) {
+                    return InboundDeliveryResult.rejected(
+                            "agent wake failed: " + wakeFailure.getMessage());
+                }
+            }
+            if ((target.getState() == TeamMemberState.READY
+                    || target.getState() == TeamMemberState.SLEEP)
                     && targetClient.getState() == AbstractAcpClient.State.READY) {
                 stateObserver.onState(runtime.getDefinition().getTeamId(), teamMemberId,
                         TeamMemberState.BUSY, null);
@@ -916,7 +941,7 @@ public final class TeamTalkToDispatcher extends TalkToDispatcher
             sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
             sb.append("以下消息由当前 Fast Team 的严格队内路由投递，发送者身份已经过验证：\n\n");
             sb.append(getContent()).append("\n\n");
-            appendReplyPolicy(sb, getSender(), getDepth());
+            appendReplyRoute(sb, getSender());
             return sb.toString();
         }
     }

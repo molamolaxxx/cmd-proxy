@@ -3,9 +3,11 @@ package com.mola.cmd.proxy.app.acp.channel;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelReplyRoute;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelChatTarget;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelSendResult;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelOutboundTarget;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
@@ -14,6 +16,7 @@ import org.junit.Test;
 
 import java.util.Collections;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
@@ -131,10 +134,9 @@ public class ChannelTalkToGatewayTest {
         assertTrue(prompt.contains("发送者 userid: zhangsan"));
         assertTrue(prompt.contains("会话类型: group"));
         assertTrue(prompt.contains("群聊 chatid: chat-123"));
-        assertTrue(prompt.contains("talk_to MCP 工具"));
-        assertTrue(prompt.contains("target 指定为“回复”"));
+        assertTrue(prompt.contains("调用 talk_to 并将 target 设为“回复”"));
+        assertFalse(prompt.contains("选择对应 target"));
         assertFalse(prompt.contains("\"action\""));
-        assertTrue(prompt.contains("同一逻辑 turn 可以回复多次"));
         assertFalse(prompt.contains("reply_to_origin"));
         assertFalse(prompt.contains("channel:wecom-main:r_token"));
         assertFalse(prompt.contains("稳定 target"));
@@ -296,7 +298,8 @@ public class ChannelTalkToGatewayTest {
                 new TalkToRequest("channel:wecom-main", "build complete", 0),
                 "robot", "owner", "bound-group", Collections.emptyList());
 
-        assertTrue(context.contains("wecom-main（target: channel:wecom-main）"));
+        assertTrue(context.contains("wecom-main【企微会话】【会话 ID：chat-123】"
+                + "（target: channel:wecom-main）"));
         assertTrue(result.contains("主动发送消息"));
         assertEquals("chat-123", adapter.lastChatId);
         assertEquals("build complete", adapter.lastMarkdown);
@@ -314,8 +317,56 @@ public class ChannelTalkToGatewayTest {
         assertTrue(gateway.contactsForGroup("bound-group").isEmpty());
         assertTrue(gateway.deliver(
                 new TalkToRequest("channel:wecom-main", "notice", 0),
-                "robot", "bound-group").contains("未配置 defaultChatId"));
+                "robot", "bound-group").contains("主动推送目标不存在"));
         assertEquals(0, adapter.calls.get());
+    }
+
+    @Test
+    public void exposesAndRoutesMultipleConfiguredOutboundTargets() {
+        RecordingAdapter adapter = new RecordingAdapter();
+        ChannelConfig config = config("bound-group", "legacy-chat");
+        List<ChannelOutboundTarget> targets = new ArrayList<>();
+        targets.add(new ChannelOutboundTarget(
+                "release-group", "release-chat", "仅用于发布通知"));
+        targets.add(new ChannelOutboundTarget(
+                "ops-oncall", "user-42", "仅用于故障通知"));
+        targets.add(new ChannelOutboundTarget(
+                "unfinished", "", "尚未选择企微会话"));
+        config.setOutboundTargets(targets);
+        ChannelChatTarget releaseChat = new ChannelChatTarget();
+        releaseChat.setId("release-chat");
+        releaseChat.setDisplayName("发布群");
+        releaseChat.setChatType("group");
+        ChannelChatTarget oncall = new ChannelChatTarget();
+        oncall.setId("user-42");
+        oncall.setDisplayName("值班人员");
+        oncall.setChatType("single");
+        config.setKnownChatTargets(Arrays.asList(releaseChat, oncall));
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter),
+                Collections.singletonMap("wecom-main", config));
+
+        List<com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact> contacts =
+                gateway.contactsForGroup("bound-group");
+        assertEquals(2, contacts.size());
+        assertEquals("channel:ops-oncall", contacts.get(0).getTarget());
+        assertEquals("channel:release-group", contacts.get(1).getTarget());
+        assertEquals("ops-oncall【单聊】【用户 ID：user-42】",
+                contacts.get(0).getDisplayName());
+        assertEquals("release-group【群聊】【群 ID：release-chat】",
+                contacts.get(1).getDisplayName());
+        assertEquals("仅用于发布通知", contacts.get(1).getRemark());
+
+        String result = gateway.deliver(new TalkToRequest(
+                "channel:release-group", "release complete", 0),
+                "robot", "bound-group");
+
+        assertTrue(result.contains("主动发送消息"));
+        assertEquals("release-chat", adapter.lastChatId);
+        assertEquals("release complete", adapter.lastMarkdown);
+        assertTrue(gateway.deliver(new TalkToRequest(
+                "channel:wecom-main", "legacy", 0), "robot", "bound-group")
+                .contains("主动推送目标不存在"));
     }
 
     @Test

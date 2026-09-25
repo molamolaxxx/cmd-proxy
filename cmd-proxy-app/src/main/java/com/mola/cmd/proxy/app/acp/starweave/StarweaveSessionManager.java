@@ -13,6 +13,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.PromptCommandResult;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ConversationHistoryManager;
 import com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -223,6 +224,13 @@ public final class StarweaveSessionManager {
         }
         JSONObject response = commandResult(result);
         if (result.isAccepted()) {
+            // 睡眠唤醒可能刚刚轮转到全新会话：事件必须落库到唤醒后的身份，
+            // 否则用户消息会留在旧会话，且下一次发送命中过期 generation。
+            StarweaveSessionIndex.Entry current = index.get(groupId);
+            String eventSessionId = current != null && current.isActive()
+                    ? current.getCurrentSessionId() : entry.getCurrentSessionId();
+            long eventGeneration = current != null
+                    ? current.getGeneration() : entry.getGeneration();
             JSONObject payload = new JSONObject(true);
             payload.put("content", message);
             payload.put("source", "STARWEAVE");
@@ -235,8 +243,8 @@ public final class StarweaveSessionManager {
                 uploadStore.delete(upload.uploadId);
             }
             payload.put("attachments", attachments);
-            eventStore.append(groupId, entry.getCurrentSessionId(),
-                    turnId, entry.getGeneration(), "USER_MESSAGE_ACCEPTED", payload);
+            eventStore.append(groupId, eventSessionId,
+                    turnId, eventGeneration, "USER_MESSAGE_ACCEPTED", payload);
         } else {
             turns.clear(turnId);
         }
@@ -434,6 +442,25 @@ public final class StarweaveSessionManager {
                         oldSessionId, newSessionId, reason));
     }
 
+    /**
+     * Synchronizes the durable session index when a sleeping client wakes into a
+     * deferred fresh session. Unlike {@link #onSessionReplaced}, the originating
+     * turn is still in flight, so the turn tracker must be preserved: the user
+     * message, lifecycle event, and reply all belong to the same logical turn.
+     */
+    public void onSessionRotatedOnWake(String groupId, String oldSessionId,
+                                       String newSessionId) {
+        AcpClient client = registry.getClient(groupId);
+        if (client == null || !client.getClientIdentity().isStarweave()
+                || !Objects.equals(client.getSessionId(), newSessionId)) {
+            throw new IllegalStateException("Starweave wake rotation is no longer current");
+        }
+        StarweaveSessionIndex.Entry updated = index.updateSession(groupId, newSessionId);
+        eventStore.append(groupId, newSessionId, updated.getGeneration(),
+                "SESSION_REPLACED", replacementPayload(
+                        oldSessionId, newSessionId, "AUTO_IDLE"));
+    }
+
     private AcpClientRegistry.ClientInitializer clientInitializer(
             String groupId, AcpRobotParam robot) {
         return client -> featureAndListener(groupId, client, robot);
@@ -444,6 +471,8 @@ public final class StarweaveSessionManager {
         client.setGlobalListener(new StarweaveAcpResponseListener(
                 groupId, client::getSessionId,
                 () -> generation(groupId), eventStore, turnTracker(groupId)));
+        client.setSessionRotationListener((previousSessionId, newSessionId) ->
+                onSessionRotatedOnWake(groupId, previousSessionId, newSessionId));
         featureInitializer.initialize(groupId, client, robot);
     }
 
@@ -715,6 +744,13 @@ public final class StarweaveSessionManager {
 
     private AcpClient requireReadyClient(String groupId) {
         AcpClient client = registry.getClient(groupId);
+        if (client != null && client.getState() == AbstractAcpClient.State.SLEEP) {
+            try {
+                client.wakeIfSleeping();
+            } catch (IOException e) {
+                throw new IllegalStateException("session wake failed", e);
+            }
+        }
         if (client == null || client.getState() != AbstractAcpClient.State.READY) {
             throw new IllegalStateException("session is not READY");
         }

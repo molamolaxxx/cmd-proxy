@@ -24,6 +24,7 @@ public class AcpRobotParam {
     private List<String> teamSharedWithChatterIds;
     private boolean scheduleEnabled = false;
     private AutoNewSessionConfig autoNewSession;
+    private AutoSleepConfig autoSleep;
     private List<ContactRef> contacts;
     private String model;
     private String apiKey;
@@ -204,6 +205,18 @@ public class AcpRobotParam {
 
     public boolean isAutoNewSessionEnabled() {
         return autoNewSession != null && autoNewSession.isEnabled();
+    }
+
+    public AutoSleepConfig getAutoSleep() {
+        return autoSleep;
+    }
+
+    public void setAutoSleep(AutoSleepConfig autoSleep) {
+        this.autoSleep = autoSleep;
+    }
+
+    public boolean isAutoSleepEnabled() {
+        return autoSleep != null && autoSleep.isEnabled();
     }
 
     public List<ContactRef> getContacts() {

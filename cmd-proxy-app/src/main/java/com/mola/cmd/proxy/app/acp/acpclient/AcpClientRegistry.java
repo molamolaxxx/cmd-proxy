@@ -252,6 +252,8 @@ public class AcpClientRegistry {
                 return PromptCommandResult.rejected(
                         "REJECTED_STATE", "groupId=" + groupId + " 的会话不存在，请先调用 createSession");
             }
+            PromptCommandResult wakeFailure = wakeForRequest(client);
+            if (wakeFailure != null) return wakeFailure;
             return promptCoordinator.send(groupId, port(client), message, files,
                     MainAcpPromptCoordinator.BusyPolicy.from(busyPolicy),
                     options == null ? PromptOptions.defaults() : options);
@@ -267,6 +269,8 @@ public class AcpClientRegistry {
                 return PromptCommandResult.rejected("REJECTED_STATE",
                         "groupId=" + groupId + " task session does not exist");
             }
+            PromptCommandResult wakeFailure = wakeForRequest(client);
+            if (wakeFailure != null) return wakeFailure;
             if (client.getState() == AbstractAcpClient.State.BUSY) {
                 if (options == null || !options.isTaskControl()
                         || !client.isActiveTask(options.getTaskId())) {
@@ -289,7 +293,31 @@ public class AcpClientRegistry {
                 throw new IllegalStateException(
                         "groupId=" + groupId + " 的会话不存在，请先调用 createSession");
             }
+            try {
+                client.wakeIfSleeping();
+            } catch (IOException e) {
+                throw new IllegalStateException("唤醒智能体失败", e);
+            }
             client.send(message, files, options);
+        }
+    }
+
+    /** Wakes one MAIN client under its authoritative group lifecycle lock. */
+    public boolean wakeIfSleeping(String groupId) throws IOException {
+        synchronized (sessionLock(groupId)) {
+            AcpClient client = clients.get(groupId);
+            return client != null && client.wakeIfSleeping();
+        }
+    }
+
+    private PromptCommandResult wakeForRequest(AcpClient client) {
+        if (client.getState() != AbstractAcpClient.State.SLEEP) return null;
+        try {
+            client.wakeIfSleeping();
+            return null;
+        } catch (IOException | RuntimeException failure) {
+            return PromptCommandResult.rejected(
+                    "WAKE_FAILED", "唤醒智能体失败: " + failure.getMessage());
         }
     }
 

@@ -66,7 +66,7 @@ public final class ChannelConfigFileStore {
         setChannelBoolean(configPath, channelId, "privateChatEnabled", enabled);
     }
 
-    /** Records a selectable proactive target without changing the user's defaultChatId. */
+    /** Records a discovered conversation without changing user-configured outbound targets. */
     public static boolean recordKnownChatTarget(String channelId, String targetId,
                                                 String displayName, String chatType)
             throws IOException {
@@ -74,12 +74,29 @@ public final class ChannelConfigFileStore {
                 targetId, displayName, chatType);
     }
 
+    public static boolean recordKnownChatTarget(String channelId, String targetId,
+                                                String displayName, String chatType,
+                                                String messagePreview, long seenAt)
+            throws IOException {
+        return recordKnownChatTarget(CmdProxyHome.resolve("acpConfig.json"), channelId,
+                targetId, displayName, chatType, messagePreview, seenAt);
+    }
+
     static boolean recordKnownChatTarget(Path configPath, String channelId, String targetId,
                                          String displayName, String chatType) throws IOException {
+        return recordKnownChatTarget(configPath, channelId, targetId, displayName, chatType,
+                null, 0L);
+    }
+
+    static boolean recordKnownChatTarget(Path configPath, String channelId, String targetId,
+                                         String displayName, String chatType,
+                                         String messagePreview, long seenAt) throws IOException {
         String cleanChannelId = requireText(channelId, "channelId");
         String cleanTargetId = requireText(targetId, "targetId");
         String cleanDisplayName = truncate(requireText(displayName, "displayName"), 100);
         String cleanChatType = requireText(chatType, "chatType");
+        boolean previewProvided = messagePreview != null;
+        String cleanPreview = truncate(messagePreview == null ? "" : messagePreview.trim(), 100);
         synchronized (LOCK) {
             JSONObject root = JSON.parseObject(new String(
                     Files.readAllBytes(configPath), StandardCharsets.UTF_8));
@@ -93,10 +110,22 @@ public final class ChannelConfigFileStore {
                 JSONObject target = targets.getJSONObject(i);
                 if (target == null || !cleanTargetId.equals(target.getString("id"))
                         || !cleanChatType.equals(target.getString("chatType"))) continue;
-                if (i == 0 && cleanDisplayName.equals(target.getString("displayName"))) {
+                boolean changed = !cleanDisplayName.equals(target.getString("displayName"));
+                String priorPreview = target.getString("lastMessagePreview");
+                if (previewProvided && !cleanPreview.equals(
+                        priorPreview == null ? "" : priorPreview)) {
+                    changed = true;
+                }
+                if (seenAt > 0L && seenAt != target.getLongValue("lastSeenAt")) changed = true;
+                if (i == 0 && !changed) {
                     return false;
                 }
                 target.put("displayName", cleanDisplayName);
+                if (previewProvided) {
+                    if (cleanPreview.isEmpty()) target.remove("lastMessagePreview");
+                    else target.put("lastMessagePreview", cleanPreview);
+                }
+                if (seenAt > 0L) target.put("lastSeenAt", seenAt);
                 targets.remove(i);
                 targets.add(0, target);
                 writeAtomically(configPath, JSON.toJSONString(root,
@@ -107,6 +136,10 @@ public final class ChannelConfigFileStore {
             target.put("id", cleanTargetId);
             target.put("displayName", cleanDisplayName);
             target.put("chatType", cleanChatType);
+            if (previewProvided && !cleanPreview.isEmpty()) {
+                target.put("lastMessagePreview", cleanPreview);
+            }
+            if (seenAt > 0L) target.put("lastSeenAt", seenAt);
             targets.add(0, target);
             while (targets.size() > MAX_KNOWN_CHAT_TARGETS) {
                 targets.remove(targets.size() - 1);

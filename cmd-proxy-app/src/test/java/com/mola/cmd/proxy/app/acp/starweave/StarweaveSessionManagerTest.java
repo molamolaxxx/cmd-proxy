@@ -260,6 +260,50 @@ public class StarweaveSessionManagerTest {
     }
 
     @Test
+    public void sleepingClientWakeRotationSyncsIndexAndFilesUserMessageOnNewSession()
+            throws Exception {
+        FakeFactory factory = new FakeFactory();
+        AcpClientRegistry registry = registry(factory);
+        StarweaveSessionManager manager = manager(registry);
+        JSONObject opened = manager.open("Robot");
+        String groupId = opened.getString("groupId");
+        String oldSession = opened.getString("sessionId");
+        long oldGeneration = opened.getLongValue("generation");
+        FakeClient client = (FakeClient) registry.getClient(groupId);
+        client.deferNewSessionOnWake();
+
+        JSONObject sent = manager.send(groupId, "after wake", oldSession,
+                oldGeneration, "REJECT");
+
+        assertTrue(sent.getBooleanValue("accepted"));
+        JSONObject status = manager.status(groupId);
+        String newSession = status.getString("sessionId");
+        assertNotEquals(oldSession, newSession);
+        assertEquals(oldGeneration + 1L, status.getLongValue("generation"));
+
+        JSONObject batch = manager.eventBatch(groupId, newSession, 0L, null);
+        boolean replaced = false;
+        boolean userOnNewSession = false;
+        for (int i = 0; i < batch.getJSONArray("events").size(); i++) {
+            JSONObject event = batch.getJSONArray("events").getJSONObject(i);
+            if ("SESSION_REPLACED".equals(event.getString("type"))) {
+                replaced = true;
+                assertEquals("AUTO_IDLE",
+                        event.getJSONObject("payload").getString("reason"));
+                assertEquals(oldSession,
+                        event.getJSONObject("payload").getString("oldSessionId"));
+            }
+            if ("USER_MESSAGE_ACCEPTED".equals(event.getString("type"))) {
+                userOnNewSession = true;
+                assertEquals(oldGeneration + 1L, event.getLongValue("generation"));
+            }
+        }
+        assertTrue("SESSION_REPLACED must be published on the new session", replaced);
+        assertTrue("user message must be filed on the new session", userOnNewSession);
+        registry.closeAllForShutdown();
+    }
+
+    @Test
     public void externalChannelInboundUsesDedicatedCardEventInsteadOfUserMessage()
             throws Exception {
         FakeFactory factory = new FakeFactory();
@@ -466,6 +510,7 @@ public class StarweaveSessionManagerTest {
         private boolean closed;
         private String sentMessage;
         private List<Map<String, String>> sentFiles;
+        private int wakeRotations;
 
         private FakeClient(AcpClientIdentity identity, AcpRobotParam robot,
                            int sequence, boolean failStart, long startDelayMillis) {
@@ -501,6 +546,19 @@ public class StarweaveSessionManagerTest {
             setSessionId(restoreSessionId == null
                     ? "session-" + sequence : restoreSessionId);
             state.set(State.READY);
+        }
+
+        @Override
+        protected void wakeRuntimeSession() throws IOException {
+            if (!state.compareAndSet(State.SLEEP, State.READY)) {
+                throw new IOException("unexpected state");
+            }
+            setSessionId("session-wake-" + sequence + "-" + (++wakeRotations));
+        }
+
+        private void deferNewSessionOnWake() {
+            state.set(State.SLEEP);
+            markNewSessionOnWake();
         }
 
         @Override

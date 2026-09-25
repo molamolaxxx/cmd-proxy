@@ -96,6 +96,12 @@ public interface AcpResponseListener {
         // Optional structured projection for transports that expose task cards.
     }
 
+    /** Logical client lifecycle event, such as an automatic wake from SLEEP. */
+    default void onLifecycleEvent(String eventType, String fromState, String toState,
+                                  long durationMillis, boolean newSession) {
+        // Optional structured projection for transports that expose lifecycle cards.
+    }
+
     /**
      * agent 回答完成时回调
      *

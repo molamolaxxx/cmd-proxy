@@ -32,10 +32,10 @@ public class ChannelInboundDeliveryTest {
 
         assertEquals(TalkToDispatcher.InboundDeliveryResult.Status.DIRECT, result.getStatus());
         assertNotNull(client.lastPrompt);
-        assertTrue(client.lastPrompt.contains("talk_to MCP 工具"));
-        assertTrue(client.lastPrompt.contains("target 指定为“回复”"));
+        assertTrue(client.lastPrompt.contains("调用 talk_to 并将 target 设为“回复”"));
+        assertFalse(client.lastPrompt.contains("选择对应 target"));
         assertFalse(client.lastPrompt.contains("\"action\""));
-        assertTrue(client.lastPrompt.contains("同一逻辑 turn 可以回复多次"));
+        assertFalse(client.lastPrompt.contains("同一逻辑 turn 可以回复多次"));
         assertFalse(client.lastPrompt.contains("reply_to_origin"));
         assertFalse(client.lastPrompt.contains("channel:wecom:r1"));
         assertNotNull(client.lastOptions.getChannelTurnContext());
@@ -109,7 +109,7 @@ public class ChannelInboundDeliveryTest {
     }
 
     @Test
-    public void everyChannelTargetIsPinnedToCurrentChannelTurn() {
+    public void onlyReplyAliasIsPinnedToCurrentChannelTurn() {
         FakeClient client = new FakeClient("bound-group");
         PromptOptions options = PromptOptions.forChannelReply(
                 message("reply-token").getTurnContext());
@@ -122,9 +122,9 @@ public class ChannelInboundDeliveryTest {
                 new TalkToRequest("reviewer", "three", 0), options);
 
         assertEquals("channel:wecom:reply-token", reply.getTarget());
-        assertEquals("channel:wecom:reply-token", proactive.getTarget());
+        assertEquals("channel:another", proactive.getTarget());
         assertEquals("reviewer", teammate.getTarget());
-        assertEquals(2, options.getChannelReplyAttempts());
+        assertEquals(1, options.getChannelReplyAttempts());
     }
 
     @Test
@@ -144,7 +144,8 @@ public class ChannelInboundDeliveryTest {
         assertEquals("channel:wecom:reply-token",
                 client.lastOptions.getChannelTurnContext().getReplyTarget());
         assertTrue(client.lastPrompt.contains("[信道续接]"));
-        assertTrue(client.lastPrompt.contains("target 指定为“回复”"));
+        assertTrue(client.lastPrompt.contains("原始会话仍绑定为“回复”"));
+        assertTrue(client.lastPrompt.contains("ACP harness 的 <external-channel> 规则"));
         TalkToRequest resolved = client.resolveChannelReplyTarget(
                 new TalkToRequest("回复", "final", 0), client.lastOptions);
         assertEquals("channel:wecom:reply-token", resolved.getTarget());

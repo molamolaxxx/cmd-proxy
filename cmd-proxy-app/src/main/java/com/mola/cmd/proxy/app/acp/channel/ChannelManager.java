@@ -5,6 +5,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity;
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig;
+import com.mola.cmd.proxy.app.acp.channel.model.ChannelOutboundTarget;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelStatus;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.team.TeamManager;
@@ -77,8 +78,9 @@ public final class ChannelManager implements AutoCloseable {
         if (teamManager != null) teamManager.registerExternalGateway(gateway);
         Set<String> ids = new HashSet<>();
         Set<String> botIds = new HashSet<>();
+        Set<String> outboundTargetIds = new HashSet<>();
         for (ChannelConfig config : configuredChannels) {
-            String error = validate(config, ids, botIds);
+            String error = validate(config, ids, botIds, outboundTargetIds);
             String channelId = config == null ? "<null>" : trim(config.getId());
             if (error != null) {
                 if (!channelId.isEmpty()) {
@@ -133,13 +135,15 @@ public final class ChannelManager implements AutoCloseable {
         if (config != null) {
             Set<String> ids = new HashSet<>();
             Set<String> botIds = new HashSet<>();
+            Set<String> outboundTargetIds = new HashSet<>();
             for (ChannelConfig existing : configs.values()) {
                 String existingId = trim(existing.getId());
                 if (existingId.equals(previousId)) continue;
                 ids.add(existingId);
                 if (existing.isEnabled()) botIds.add(trim(existing.getBotId()));
+                collectTargetIds(existing, outboundTargetIds);
             }
-            String error = validate(config, ids, botIds);
+            String error = validate(config, ids, botIds, outboundTargetIds);
             if (error != null) throw new IllegalArgumentException(error);
         }
 
@@ -217,13 +221,34 @@ public final class ChannelManager implements AutoCloseable {
                         config.getBinding().effectiveTeamMemberSelection());
     }
 
-    private String validate(ChannelConfig config, Set<String> ids, Set<String> botIds) {
+    private String validate(ChannelConfig config, Set<String> ids, Set<String> botIds,
+                            Set<String> outboundTargetIds) {
         if (config == null) return "channel is null";
         String id = trim(config.getId());
         if (id.isEmpty()) return "channel.id is required";
         config.setId(id);
         if (!ids.add(id)) return "duplicate channel.id";
         if (!ChannelConfig.TYPE_WECOM_WS.equals(config.getType())) return "unsupported channel.type";
+        for (ChannelOutboundTarget target : config.effectiveOutboundTargets()) {
+            if (target == null) return "channel outbound target is null";
+            String targetId = trim(target.getId());
+            if (!ChannelOutboundTarget.isValidId(targetId)) {
+                return "channel outbound target id is invalid";
+            }
+            if (!outboundTargetIds.add(targetId)) {
+                return "duplicate channel outbound target id: " + targetId;
+            }
+            String description = trim(target.getDescription());
+            if (description.isEmpty() || description.length() > 500) {
+                return "channel outbound target description is invalid";
+            }
+            if (trim(target.getChatId()).length() > 512) {
+                return "channel outbound target chatId is invalid";
+            }
+            target.setId(targetId);
+            target.setDescription(description);
+            target.setChatId(trim(target.getChatId()));
+        }
         if (!config.isEnabled()) return null;
         if (trim(config.getBotId()).isEmpty()) return "botId is required";
         if (!botIds.add(config.getBotId())) return "duplicate enabled botId";
@@ -285,6 +310,15 @@ public final class ChannelManager implements AutoCloseable {
             return "unsupported binding.type";
         }
         return null;
+    }
+
+    private static void collectTargetIds(ChannelConfig config, Set<String> targetIds) {
+        if (config == null) return;
+        for (ChannelOutboundTarget target : config.effectiveOutboundTargets()) {
+            if (target != null && !trim(target.getId()).isEmpty()) {
+                targetIds.add(trim(target.getId()));
+            }
+        }
     }
 
     public ChannelTalkToBridge getBridge() { return bridge; }

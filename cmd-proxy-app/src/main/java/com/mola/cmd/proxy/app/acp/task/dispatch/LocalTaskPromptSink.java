@@ -90,7 +90,8 @@ public final class LocalTaskPromptSink implements TaskPromptSink {
             // The durable receipt remains pending and will deliver the control prompt at READY.
             return false;
         }
-        if (client.getState() != AbstractAcpClient.State.READY) return false;
+        if (client.getState() != AbstractAcpClient.State.READY
+                && client.getState() != AbstractAcpClient.State.SLEEP) return false;
         TeamCommandResult result = teams.sendTask(requestId, memberCommand, taskOptions(card));
         if (result.isAccepted()) projector.project(assignee, card);
         return result.isAccepted();

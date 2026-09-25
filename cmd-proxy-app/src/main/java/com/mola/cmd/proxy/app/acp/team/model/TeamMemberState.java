@@ -3,6 +3,7 @@ package com.mola.cmd.proxy.app.acp.team.model;
 public enum TeamMemberState {
     STARTING,
     READY,
+    SLEEP,
     BUSY,
     ERROR,
     CLOSING,

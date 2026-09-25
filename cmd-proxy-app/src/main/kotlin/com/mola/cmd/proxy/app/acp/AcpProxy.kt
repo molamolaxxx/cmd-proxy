@@ -554,6 +554,11 @@ object AcpProxy {
                     // rounds such as talk_to may complete without the same callback path.
                     // Publish READY only after AcpClient itself wins BUSY -> READY.
                     client.setAfterTurnReady(teamListener::onClientReady)
+                    client.setSessionRotationListener { previousSessionId, newSessionId ->
+                        managerHolder.get()?.onMemberSessionRotated(
+                            team.teamId, member.teamMemberId,
+                            previousSessionId, newSessionId)
+                    }
                     client.setForceNewSession(options.isForceNewSession)
                     if (options.targetRestoreSessionId != null) {
                         client.setTargetRestoreSessionId(options.targetRestoreSessionId)
@@ -975,6 +980,9 @@ object AcpProxy {
                     return@register resultMap
                 }
                 val client = registry.getClient(groupId)
+                if (client?.state == AbstractAcpClient.State.SLEEP) {
+                    registry.wakeIfSleeping(groupId)
+                }
                 if (client == null || client.state != AbstractAcpClient.State.READY) {
                     resultMap["result"] = "当前client状态不为READY，不允许清除上下文"
                     return@register resultMap
@@ -1120,6 +1128,9 @@ object AcpProxy {
                     return@register resultMap
                 }
                 val client = registry.getClient(groupId)
+                if (client?.state == AbstractAcpClient.State.SLEEP) {
+                    registry.wakeIfSleeping(groupId)
+                }
                 if (client == null || client.state != AbstractAcpClient.State.READY) {
                     resultMap["result"] = "当前client状态不允许恢复会话"
                     return@register resultMap
@@ -1689,6 +1700,9 @@ object AcpProxy {
 
                 val client = registry.getClient(targetGroupId)
                     ?: throw RuntimeException("client 不存在, groupId=$targetGroupId")
+                if (client.state == AbstractAcpClient.State.SLEEP) {
+                    registry.wakeIfSleeping(targetGroupId)
+                }
                 if (client.state != AbstractAcpClient.State.READY) {
                     log.info("定时任务跳过：client 忙碌, robot={}, state={}",
                         robotName, client.state)
@@ -1779,8 +1793,15 @@ object AcpProxy {
             executor.scheduleWithFixedDelay({
                 val now = System.currentTimeMillis()
                 var mainRotated = 0
+                var mainSlept = 0
                 registry.snapshotClients().forEach { (groupId, observed) ->
                     try {
+                        val sleepConfig = observed.robotParam?.autoSleep
+                        if (sleepConfig != null && sleepConfig.isEnabled
+                            && observed.sleepIfIdle(now, TimeUnit.MINUTES.toMillis(
+                                sleepConfig.idleMinutes.toLong()))) {
+                            mainSlept++
+                        }
                         val config = observed.robotParam?.autoNewSession
                         if (config == null || !config.isEnabled) {
                             autoNewSessionLastChecks.remove(groupId)
@@ -1795,6 +1816,13 @@ object AcpProxy {
                             return@forEach
                         }
                         val idleMillis = TimeUnit.MINUTES.toMillis(config.idleMinutes.toLong())
+                        if (observed.state == AbstractAcpClient.State.SLEEP) {
+                            if (observed.hasSessionMessages()
+                                && now - observed.lastMessageAt >= idleMillis) {
+                                observed.markNewSessionOnWake()
+                            }
+                            return@forEach
+                        }
                         val replacement = mainSessionService.replaceIdleIfCurrent(
                             groupId, observed, now, idleMillis
                         ) { newClient ->
@@ -1810,9 +1838,10 @@ object AcpProxy {
                         log.warn("MAIN 空闲会话自动轮转失败, groupId={}", groupId, e)
                     }
                 }
+                val teamSlept = teamManager?.sleepIdleClients(now) ?: 0
                 val teamRotated = teamManager?.rotateIdleSessions(now) ?: 0
-                log.info("自动新建 session 检查完成, mainRotated={}, teamRotated={}",
-                    mainRotated, teamRotated)
+                log.info("ACP 空闲检查完成, mainSlept={}, teamSlept={}, mainRotated={}, teamRotated={}",
+                    mainSlept, teamSlept, mainRotated, teamRotated)
             }, 1L, 1L, TimeUnit.MINUTES)
         }
         log.info("实例级自动新建 session 检查器已启动")
@@ -2118,6 +2147,9 @@ object AcpProxy {
             }
             val current = registry.getClient(target.groupId)
                 ?: return rejectedGatewayResult("TARGET_UNAVAILABLE", "Agent target is unavailable")
+            if (current.state == AbstractAcpClient.State.SLEEP) {
+                registry.wakeIfSleeping(target.groupId)
+            }
             if (!target.matches(current.clientIdentity) ||
                 current.state != AbstractAcpClient.State.READY) {
                 return rejectedGatewayResult("REJECTED_STATE", "Agent target is not READY")
@@ -2236,6 +2268,8 @@ object AcpProxy {
     fun reloadChannel(previousChannelId: String, config: ChannelConfig?) {
         channelManager?.reloadChannel(previousChannelId, config)
             ?: throw IllegalStateException("channel service is not running")
+        registry.snapshotClients().values.forEach { it.requestAcpHarnessReinjection() }
+        teamManager?.requestAcpHarnessReinjectionForAllClients()
     }
 
     private fun ensureShutdownHook() {

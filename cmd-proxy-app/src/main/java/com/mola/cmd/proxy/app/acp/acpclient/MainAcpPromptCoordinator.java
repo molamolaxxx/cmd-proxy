@@ -98,7 +98,8 @@ final class MainAcpPromptCoordinator {
 
     PromptCommandResult cancel(ClientPort client) {
         AbstractAcpClient.State state = client.state();
-        if (state == AbstractAcpClient.State.READY) {
+        if (state == AbstractAcpClient.State.READY
+                || state == AbstractAcpClient.State.SLEEP) {
             return PromptCommandResult.accepted("NOOP", "当前会话已就绪，无需取消");
         }
         if (state != AbstractAcpClient.State.BUSY) {

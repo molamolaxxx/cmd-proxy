@@ -50,6 +50,11 @@ public final class CompositeAcpResponseListener implements AcpResponseListener {
     @Override public void onTaskEvent(JsonObject payload) {
         call(() -> primary.onTaskEvent(payload)); call(() -> projection.onTaskEvent(payload));
     }
+    @Override public void onLifecycleEvent(String type, String from, String to,
+                                           long durationMillis, boolean newSession) {
+        call(() -> primary.onLifecycleEvent(type, from, to, durationMillis, newSession));
+        call(() -> projection.onLifecycleEvent(type, from, to, durationMillis, newSession));
+    }
     @Override public void onComplete(String response) {
         call(() -> primary.onComplete(response)); call(() -> projection.onComplete(response));
     }

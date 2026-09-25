@@ -261,6 +261,16 @@ public final class TeamManager implements AutoCloseable {
         return Collections.unmodifiableList(result);
     }
 
+    /** Makes changed external-channel contacts visible without recreating Team sessions. */
+    public void requestAcpHarnessReinjectionForAllClients() {
+        for (TeamDefinition definition : snapshotDefinitions()) {
+            for (TeamMemberDefinition member : definition.getMembers()) {
+                clientRegistry.get(definition.getTeamId(), member.getTeamMemberId())
+                        .ifPresent(AcpClient::requestAcpHarnessReinjection);
+            }
+        }
+    }
+
     public TeamCommandResult create(TeamCreateCommand command, String transportGroup) {
         String requestId = command == null ? "" : command.getRequestId();
         try {
@@ -702,8 +712,10 @@ public final class TeamManager implements AutoCloseable {
                         boolean failedWithoutClient = member.getState() == TeamMemberState.ERROR
                                 && client == null;
                         if (!failedWithoutClient && (member.getState() != TeamMemberState.READY
+                                && member.getState() != TeamMemberState.SLEEP
                                 || client == null
-                                || client.getState() != AbstractAcpClient.State.READY)) {
+                                || client.getState() != AbstractAcpClient.State.READY
+                                && client.getState() != AbstractAcpClient.State.SLEEP)) {
                             return TeamCommandResult.error(requestId, TeamErrorCode.MEMBER_BUSY,
                                     "Every active Team member must be READY");
                         }
@@ -1053,6 +1065,16 @@ public final class TeamManager implements AutoCloseable {
             }
             AcpClient old = clientRegistry.get(
                     team.getTeamId(), member.getTeamMemberId()).orElse(null);
+            if (old != null && member.getState() == TeamMemberState.SLEEP
+                    && old.getState() == AbstractAcpClient.State.SLEEP) {
+                publishMemberState(runtime, member.getTeamMemberId(),
+                        TeamMemberState.STARTING, null);
+                old.wakeIfSleeping();
+                publishMemberState(runtime, member.getTeamMemberId(),
+                        TeamMemberState.READY, null);
+                team = runtime.getDefinition();
+                member = findMember(team, owner.getTeamMemberId());
+            }
             String mismatchKey = scheduleMismatchKey(
                     team.getTeamId(), member.getTeamMemberId());
             if (member.getState()
@@ -1259,6 +1281,12 @@ public final class TeamManager implements AutoCloseable {
             // 与 delete/session replace 使用同一屏障；锁内重查，避免检查后进入 DELETING。
             route = requireMemberRoute(command, false);
             AcpClient client = requireCancellableClient(route);
+            if (client.getState() == AbstractAcpClient.State.SLEEP) {
+                return TeamCommandResult.success(requestId, "NOOP",
+                        "Team member is sleeping and has no active prompt",
+                        route.runtime.getDefinition().getVersion(),
+                        memberData(route.runtime, route.member, client));
+            }
             client.cancel();
             return TeamCommandResult.success(requestId, "OK",
                     "Team prompt cancellation sent", route.runtime.getDefinition().getVersion(),
@@ -1284,7 +1312,12 @@ public final class TeamManager implements AutoCloseable {
         }
         route.runtime.getOperationLock().lock();
         try {
-            AcpClient client = requireReadyClient(route);
+            AcpClient client = requireExistingClient(route);
+            if (client.getState() != AbstractAcpClient.State.READY
+                    && client.getState() != AbstractAcpClient.State.SLEEP) {
+                return TeamCommandResult.error(requestId, TeamErrorCode.MEMBER_BUSY,
+                        "Team member memory cannot be organized in the current state");
+            }
             boolean triggered = memoryDreamTrigger.test(
                     route.member.getSourceGroupId(), client.getWorkspacePath());
             if (!triggered) {
@@ -2028,6 +2061,44 @@ public final class TeamManager implements AutoCloseable {
         }
     }
 
+    /** Sleeps idle Team member clients under the same lock as message admission. */
+    public int sleepIdleClients(long nowMillis) {
+        if (closed.get()) return 0;
+        int slept = 0;
+        for (TeamDefinition snapshot : snapshotDefinitions()) {
+            TeamRuntime runtime = teams.get(snapshot.getTeamId());
+            if (runtime == null) continue;
+            runtime.getOperationLock().lock();
+            try {
+                TeamDefinition team = runtime.getDefinition();
+                if (!runtime.isAcceptingRequests() || team.getState() != TeamState.READY
+                        || !grantsActive(team)) continue;
+                for (TeamMemberDefinition member : team.getMembers()) {
+                    if (member.getState() != TeamMemberState.READY) continue;
+                    AcpClient client = clientRegistry.get(
+                            team.getTeamId(), member.getTeamMemberId()).orElse(null);
+                    com.mola.cmd.proxy.app.acp.AutoSleepConfig config = client == null
+                            || client.getRobotParam() == null
+                            ? null : client.getRobotParam().getAutoSleep();
+                    if (config == null || !config.isEnabled()) continue;
+                    long idleMillis = TimeUnit.MINUTES.toMillis(config.getIdleMinutes());
+                    if (client.sleepIfIdle(nowMillis, idleMillis)) {
+                        publishMemberState(runtime, member.getTeamMemberId(),
+                                TeamMemberState.SLEEP, null);
+                        slept++;
+                        logger.info("Team member 已进入睡眠, teamId={}, memberId={}, sessionId={}",
+                                team.getTeamId(), member.getTeamMemberId(), client.getSessionId());
+                    }
+                }
+            } catch (Exception e) {
+                logger.warn("Team member 自动睡眠失败, teamId={}", snapshot.getTeamId(), e);
+            } finally {
+                runtime.getOperationLock().unlock();
+            }
+        }
+        return slept;
+    }
+
     /** Rotates idle Team member sessions under the same operation lock as manual/scheduled work. */
     public int rotateIdleSessions(long nowMillis) {
         if (closed.get() || startupCoordinator == null) return 0;
@@ -2041,7 +2112,8 @@ public final class TeamManager implements AutoCloseable {
                 if (!runtime.isAcceptingRequests() || team.getState() != TeamState.READY
                         || !grantsActive(team)) continue;
                 for (TeamMemberDefinition member : team.getMembers()) {
-                    if (member.getState() != TeamMemberState.READY) continue;
+                    if (member.getState() != TeamMemberState.READY
+                            && member.getState() != TeamMemberState.SLEEP) continue;
                     AcpClient old = clientRegistry.get(
                             team.getTeamId(), member.getTeamMemberId()).orElse(null);
                     String checkKey = team.getTeamId() + ":" + member.getTeamMemberId();
@@ -2059,6 +2131,13 @@ public final class TeamManager implements AutoCloseable {
                             || !autoNewSessionLastChecks.replace(
                             checkKey, lastCheck, nowMillis)) continue;
                     long idleMillis = TimeUnit.MINUTES.toMillis(config.getIdleMinutes());
+                    if (old.getState() == AbstractAcpClient.State.SLEEP) {
+                        if (old.hasSessionMessages()
+                                && nowMillis - old.getLastMessageAt() >= idleMillis) {
+                            old.markNewSessionOnWake();
+                        }
+                        continue;
+                    }
                     if (!old.tryReserveIdleForAutoNewSession(nowMillis, idleMillis)) continue;
 
                     publishMemberState(runtime, member.getTeamMemberId(),
@@ -2092,6 +2171,19 @@ public final class TeamManager implements AutoCloseable {
             }
         }
         return rotated;
+    }
+
+    /**
+     * Publishes a sleeping member's deferred new-session rotation so the UI can
+     * resync the member session identity after wake. Unlike the idle rotation
+     * path this runs while the member turn is still in flight, so it only emits
+     * the projection event and never mutates member/client state.
+     */
+    public void onMemberSessionRotated(String teamId, String memberId,
+                                       String oldSessionId, String newSessionId) {
+        TeamRuntime runtime = teams.get(teamId);
+        if (runtime == null || closed.get()) return;
+        publishMemberSessionChanged(runtime, memberId, oldSessionId, newSessionId, "AUTO_IDLE");
     }
 
     public TeamCommandResult restoreSession(String requestId, TeamMemberCommand command) {
@@ -2854,9 +2946,20 @@ public final class TeamManager implements AutoCloseable {
     private AcpClient requireReadyClient(MemberRoute route)
             throws MemberRouteException {
         AcpClient client = requireExistingClient(route);
-        if (route.member.getState()
-                != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.READY
-                || client.getState() != AbstractAcpClient.State.READY) {
+        if (route.member.getState() == TeamMemberState.SLEEP
+                && client.getState() == AbstractAcpClient.State.SLEEP) {
+            try {
+                publishMemberState(route.runtime, route.member.getTeamMemberId(),
+                        TeamMemberState.STARTING, null);
+                client.wakeIfSleeping();
+                publishMemberState(route.runtime, route.member.getTeamMemberId(),
+                        TeamMemberState.READY, null);
+            } catch (Exception e) {
+                throw new MemberRouteException(
+                        TeamErrorCode.CLIENT_START_FAILED, "唤醒 Team member 失败: " + safeMessage(e));
+            }
+        }
+        if (client.getState() != AbstractAcpClient.State.READY) {
             throw new MemberRouteException(
                     TeamErrorCode.MEMBER_BUSY, "Team member is not READY");
         }
@@ -2873,6 +2976,7 @@ public final class TeamManager implements AutoCloseable {
         com.mola.cmd.proxy.app.acp.team.model.TeamMemberState memberState =
                 route.member.getState();
         if (memberState != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.READY
+                && memberState != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.SLEEP
                 && memberState != com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.BUSY) {
             TeamErrorCode code = memberState
                     == com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.STARTING
@@ -2883,6 +2987,7 @@ public final class TeamManager implements AutoCloseable {
         AcpClient client = requireExistingClient(route);
         AbstractAcpClient.State clientState = client.getState();
         if (clientState != AbstractAcpClient.State.READY
+                && clientState != AbstractAcpClient.State.SLEEP
                 && clientState != AbstractAcpClient.State.BUSY) {
             TeamErrorCode code = clientState == AbstractAcpClient.State.CREATED
                     || clientState == AbstractAcpClient.State.STARTING

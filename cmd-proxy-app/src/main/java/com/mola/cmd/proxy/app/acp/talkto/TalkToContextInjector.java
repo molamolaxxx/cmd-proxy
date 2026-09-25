@@ -6,6 +6,7 @@ import com.mola.cmd.proxy.app.acp.talkto.model.ExternalTalkToContact;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -52,10 +53,9 @@ public class TalkToContextInjector {
                 .append("请统一处理，不要为每条消息分别发送确认。\n\n");
         appendRuntimeConstraints(sb);
 
-        String firstContactName = null;
-        boolean hasContacts = false;
+        boolean hasAgentContacts = false;
         if (contacts != null && !contacts.isEmpty()) {
-            sb.append("你的团队成员（仅供参考，你也可以向未列出的 Agent 发送消息）：\n");
+            sb.append("可联系的 Agent（仅供参考，你也可以向未列出的 Agent 发送消息）：\n");
             for (ContactRef contact : contacts) {
                 if (contact.getName() == null || contact.getName().isEmpty()) continue;
                 if (contact.getName().equals(selfName)) continue;
@@ -66,8 +66,7 @@ public class TalkToContextInjector {
                         sb.append(": ").append(contact.getRemark());
                     }
                     sb.append("\n");
-                    if (firstContactName == null) firstContactName = contact.getName();
-                    hasContacts = true;
+                    hasAgentContacts = true;
                 } else {
                     if (!robotRegistry.containsKey(contact.getName())) {
                         logger.warn("通讯录引用 '{}' 在 robot 注册表中不存在，跳过", contact.getName());
@@ -80,45 +79,63 @@ public class TalkToContextInjector {
                         sb.append(": ").append(description);
                     }
                     sb.append("\n");
-                    if (firstContactName == null) firstContactName = contact.getName();
-                    hasContacts = true;
+                    hasAgentContacts = true;
                 }
             }
         }
 
-        if (externalContactProvider != null && groupId != null) {
-            List<ExternalTalkToContact> externalContacts =
-                    externalContactProvider.contactsForGroup(groupId);
-            if (externalContacts != null) {
-                for (ExternalTalkToContact contact : externalContacts) {
-                    if (contact == null || contact.getTarget() == null
-                            || contact.getTarget().trim().isEmpty()) continue;
-                    if (!hasContacts) {
-                        sb.append("你的通讯录成员：\n");
-                    }
-                    sb.append("- ").append(contact.getDisplayName())
-                            .append("（target: ").append(contact.getTarget()).append("）");
-                    if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
-                        sb.append(": ").append(contact.getRemark());
-                    }
-                    sb.append("\n");
-                    if (firstContactName == null) firstContactName = contact.getTarget();
-                    hasContacts = true;
-                }
-            }
-        }
-
-        if (hasContacts) {
-            sb.append("\n");
-            sb.append("发送消息时直接调用 talk_to MCP 工具，并从上方通讯录选择准确 target。\n");
+        if (hasAgentContacts) {
+            sb.append("\n发送 Agent 消息时直接调用 talk_to MCP 工具，并使用准确的 Agent target。\n");
         } else {
-            sb.append("你的通讯录为空，但其他已注册的 Agent 仍可能通过 ACP harness 向你发送消息，这是正常的系统行为。\n");
-            sb.append("收到消息时请正常阅读并按需处理。\n\n");
-            sb.append("回复时调用 talk_to MCP 工具。\n");
-            sb.append("注意：target 必须使用来信中标注的发送者名称。\n");
+            sb.append("当前未配置 Agent 联系人，但其他已注册的 Agent 仍可能向你发送消息。\n");
+            sb.append("回复 Agent 来信时调用 talk_to，并使用来信中标注的发送者名称。\n");
         }
         sb.append("</agent-team>\n");
+
+        List<ExternalTalkToContact> externalContacts = java.util.Collections.emptyList();
+        if (externalContactProvider != null && groupId != null) {
+            List<ExternalTalkToContact> provided =
+                    externalContactProvider.contactsForGroup(groupId);
+            if (provided != null) externalContacts = provided;
+        }
+        appendExternalChannelContext(sb, externalContacts);
         return sb.toString();
+    }
+
+    protected static void appendExternalChannelContext(
+            StringBuilder sb, List<ExternalTalkToContact> contacts) {
+        sb.append("\n<external-channel>\n");
+        sb.append("外部信道消息通过 talk_to 工具发送。\n\n");
+        sb.append("回复当前来信时，将 target 设为“回复”，例如：\n");
+        sb.append("{\"target\":\"回复\",\"content\":\"处理结果\"}\n\n");
+        List<ExternalTalkToContact> usableContacts = new ArrayList<>();
+        if (contacts != null) {
+            for (ExternalTalkToContact contact : contacts) {
+                if (contact != null && contact.getTarget() != null
+                        && !contact.getTarget().trim().isEmpty()) {
+                    usableContacts.add(contact);
+                }
+            }
+        }
+        if (!usableContacts.isEmpty()) {
+            sb.append("可主动通知的目标：\n");
+            for (ExternalTalkToContact contact : usableContacts) {
+                sb.append("- ").append(contact.getDisplayName())
+                        .append("（target: ").append(contact.getTarget()).append("）");
+                if (contact.getRemark() != null && !contact.getRemark().isEmpty()) {
+                    sb.append(": ").append(contact.getRemark());
+                }
+                sb.append("\n");
+            }
+            String exampleTarget = usableContacts.get(0).getTarget().trim();
+            sb.append("\n只有用户明确要求通知其他人员或群聊时，才可选择上方对应 target。例如：\n")
+                    .append("{\"target\":\"").append(exampleTarget)
+                    .append("\",\"content\":\"通知内容\"}\n");
+            sb.append("必须使用列表中完整、准确的 target，禁止猜测或自行拼接。\n");
+        } else {
+            sb.append("当前未配置主动通知目标。\n");
+        }
+        sb.append("</external-channel>\n");
     }
 
     /**

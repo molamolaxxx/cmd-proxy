@@ -16,6 +16,9 @@ public class TalkToMessagePromptTest {
 
         assertTrue(prompt.contains("talk_to MCP 工具"));
         assertTrue(prompt.contains("Code Chat Dev"));
+        assertFalse(prompt.contains("收到消息不代表必须回复"));
+        assertFalse(prompt.contains("最终结果默认结束通信链"));
+        assertFalse(prompt.contains("工具调用结果会作为本轮工具返回值"));
         assertFalse(prompt.contains("\"action\""));
         assertFalse(prompt.contains("输出 JSON 后立即结束回复"));
         assertFalse(prompt.contains("_depth"));

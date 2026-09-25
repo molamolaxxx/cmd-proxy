@@ -28,6 +28,7 @@ public enum TeamEventType {
     SUB_AGENT_EVENT,
     COMPACTION_EVENT,
     TASK_EVENT,
+    LIFECYCLE_EVENT,
     TEAM_DELETED,
     TEAM_SNAPSHOT_READY
 }
