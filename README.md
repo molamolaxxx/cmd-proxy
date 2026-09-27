@@ -342,11 +342,31 @@ Starweave 以一个常驻 MCP Server 的名义（名称 `acp-harness-runtime`）
 - **Maven 3.6+**
 - 使用 npm 系引擎（OpenCode / Claude / Codex / DeepSeek Harness）时需 **Node.js 22+**
 
-### 1. 构建
+### 1. 先构建依赖：my-rpc
+
+Starweave 依赖同作者的 RPC 框架 [my-rpc](https://github.com/molamolaxxx/my-rpc)（`com.mola:rpc-core`）。
+该依赖**未发布到 Maven 中央仓库**，所以请先把它安装到本地 Maven 仓库，否则后续构建会因无法解析
+`com.mola:rpc-core` 而失败：
 
 ```bash
-git clone git@github.com:molamolaxxx/cmd-proxy.git
-cd cmd-proxy
+# SSH（已配置 GitHub 密钥）
+git clone git@github.com:molamolaxxx/my-rpc.git
+# 或 HTTPS
+git clone https://github.com/molamolaxxx/my-rpc.git
+
+cd my-rpc
+mvn clean install -DskipTests
+```
+
+### 2. 构建 Starweave
+
+```bash
+# SSH（已配置 GitHub 密钥）
+git clone git@github.com:molamolaxxx/Starweave.git
+# 或 HTTPS
+git clone https://github.com/molamolaxxx/Starweave.git
+
+cd Starweave
 mvn clean package
 ```
 
@@ -356,7 +376,7 @@ mvn clean package
 cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar
 ```
 
-### 2. 启动
+### 3. 启动
 
 以 `acp` 模式运行，一条命令即可拉起整套 Starweave 运行时：
 
@@ -418,7 +438,7 @@ java -Dcmd.proxy.home=~/.starweave-dev \
 ========================================
 ```
 
-### 3. 配置并使用
+### 4. 配置并使用
 
 1. 打开控制台 → **智能体 → 添加智能体**，选择引擎、填写工作空间与名称。
 2. 在 **消息渠道** 里按需接入企业微信或开放任务接口。
