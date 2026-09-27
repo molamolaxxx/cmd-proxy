@@ -711,15 +711,12 @@ public class AcpClient extends AbstractAcpClient {
         acceptedPromptOptions.set(effectiveOptions);
         lastMessageAt.set(System.currentTimeMillis());
 
-        // 记录本轮新上传的图片路径（用于 inline image block）
-        Set<String> previousFiles = new HashSet<>(historyManager.getFileAbsolutePaths());
-        historyManager.saveFiles(sessionId, files);
-        historyManager.registerLocalFiles(localFiles);
+        // 直接使用本轮真实保存或注册的路径，避免同名附件被集合差值吞掉。
+        List<String> currentFilePaths = new ArrayList<>(historyManager.saveFiles(sessionId, files));
+        currentFilePaths.addAll(historyManager.registerLocalFiles(localFiles));
         Set<String> newImagePaths = new LinkedHashSet<>();
-        for (String path : historyManager.getFileAbsolutePaths()) {
-            if (!previousFiles.contains(path) && isImageFile(path)) {
-                newImagePaths.add(path);
-            }
+        for (String path : currentFilePaths) {
+            if (isImageFile(path)) newImagePaths.add(path);
         }
         List<String> attachmentNames = new ArrayList<>();
         if (files != null) {

@@ -12,7 +12,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.Assert.*;
@@ -185,6 +190,27 @@ public class ConversationHistoryManagerTest {
     }
 
     @Test
+    public void sameNamedAttachmentsAreStoredSeparatelyAcrossBatches() throws Exception {
+        Path root = temporaryFolder.newFolder("same-name-sessions").toPath();
+        ConversationHistoryManager manager = new ConversationHistoryManager(
+                AcpClientIdentity.main("group-files", "Robot Files", "Robot Files"), root);
+        String sessionId = "session-files";
+
+        List<String> firstBatch = manager.saveFiles(sessionId, Arrays.asList(
+                encodedFile("image.png", "first"),
+                encodedFile("image.png", "second")));
+        List<String> secondBatch = manager.saveFiles(sessionId,
+                Collections.singletonList(encodedFile("image.png", "third")));
+
+        assertEquals(Arrays.asList("image.png", "image-2.png"), fileNames(firstBatch));
+        assertEquals(Collections.singletonList("image-3.png"), fileNames(secondBatch));
+        assertEquals("first", readUtf8(firstBatch.get(0)));
+        assertEquals("second", readUtf8(firstBatch.get(1)));
+        assertEquals("third", readUtf8(secondBatch.get(0)));
+        assertEquals(3, manager.getFileAbsolutePaths().size());
+    }
+
+    @Test
     public void repeatedSessionDirectoryScansDoNotLeakFileDescriptors()
             throws Exception {
         Path procFds = Paths.get("/proc/self/fd");
@@ -219,6 +245,23 @@ public class ConversationHistoryManagerTest {
         manager.findLatestSessionId();
         manager.getFullHistory("session-0");
         manager.loadFilePaths("session-0");
+    }
+
+    private static Map<String, String> encodedFile(String name, String content) {
+        Map<String, String> file = new LinkedHashMap<>();
+        file.put(name, Base64.getEncoder().encodeToString(
+                content.getBytes(StandardCharsets.UTF_8)));
+        return file;
+    }
+
+    private static List<String> fileNames(List<String> paths) {
+        List<String> names = new java.util.ArrayList<>();
+        for (String path : paths) names.add(Paths.get(path).getFileName().toString());
+        return names;
+    }
+
+    private static String readUtf8(String path) throws Exception {
+        return new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8);
     }
 
     private static long openFileDescriptorCount(Path procFds) throws Exception {

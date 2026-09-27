@@ -334,7 +334,7 @@ public class StarweaveSessionManagerTest {
     }
 
     @Test
-    public void stagedUploadIsDeliveredToAcpSendAsSessionBoundFileContent()
+    public void sameNamedStagedUploadsAreBothDeliveredToAcpSend()
             throws Exception {
         FakeFactory factory = new FakeFactory();
         AcpClientRegistry registry = registry(factory);
@@ -351,22 +351,28 @@ public class StarweaveSessionManagerTest {
                 new StarweaveSessionEventStore(64), uploadStore);
 
         JSONObject opened = manager.open("Robot");
-        byte[] content = "attachment reaches ACP".getBytes(StandardCharsets.UTF_8);
-        JSONObject upload = manager.upload(opened.getString("groupId"),
+        byte[] firstContent = "first attachment reaches ACP".getBytes(StandardCharsets.UTF_8);
+        byte[] secondContent = "second attachment reaches ACP".getBytes(StandardCharsets.UTF_8);
+        JSONObject firstUpload = manager.upload(opened.getString("groupId"),
                 opened.getString("sessionId"), opened.getLongValue("generation"),
-                "proof.txt", Base64.getEncoder().encodeToString(content));
+                "proof.txt", Base64.getEncoder().encodeToString(firstContent));
+        JSONObject secondUpload = manager.upload(opened.getString("groupId"),
+                opened.getString("sessionId"), opened.getLongValue("generation"),
+                "proof.txt", Base64.getEncoder().encodeToString(secondContent));
 
         JSONObject sent = manager.send(opened.getString("groupId"), "inspect attachment",
                 opened.getString("sessionId"), opened.getLongValue("generation"),
-                "REJECT", java.util.Collections.singletonList(
-                        upload.getString("uploadId")));
+                "REJECT", java.util.Arrays.asList(
+                        firstUpload.getString("uploadId"), secondUpload.getString("uploadId")));
 
         assertTrue(sent.getBooleanValue("accepted"));
         assertEquals("inspect attachment", factory.lastCreated.sentMessage);
         assertNotNull(factory.lastCreated.sentFiles);
-        assertEquals(1, factory.lastCreated.sentFiles.size());
-        String encoded = factory.lastCreated.sentFiles.get(0).get("proof.txt");
-        assertArrayEquals(content, Base64.getDecoder().decode(encoded));
+        assertEquals(2, factory.lastCreated.sentFiles.size());
+        assertArrayEquals(firstContent, Base64.getDecoder().decode(
+                factory.lastCreated.sentFiles.get(0).get("proof.txt")));
+        assertArrayEquals(secondContent, Base64.getDecoder().decode(
+                factory.lastCreated.sentFiles.get(1).get("proof.txt")));
         registry.closeAllForShutdown();
     }
 

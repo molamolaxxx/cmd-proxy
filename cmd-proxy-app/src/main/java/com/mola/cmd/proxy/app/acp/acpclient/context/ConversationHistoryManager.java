@@ -9,10 +9,12 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Map;
@@ -256,9 +258,13 @@ public class ConversationHistoryManager {
      *
      * @param sessionId 当前会话 ID
      * @param files     文件列表，每个 Map 的 key 为文件名，value 为下载URL或base64内容
+     * @return 本次实际保存的绝对路径；同名文件会分配不冲突的存储名
      */
-    public void saveFiles(String sessionId, List<Map<String, String>> files) {
-        if (files == null || files.isEmpty() || sessionId == null) return;
+    public List<String> saveFiles(String sessionId, List<Map<String, String>> files) {
+        if (files == null || files.isEmpty() || sessionId == null) {
+            return Collections.emptyList();
+        }
+        List<String> savedPaths = new ArrayList<>();
         try {
             Path filesDir = sessionBaseDir.resolve(sessionId).resolve("files");
             Files.createDirectories(filesDir);
@@ -267,7 +273,6 @@ public class ConversationHistoryManager {
                     String fileName = entry.getKey();
                     String content = entry.getValue();
                     if (fileName == null || fileName.isEmpty() || content == null) continue;
-                    Path filePath = filesDir.resolve(fileName);
                     byte[] fileBytes;
                     if (content.startsWith("http://") || content.startsWith("https://")) {
                         fileBytes = downloadFile(content);
@@ -275,15 +280,57 @@ public class ConversationHistoryManager {
                         fileBytes = Base64.getDecoder().decode(content);
                     }
                     if (fileBytes != null) {
-                        Files.write(filePath, fileBytes);
-                        fileAbsolutePaths.add(filePath.toAbsolutePath().toString());
-                        logger.info("文件已保存: {}", filePath.toAbsolutePath());
+                        Path filePath = writeUniqueFile(filesDir, fileName, fileBytes);
+                        String absolutePath = filePath.toAbsolutePath().normalize().toString();
+                        fileAbsolutePaths.add(absolutePath);
+                        savedPaths.add(absolutePath);
+                        logger.info("文件已保存: {}", absolutePath);
                     }
                 }
             }
         } catch (IOException e) {
             logger.error("文件保存失败, sessionId={}", sessionId, e);
         }
+        return Collections.unmodifiableList(savedPaths);
+    }
+
+    private static Path writeUniqueFile(Path directory, String originalName,
+                                        byte[] content) throws IOException {
+        String name = safeStorageFileName(originalName);
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String extension = dot > 0 ? name.substring(dot) : "";
+        int suffix = 1;
+        while (true) {
+            String candidateName = suffix == 1
+                    ? name : base + "-" + suffix + extension;
+            Path candidate = directory.resolve(candidateName).normalize();
+            if (!directory.equals(candidate.getParent())) {
+                throw new IOException("invalid attachment filename");
+            }
+            try {
+                return Files.write(candidate, content, StandardOpenOption.CREATE_NEW);
+            } catch (FileAlreadyExistsException collision) {
+                suffix++;
+            }
+        }
+    }
+
+    private static String safeStorageFileName(String input) {
+        String name = input.replace('\\', '/');
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) name = name.substring(slash + 1);
+        StringBuilder cleaned = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char value = name.charAt(i);
+            cleaned.append(value < 32 || "<>:\"/\\|?*".indexOf(value) >= 0
+                    ? '_' : value);
+        }
+        name = cleaned.toString().trim();
+        if (name.isEmpty() || ".".equals(name) || "..".equals(name)) {
+            name = "attachment";
+        }
+        return name.length() <= 160 ? name : name.substring(0, 160);
     }
 
     private byte[] downloadFile(String url) {
@@ -354,13 +401,19 @@ public class ConversationHistoryManager {
     }
 
     /** Registers files that were already safely staged by an external channel. */
-    public void registerLocalFiles(Collection<String> localFiles) {
-        if (localFiles == null) return;
+    public List<String> registerLocalFiles(Collection<String> localFiles) {
+        if (localFiles == null) return Collections.emptyList();
+        List<String> registered = new ArrayList<>();
         for (String value : localFiles) {
             if (value == null || value.trim().isEmpty()) continue;
             Path path = Paths.get(value).toAbsolutePath().normalize();
-            if (Files.isRegularFile(path)) fileAbsolutePaths.add(path.toString());
+            if (Files.isRegularFile(path)) {
+                String absolutePath = path.toString();
+                fileAbsolutePaths.add(absolutePath);
+                registered.add(absolutePath);
+            }
         }
+        return Collections.unmodifiableList(registered);
     }
 
     // ==================== 落盘 ====================

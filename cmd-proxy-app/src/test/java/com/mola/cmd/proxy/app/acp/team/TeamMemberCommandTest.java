@@ -37,11 +37,12 @@ public class TeamMemberCommandTest {
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     @Test
-    public void sendValidatesRouteAndPreservesFilenameToContentFilesContract()
+    public void sendPreservesMultipleSameNamedAttachmentsForMemberClient()
             throws Exception {
         Fixture fixture = fixture();
         String payload = basePayload()
-                .replace("}", ",\"message\":\"hello\",\"files\":[{\"a.png\":\"aGk=\"}]}");
+                .replace("}", ",\"message\":\"hello\",\"files\":["
+                        + "{\"a.png\":\"Zmlyc3Q=\"},{\"a.png\":\"c2Vjb25k\"}]}");
 
         Map<String, String> result =
                 fixture.handler.handleSend("rpc-send", new String[]{payload});
@@ -49,7 +50,9 @@ public class TeamMemberCommandTest {
         assertEquals("true", result.get("accepted"));
         assertEquals("QUEUED", result.get("code"));
         assertEquals("hello", fixture.current.get().message);
-        assertEquals("aGk=", fixture.current.get().files.get(0).get("a.png"));
+        assertEquals(2, fixture.current.get().files.size());
+        assertEquals("Zmlyc3Q=", fixture.current.get().files.get(0).get("a.png"));
+        assertEquals("c2Vjb25k", fixture.current.get().files.get(1).get("a.png"));
         assertEquals(TeamMemberState.BUSY,
                 fixture.manager.getRuntime("team-1").get().getDefinition()
                         .getMembers().get(0).getState());
