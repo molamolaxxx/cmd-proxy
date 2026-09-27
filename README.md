@@ -358,13 +358,55 @@ cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar
 
 ### 2. 启动
 
+以 `acp` 模式运行，一条命令即可拉起整套 Starweave 运行时：
+
 ```bash
-# ACP 模式：托管智能体、团队、渠道与控制台（推荐）
+java -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar acp
+```
+
+#### 常用启动参数
+
+数据根目录、环境标识与端口都支持**环境变量**或 **JVM 系统属性**两种写法，二者等价：
+
+| 用途 | 环境变量 | JVM 参数 | 默认值 |
+|---|---|---|---|
+| 数据根目录（环境） | `CMD_PROXY_HOME` | `-Dcmd.proxy.home` | `~/.cmd-proxy` |
+| 环境标识 | `CMD_PROXY_INSTANCE_ID` | `-Dcmd.proxy.instanceId` | 首次自动生成并持久化 |
+| 本地 RPC 端口 | `CMD_PROXY_RPC_PORT` | `-Dcmd.proxy.rpcPort` | `10020` |
+| 控制台端口 | `CMD_PROXY_CONFIG_UI_PORT` | `-Dcmd.proxy.configUiPort` | `10528`（仅首次初始化生效，之后由配置文件决定） |
+
+#### 指定远端服务地址
+
+接入 MolaChat 网关时，可指定远端主机（支持 `--remote-host <host>` 与 `--remote-host=<host>` 两种写法）：
+
+```bash
+# 方式一：环境变量
+CMD_PROXY_REMOTE_HOST=106.54.193.10 \
+  java -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar acp
+
+# 方式二：启动参数
+java -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar \
+  acp --remote-host 106.54.193.10
+```
+
+#### 自定义数据目录与端口
+
+```bash
+# 把数据根目录换到自定义位置，并指定 RPC / 控制台端口
+CMD_PROXY_HOME=~/.starweave-dev \
+CMD_PROXY_RPC_PORT=10021 \
+CMD_PROXY_CONFIG_UI_PORT=10538 \
 java -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar acp
 
-# MCP 模式：以 MCP 代理身份运行
-java -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar mcp
+# 等价的 JVM 参数写法
+java -Dcmd.proxy.home=~/.starweave-dev \
+     -Dcmd.proxy.rpcPort=10021 \
+     -jar cmd-proxy-app/target/cmd-proxy-app-1.0.0-jar-with-dependencies.jar acp
 ```
+
+> 💡 同一台机器可并行运行**多套环境**：`CMD_PROXY_HOME` 隔离数据，端口各自独立，互不抢占。
+> 端口被占用时会自动漂移分配，实际监听端口会打印在启动日志中。`--remote-host` 只接受 IP 或主机名，
+> 不要携带协议、路径或端口。
 
 首次启动会生成配置文件并打印控制台地址：
 
@@ -417,7 +459,7 @@ cmd-proxy/
 ├── cmd-proxy-app/
 │   └── src/main/
 │       ├── kotlin/.../app/
-│       │   ├── Main.kt         # 进程入口：acp / mcp 两种模式
+│       │   ├── Main.kt         # 进程入口：启动 ACP 运行时
 │       │   ├── acp/            # ACP 核心：客户端、团队、TalkTo、记忆、调度…
 │       │   │   ├── acpclient/  #   ACP 客户端与多引擎 Provider
 │       │   │   ├── team/       #   Fast Team
