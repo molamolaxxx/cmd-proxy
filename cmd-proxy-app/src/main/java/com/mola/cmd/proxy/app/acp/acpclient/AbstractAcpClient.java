@@ -4,6 +4,7 @@ import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.KiroCliAgentProvider;
+import com.mola.cmd.proxy.app.acp.acpclient.model.AgentModelCatalog;
 import com.mola.cmd.proxy.app.acp.common.PathResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -616,6 +617,9 @@ public abstract class AbstractAcpClient implements Closeable {
         params.addProperty("protocolVersion", PROTOCOL_VERSION);
 
         JsonObject capabilities = new JsonObject();
+        JsonObject sessionCapabilities = new JsonObject();
+        sessionCapabilities.add("configOptions", new JsonObject());
+        capabilities.add("session", sessionCapabilities);
         params.add("clientCapabilities", capabilities);
 
         JsonObject clientInfo = new JsonObject();
@@ -709,6 +713,7 @@ public abstract class AbstractAcpClient implements Closeable {
                 if (resp.has("error")) {
                     throw new IOException("ACP JSON-RPC error: " + resp.get("error"));
                 }
+                AgentModelCatalog.getInstance().recordAcpResponse(robotParamRef, resp);
                 return resp;
             }
         }

@@ -2,10 +2,6 @@ package com.mola.cmd.proxy.app.acp.configui;
 
 import org.junit.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
-
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -530,6 +526,29 @@ public class ConfigUiLayoutContractTest {
     }
 
     @Test
+    public void exposesDynamicEditableModelCatalogForMainAndMemoryModels() throws Exception {
+        String html = loadConfigUi();
+
+        assertTrue(html.contains("id=\"dModel\"") && html.contains("id=\"dModelMenu\" role=\"listbox\""));
+        assertTrue(html.contains("id=\"dMemModel\"") && html.contains("id=\"dMemModelMenu\" role=\"listbox\""));
+        assertTrue(html.contains("role=\"combobox\" aria-autocomplete=\"list\""));
+        assertFalse(html.contains("id=\"dModelOptions\"") || html.contains("id=\"dMemModelOptions\""));
+        assertTrue(html.contains("id=\"modelRefreshBtn\""));
+        assertTrue(html.contains("title=\"刷新模型列表\" aria-label=\"刷新模型列表\""));
+        assertTrue(html.contains("aria-hidden=\"true\">refresh</span>"));
+        assertFalse(html.contains(">刷新模型</button>"));
+        assertTrue(html.contains("function openRobotModelMenu(inputId)"));
+        assertTrue(html.contains("function selectRobotModelOption(inputId,option)"));
+        assertTrue(html.contains("document.addEventListener('click'"));
+        assertTrue(html.contains("function loadRobotModels(force)"));
+        assertTrue(html.contains("function rememberRobotModels(robot)"));
+        assertTrue(html.contains("/api/provider-models"));
+        assertTrue(html.contains("与主模型共用实时目录和自定义历史"));
+        assertTrue(html.contains("留空则沿用主模型"));
+        assertTrue(html.contains("await rememberRobotModels(robot)"));
+    }
+
+    @Test
     public void exposesAlignedAgentResourceViewersWithSpecializedRendering() throws Exception {
         String html = loadConfigUi();
 
@@ -579,11 +598,6 @@ public class ConfigUiLayoutContractTest {
     }
 
     private String loadConfigUi() throws Exception {
-        InputStream input = getClass().getResourceAsStream("/configui/index.html");
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[4096];
-        int read;
-        while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
-        return new String(output.toByteArray(), StandardCharsets.UTF_8);
+        return ConfigUiTestResources.loadBundle();
     }
 }

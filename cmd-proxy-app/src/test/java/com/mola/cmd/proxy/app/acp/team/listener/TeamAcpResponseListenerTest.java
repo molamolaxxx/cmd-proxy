@@ -118,6 +118,41 @@ public class TeamAcpResponseListenerTest {
     }
 
     @Test
+    public void snapshotAndLiveProjectionShareIdentityAndErrorsEndPartialReply() throws Exception {
+        TeamMemberDefinition member = member("member-projection", 0);
+        TeamRuntime runtime = new TeamRuntime(TeamDefinition.creating(
+                "team-projection", "owner-1", "Team", "team-acp-instance",
+                "request-1", java.util.Collections.singletonList(member), 100L));
+        ConversationHistoryManager history = new ConversationHistoryManager(
+                AcpClientIdentity.team("team-acp-member-projection", "team-acp-instance",
+                        "team/team-projection/member-projection", "owner-1",
+                        "team-projection", "member-projection", "Source"),
+                temporary.newFolder("projection").toPath());
+        List<TeamEventEnvelope> events = new ArrayList<>();
+        TeamAcpResponseListener listener = new TeamAcpResponseListener(
+                runtime, member, events::add, TeamMemberStateObserver.NOOP, history);
+        listener.onLifecycleEvent("AGENT_WAKE", "SLEEP", "READY", 10, true);
+        ContextMessage wake = history.getUiHistory("s").get(0);
+        TeamEventEnvelope liveWake = events.stream()
+                .filter(event -> event.getType() == TeamEventType.LIFECYCLE_EVENT).findFirst().get();
+        assertEquals(wake.getEventData().get("messageId").getAsString(),
+                ((Map<?, ?>) liveWake.getData()).get("messageId"));
+        listener.onMessage("partial");
+        String firstId = history.getUiHistory("s").get(1).getMessageId();
+        listener.onError(new IllegalStateException("interrupted"));
+        listener.onMessage("next");
+        List<ContextMessage> snapshot = history.getUiHistory("s");
+        ContextMessage next = snapshot.get(snapshot.size() - 1);
+        assertNotEquals(firstId, next.getMessageId());
+        assertEquals("next", next.getContent());
+        TeamEventEnvelope liveNext = events.stream()
+                .filter(event -> event.getType() == TeamEventType.MESSAGE_UPDATED)
+                .reduce((first, second) -> second).get();
+        assertEquals(next.getMessageId(), ((Map<?, ?>) liveNext.getData()).get("messageId"));
+        assertEquals(next.getRevision(), ((Map<?, ?>) liveNext.getData()).get("revision"));
+    }
+
+    @Test
     public void authoritativeReadyWaitsForClientLifecycleTransition() {
         TeamMemberDefinition first = member("member-1", 0);
         TeamRuntime runtime = new TeamRuntime(TeamDefinition.creating(

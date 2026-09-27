@@ -270,7 +270,7 @@ public class StarweaveSessionManagerTest {
         String oldSession = opened.getString("sessionId");
         long oldGeneration = opened.getLongValue("generation");
         FakeClient client = (FakeClient) registry.getClient(groupId);
-        client.deferNewSessionOnWake();
+        client.sleepWithExpiredSession();
 
         JSONObject sent = manager.send(groupId, "after wake", oldSession,
                 oldGeneration, "REJECT");
@@ -434,7 +434,7 @@ public class StarweaveSessionManagerTest {
                 }, (groupId, client, robot) -> { }, index,
                 new StarweaveSessionEventStore(64));
 
-        JSONObject recovery = manager.recoverActiveSessions();
+        JSONObject recovery = manager.recoverActiveSessions(robotGroup::equals);
 
         assertEquals(2, recovery.getIntValue("attempted"));
         assertEquals(2, recovery.getIntValue("recoveredCount"));
@@ -442,6 +442,8 @@ public class StarweaveSessionManagerTest {
         assertNotNull(registry.getClient(robotGroup));
         assertNotNull(registry.getClient(secondGroup));
         assertNull(registry.getClient(deletedGroup));
+        assertEquals(AcpClient.State.SLEEP, registry.getClient(robotGroup).getState());
+        assertEquals(AcpClient.State.READY, registry.getClient(secondGroup).getState());
         assertEquals(2, factory.sequence.get());
         registry.closeAllForShutdown();
     }
@@ -556,9 +558,17 @@ public class StarweaveSessionManagerTest {
             setSessionId("session-wake-" + sequence + "-" + (++wakeRotations));
         }
 
-        private void deferNewSessionOnWake() {
+        private void sleepWithExpiredSession() throws Exception {
+            com.mola.cmd.proxy.app.acp.AutoNewSessionConfig config =
+                    new com.mola.cmd.proxy.app.acp.AutoNewSessionConfig();
+            config.setEnabled(true);
+            config.setIdleMinutes(1);
+            getRobotParam().setAutoNewSession(config);
+            java.lang.reflect.Field field = AcpClient.class.getDeclaredField("lastMessageAt");
+            field.setAccessible(true);
+            ((java.util.concurrent.atomic.AtomicLong) field.get(this))
+                    .set(System.currentTimeMillis() - 120_000L);
             state.set(State.SLEEP);
-            markNewSessionOnWake();
         }
 
         @Override

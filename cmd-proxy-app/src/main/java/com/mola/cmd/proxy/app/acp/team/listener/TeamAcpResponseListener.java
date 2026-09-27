@@ -75,6 +75,15 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
 
     @Override
     public void onMessage(String text) {
+        if (historyManager != null) {
+            com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage message =
+                    historyManager.appendUiAssistant(text);
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("messageId", message.getMessageId());
+            data.put("revision", message.getRevision());
+            data.put("content", message.getContent());
+            publish(TeamEventType.MESSAGE_UPDATED, data);
+        }
         renderer.onMessage(text);
     }
 
@@ -180,6 +189,7 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
 
     @Override
     public void onError(Exception error) {
+        if (historyManager != null) historyManager.finishUiAssistant();
         String message = error == null ? "unknown Team ACP error" : error.getMessage();
         TeamError teamError = TeamError.of(TeamErrorCode.INTERNAL_ERROR,
                 message == null || message.trim().isEmpty()
@@ -199,12 +209,26 @@ public final class TeamAcpResponseListener implements AcpResponseListener {
         if (!runtime.isAcceptingRequests()) {
             return;
         }
+        Map<String, Object> projected = new LinkedHashMap<>((Map<String, Object>) data);
+        for (TeamMemberDefinition member : runtime.getDefinition().getMembers()) {
+            if (teamMemberId.equals(member.getTeamMemberId())) projected.put("sessionId", member.getSessionId());
+        }
+        if (historyManager != null) projected.put("structuredMessages", true);
         sink.publish(TeamEventEnvelope.next(
-                runtime, teamMemberId, acpClientId, type, data));
+                runtime, teamMemberId, acpClientId, type, projected));
+    }
+
+    private final java.util.concurrent.atomic.AtomicLong revision =
+            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+    private long nextRevision() {
+        return revision.updateAndGet(previous -> Math.max(previous + 1, System.currentTimeMillis()));
     }
 
     private void persist(TeamEventType type, Map<String, Object> data) {
         if (historyManager == null || !runtime.isAcceptingRequests()) return;
+        data.put("messageId", type == TeamEventType.TOOL_CALL
+                ? "tool:" + data.get("toolCallId") : java.util.UUID.randomUUID().toString());
+        data.put("revision", nextRevision());
         JsonObject value = new com.google.gson.Gson().toJsonTree(data).getAsJsonObject();
         historyManager.addEventMessage(type.name(), value);
     }

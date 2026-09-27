@@ -57,7 +57,8 @@ public final class StarweaveRequestDeduplicator {
                 return result;
             } catch (Exception e) {
                 entry.result.completeExceptionally(e);
-                entries.remove(key, entry);
+                // A timeout can follow a committed mutation. Keep its outcome so that
+                // retrying the same request cannot execute the mutation a second time.
                 throw e;
             }
         }

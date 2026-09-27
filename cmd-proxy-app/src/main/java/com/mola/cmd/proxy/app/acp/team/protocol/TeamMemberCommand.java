@@ -4,6 +4,8 @@ import java.util.List;
 import java.util.Map;
 
 public final class TeamMemberCommand {
+    private String clientMessageId;
+    public String getClientMessageId() { return clientMessageId; }
 
     private String schemaVersion;
     private String ownerChatterId;

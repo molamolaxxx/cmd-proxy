@@ -2,10 +2,6 @@ package com.mola.cmd.proxy.app.acp.configui;
 
 import org.junit.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
-
 import static org.junit.Assert.assertTrue;
 
 public class AgentGatewayUiContractTest {
@@ -26,12 +22,6 @@ public class AgentGatewayUiContractTest {
     }
 
     private String load() throws Exception {
-        try (InputStream input = getClass().getResourceAsStream("/configui/index.html")) {
-            if (input == null) throw new IllegalStateException("configui/index.html missing");
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096]; int read;
-            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
-            return new String(output.toByteArray(), StandardCharsets.UTF_8);
-        }
+        return ConfigUiTestResources.loadBundle();
     }
 }

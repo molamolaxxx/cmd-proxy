@@ -15,8 +15,8 @@ import java.util.Map;
  * <p>
  * 在主 Agent 的 sendPrompt() 中，将通讯录信息和 talkTo 能力描述
  * 注入到 prompt 前缀中，让 LLM 知道可以联系哪些 robot。
- * <p>
- * 注入条件：robot 配置了 contacts（非空）时才注入。
+ * <p>Agent 团队规则始终注入；外部信道规则仅在当前 owner 绑定了
+ * 已启用信道时注入。
  */
 public class TalkToContextInjector {
 
@@ -93,21 +93,25 @@ public class TalkToContextInjector {
         sb.append("</agent-team>\n");
 
         List<ExternalTalkToContact> externalContacts = java.util.Collections.emptyList();
+        boolean hasExternalChannel = false;
         if (externalContactProvider != null && groupId != null) {
+            hasExternalChannel = externalContactProvider.hasEnabledChannelForGroup(groupId);
             List<ExternalTalkToContact> provided =
                     externalContactProvider.contactsForGroup(groupId);
             if (provided != null) externalContacts = provided;
         }
-        appendExternalChannelContext(sb, externalContacts);
+        if (hasExternalChannel) appendExternalChannelContext(sb, externalContacts);
         return sb.toString();
     }
 
     protected static void appendExternalChannelContext(
             StringBuilder sb, List<ExternalTalkToContact> contacts) {
         sb.append("\n<external-channel>\n");
-        sb.append("外部信道消息通过 talk_to 工具发送。\n\n");
-        sb.append("回复当前来信时，将 target 设为“回复”，例如：\n");
-        sb.append("{\"target\":\"回复\",\"content\":\"处理结果\"}\n\n");
+        sb.append("外部信道连接企业微信等外部消息平台，用于与其中的人员或群聊通信；")
+                .append("发送消息使用 talk_to。\n\n");
+        sb.append("处理外部信道来信时，将 target 设为“回复”，例如：\n");
+        sb.append("{\"target\":\"回复\",\"content\":\"处理结果\"}\n");
+        sb.append("同一轮处理中，可按需多次调用“回复”。\n\n");
         List<ExternalTalkToContact> usableContacts = new ArrayList<>();
         if (contacts != null) {
             for (ExternalTalkToContact contact : contacts) {
@@ -147,9 +151,11 @@ public class TalkToContextInjector {
     protected static void appendRuntimeConstraints(StringBuilder sb) {
         sb.append("重要运行时约束：发出 talk_to 后，不要使用 Bash、PowerShell、Python 或其他脚本通过 wait、sleep、while 循环、轮询文件/日志/进程状态等方式等待对方回复。"
                 + "这类等待会占用当前 turn；在等待脚本结束前，已入队的 Agent 消息无法被处理。\n\n");
-        sb.append("通信约束：收到消息不代表必须回复。禁止发送“收到”、“好的”、“谢谢”、")
-                .append("“我会处理”等纯确认消息。只有在产生最终结果、新事实、")
-                .append("明确阻塞或必须回答问题时才回复；最终结果默认结束通信链。\n\n");
+        sb.append("Agent 间通信约束（仅适用于与其他 Agent 的通信）：收到其他 Agent 的消息不代表必须回复。")
+                .append("禁止向其他 Agent 发送“收到”、“好的”、“谢谢”、“我会处理”等纯确认消息，")
+                .append("除非发送方明确要求你确认收到或作答。")
+                .append("只有在产生最终结果、新事实、明确阻塞或必须回答问题时才回复；最终结果默认结束通信链。")
+                .append("对外部信道中真实用户的回复不受此约束。\n\n");
     }
 
 }

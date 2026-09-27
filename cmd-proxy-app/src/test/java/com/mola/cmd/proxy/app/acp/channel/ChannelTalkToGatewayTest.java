@@ -12,6 +12,10 @@ import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToContextInjector;
 import com.mola.cmd.proxy.app.acp.talkto.TalkToDispatcher;
 import com.mola.cmd.proxy.app.acp.talkto.model.TalkToRequest;
+import com.mola.cmd.proxy.app.acp.team.talkto.TeamTalkToContextInjector;
+import com.mola.cmd.proxy.app.acp.team.model.TeamDefinition;
+import com.mola.cmd.proxy.app.acp.team.model.TeamMemberDefinition;
+import com.mola.cmd.proxy.app.acp.team.runtime.TeamRuntime;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -246,7 +250,7 @@ public class ChannelTalkToGatewayTest {
                 "member-2", actualOwner);
 
         assertEquals("chat-42", adapter.lastChatId);
-        assertTrue(gateway.contactsForGroup(actualOwner).isEmpty());
+        assertEquals(1, gateway.contactsForGroup(actualOwner).size());
         config.getBinding().setTeamId("team-2");
         assertNull(gateway.restoreChannelTurn(delivery, actualOwner));
     }
@@ -315,10 +319,23 @@ public class ChannelTalkToGatewayTest {
         ChannelTalkToGateway gateway = new ChannelTalkToGateway(adapters, configs);
 
         assertTrue(gateway.contactsForGroup("bound-group").isEmpty());
+        assertTrue(gateway.hasEnabledChannelForGroup("bound-group"));
+        assertFalse(gateway.hasEnabledChannelForGroup("other-group"));
         assertTrue(gateway.deliver(
                 new TalkToRequest("channel:wecom-main", "notice", 0),
                 "robot", "bound-group").contains("主动推送目标不存在"));
         assertEquals(0, adapter.calls.get());
+    }
+
+    @Test
+    public void disabledChannelIsNotReportedAsAvailable() {
+        ChannelConfig config = config("bound-group", "");
+        config.setEnabled(false);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.emptyMap(),
+                Collections.singletonMap("wecom-main", config));
+
+        assertFalse(gateway.hasEnabledChannelForGroup("bound-group"));
     }
 
     @Test
@@ -436,6 +453,47 @@ public class ChannelTalkToGatewayTest {
     }
 
     @Test
+    public void dynamicTeamBindingsExposeAndAllowProactiveTargetsOnlyWithinTeam() {
+        for (String selection : Arrays.asList(ChannelBinding.MEMBER_SELECTION_RANDOM,
+                ChannelBinding.MEMBER_SELECTION_AFFINITY)) {
+            RecordingAdapter adapter = new RecordingAdapter();
+            ChannelConfig config = config(null, "");
+            config.getBinding().setType(ChannelBinding.TYPE_TEAM_MEMBER);
+            config.getBinding().setTeamId("team-1");
+            config.getBinding().setTeamMemberSelection(selection);
+            config.setOutboundTargets(Arrays.asList(
+                    new ChannelOutboundTarget("ops", "ops-chat", "故障通知"),
+                    new ChannelOutboundTarget("unfinished", "", "未配置")));
+            ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                    Collections.singletonMap("wecom-main", adapter),
+                    Collections.singletonMap("wecom-main", config));
+
+            for (String member : Arrays.asList("member-1", "member-2")) {
+                String owner = "team:team-1:" + member;
+                assertEquals(selection, 1, gateway.contactsForGroup(owner).size());
+                assertEquals("channel:ops", gateway.contactsForGroup(owner).get(0).getTarget());
+                assertTrue(gateway.deliver(new TalkToRequest("channel:ops", "通知", 0),
+                        member, owner).contains("主动发送消息"));
+                assertEquals("ops-chat", adapter.lastChatId);
+            }
+            assertEquals(2, adapter.calls.get());
+            for (String outsider : Arrays.asList("team:team-2:member-1",
+                    "team:team-10:member-1", "main-group", "team:team-1:", null)) {
+                assertTrue(gateway.contactsForGroup(outsider).isEmpty());
+                assertTrue(gateway.deliver(new TalkToRequest("channel:ops", "禁止", 0),
+                        "member-1", outsider).contains("不是该信道绑定的 client"));
+            }
+            assertTrue(gateway.deliver(new TalkToRequest("channel:unfinished", "禁止", 0),
+                    "member-1", "team:team-1:member-1").contains("主动推送目标不存在"));
+            config.setEnabled(false);
+            assertTrue(gateway.contactsForGroup("team:team-1:member-1").isEmpty());
+            assertTrue(gateway.deliver(new TalkToRequest("channel:ops", "禁止", 0),
+                    "member-1", "team:team-1:member-1").contains("主动推送目标不存在"));
+            assertEquals(2, adapter.calls.get());
+        }
+    }
+
+    @Test
     public void teamMemberBindingStartsEvenWhenMemberIsCreatedLater() {
         ChannelConfig config = config(null, "");
         config.setBotId("bot-team");
@@ -461,6 +519,45 @@ public class ChannelTalkToGatewayTest {
         } finally {
             manager.close();
         }
+    }
+
+    @Test
+    public void dynamicTeamChannelTargetsAppearInEveryMembersPrompt() {
+        for (String selection : Arrays.asList(ChannelBinding.MEMBER_SELECTION_RANDOM,
+                ChannelBinding.MEMBER_SELECTION_AFFINITY)) {
+            ChannelBinding binding = new ChannelBinding();
+            binding.setType(ChannelBinding.TYPE_TEAM_MEMBER);
+            binding.setTeamId("team-1");
+            binding.setTeamMemberSelection(selection);
+            ChannelConfig config = new ChannelConfig();
+            config.setId("wecom-main");
+            config.setEnabled(true);
+            config.setBinding(binding);
+            config.setOutboundTargets(Collections.singletonList(
+                    new ChannelOutboundTarget("ops", "ops-chat", "故障通知")));
+            ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                    Collections.emptyMap(), Collections.singletonMap("wecom-main", config));
+            for (String member : Arrays.asList("member-1", "member-2")) {
+                TeamTalkToContextInjector injector = new TeamTalkToContextInjector(
+                        proactiveTeamRuntime(), member, gateway, "team:team-1:" + member);
+                String context = injector.buildContext(
+                        Collections.emptyList(), Collections.emptyMap(), "source-robot");
+                assertTrue(selection, context.contains("可主动通知的目标"));
+                assertTrue(context.contains("target: channel:ops"));
+                assertTrue(context.contains("故障通知"));
+                assertFalse(context.contains("当前未配置主动通知目标"));
+            }
+        }
+    }
+
+    private static TeamRuntime proactiveTeamRuntime() {
+        List<TeamMemberDefinition> members = new ArrayList<>();
+        for (String id : Arrays.asList("member-1", "member-2")) {
+            members.add(new TeamMemberDefinition(id, "acp-" + id, "group-" + id,
+                    "robot-" + id, id, "", members.size(), "通知成员", "fingerprint-" + id));
+        }
+        return new TeamRuntime(TeamDefinition.creating("team-1", "owner-1", "Fast Team",
+                "instance", "request-1", members, 100L));
     }
 
     private static ChannelConfig config(String groupId, String defaultChatId) {

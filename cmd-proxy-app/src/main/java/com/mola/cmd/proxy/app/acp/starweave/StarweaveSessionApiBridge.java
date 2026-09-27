@@ -47,6 +47,13 @@ public final class StarweaveSessionApiBridge {
                 expectedGeneration, busyPolicy, uploadIds);
     }
 
+    public static JSONObject send(String groupId, String message,
+                                  String expectedSessionId, long expectedGeneration,
+                                  String busyPolicy, java.util.List<String> uploadIds, String messageId) {
+        return requireManager().send(groupId, message, expectedSessionId,
+                expectedGeneration, busyPolicy, uploadIds, messageId);
+    }
+
     public static JSONObject upload(String groupId, String sessionId, long generation,
                                     String fileName, String contentBase64) {
         return requireManager().upload(groupId, sessionId, generation,

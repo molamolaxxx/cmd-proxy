@@ -10,6 +10,7 @@ import com.mola.cmd.proxy.app.acp.AcpRobotParam;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.DeepSeekHarnessAcpProvider;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderType;
 import com.mola.cmd.proxy.app.acp.acpclient.agent.NpmProviderRuntimeManager;
+import com.mola.cmd.proxy.app.acp.acpclient.model.AgentModelCatalog;
 import com.mola.cmd.proxy.app.acp.filepreview.TextFilePreviewResult;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveSessionApiBridge;
 import com.mola.cmd.proxy.app.acp.starweave.StarweaveRequestDeduplicator;
@@ -22,6 +23,7 @@ import com.mola.cmd.proxy.app.acp.task.api.ExternalTaskApiHandler;
 import com.mola.cmd.proxy.app.acp.task.api.ExternalTaskApiService;
 import com.mola.cmd.proxy.app.acp.task.api.TaskRestHandler;
 import com.mola.cmd.proxy.app.acp.task.model.TaskException;
+import com.mola.cmd.proxy.app.acp.schedule.ScheduleAdminApiBridge;
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
 import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
@@ -70,6 +72,7 @@ public class ConfigUiServer {
             com.mola.cmd.proxy.app.utils.CmdProxyHome.pathOf("acpConfig.json");
 
     private static final String SECRET_MASK = "********";
+    private static final Map<String, StaticAsset> CONFIG_UI_ASSETS = configUiAssets();
 
     private final int port;
     private final Runnable refreshCallback;
@@ -81,6 +84,8 @@ public class ConfigUiServer {
     private final Supplier<List<Map<String, Object>>> channelBindingTargetSupplier;
     private final BiConsumer<String, String> refreshChannelCallback;
     private final AgentResourceBrowser agentResourceBrowser = new AgentResourceBrowser();
+    private final ProviderModelDiscoveryService providerModelDiscovery =
+            new ProviderModelDiscoveryService(AgentModelCatalog.getInstance());
     private Function<String, Map<String, Boolean>> memoryDreamStatus =
             ignored -> { throw new IllegalStateException("记忆服务未运行"); };
     private Function<String, Boolean> memoryDreamTrigger =
@@ -246,6 +251,7 @@ public class ConfigUiServer {
                 new ExternalTaskApiHandler(new ExternalTaskApiService(
                         Paths.get(CONFIG_PATH), TaskApiBridge::getService)));
         server.createContext(TaskRestHandler.PREFIX, proxied(this::handleTasks));
+        server.createContext("/api/schedules/v1/", proxied(this::handleSchedules));
         // REST API：带 instance 参数且非本环境时，转发到目标环境的 ConfigUI
         server.createContext("/api/config", proxied(this::handleConfig));
         server.createContext("/api/channels/status", proxied(this::handleChannelStatus));
@@ -349,6 +355,8 @@ public class ConfigUiServer {
                 proxied(this::handleProviderRuntimeInstall));
         server.createContext("/api/provider-runtime/job",
                 proxied(this::handleProviderRuntimeJob));
+        server.createContext("/api/provider-models",
+                proxied(this::handleProviderModels));
 
         server.start();
         updateCheckExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -481,6 +489,76 @@ public class ConfigUiServer {
             return;
         }
         new TaskRestHandler(service).handle(exchange);
+    }
+
+    private void handleSchedules(HttpExchange exchange) throws IOException {
+        String path = exchange.getRequestURI().getPath();
+        String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+        try {
+            JSONObject result;
+            if ("/api/schedules/v1/tasks".equals(path)) {
+                if ("GET".equals(method)) {
+                    result = ScheduleAdminApiBridge.listTasks(
+                            intParam(exchange, "page", 1), intParam(exchange, "pageSize", 10),
+                            param(exchange, "query"), param(exchange, "scope"),
+                            param(exchange, "type"), param(exchange, "status"));
+                } else if ("PUT".equals(method)) {
+                    JSONObject body = JSON.parseObject(new String(
+                            readAllBytes(exchange.getRequestBody()), StandardCharsets.UTF_8));
+                    result = ScheduleAdminApiBridge.update(param(exchange, "ownerPath"),
+                            param(exchange, "taskId"), body == null ? new JSONObject() : body);
+                } else if ("DELETE".equals(method)) {
+                    result = ScheduleAdminApiBridge.delete(param(exchange, "ownerPath"),
+                            param(exchange, "taskId"));
+                } else {
+                    sendResponse(exchange, 405, "application/json",
+                            "{\"ok\":false,\"code\":\"METHOD_NOT_ALLOWED\",\"message\":\"Method Not Allowed\"}");
+                    return;
+                }
+            } else if ("/api/schedules/v1/executions".equals(path) && "GET".equals(method)) {
+                result = ScheduleAdminApiBridge.executions(
+                        intParam(exchange, "page", 1), intParam(exchange, "pageSize", 10),
+                        param(exchange, "ownerPath"), param(exchange, "taskId"),
+                        param(exchange, "status"));
+            } else if ("/api/schedules/v1/stats".equals(path) && "GET".equals(method)) {
+                result = ScheduleAdminApiBridge.stats();
+            } else {
+                sendResponse(exchange, "GET".equals(method) ? 404 : 405,
+                        "application/json", "{\"ok\":false,\"code\":\"NOT_FOUND\","
+                                + "\"message\":\"定时任务接口不存在\"}");
+                return;
+            }
+            sendResponse(exchange, 200, "application/json", result.toJSONString());
+        } catch (ScheduleAdminApiBridge.ApiException error) {
+            JSONObject result = new JSONObject(true);
+            result.put("ok", false);
+            result.put("code", error.getCode());
+            result.put("message", error.getMessage());
+            sendResponse(exchange, error.getStatus(), "application/json", result.toJSONString());
+        } catch (IllegalArgumentException error) {
+            JSONObject result = new JSONObject(true);
+            result.put("ok", false);
+            result.put("code", "INVALID_ARGUMENT");
+            result.put("message", error.getMessage());
+            sendResponse(exchange, 400, "application/json", result.toJSONString());
+        } catch (Exception error) {
+            logger.error("定时任务管理接口失败, path={}", path, error);
+            JSONObject result = new JSONObject(true);
+            result.put("ok", false);
+            result.put("code", "INTERNAL_ERROR");
+            result.put("message", "定时任务管理失败");
+            sendResponse(exchange, 500, "application/json", result.toJSONString());
+        }
+    }
+
+    private int intParam(HttpExchange exchange, String name, int fallback) throws IOException {
+        String value = param(exchange, name);
+        if (value == null || value.trim().isEmpty()) return fallback;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException(name + " 必须是整数");
+        }
     }
 
     /** 环境列表：主机上所有存活环境，供前端渲染环境页签 */
@@ -630,19 +708,19 @@ public class ConfigUiServer {
             return;
         }
         String requestPath = exchange.getRequestURI().getPath();
-        if (!"/assets/MaterialIcons-Regular.woff2".equals(requestPath)) {
+        StaticAsset asset = CONFIG_UI_ASSETS.get(requestPath);
+        if (asset == null) {
             sendResponse(exchange, 404, "text/plain", "Asset not found");
             return;
         }
-        try (InputStream input = getClass().getResourceAsStream(
-                "/configui/assets/MaterialIcons-Regular.woff2")) {
+        try (InputStream input = getClass().getResourceAsStream(asset.resourcePath)) {
             if (input == null) {
                 sendResponse(exchange, 404, "text/plain", "Asset not found");
                 return;
             }
             byte[] bytes = readAllBytes(input);
-            exchange.getResponseHeaders().set("Content-Type", "font/woff2");
-            exchange.getResponseHeaders().set("Cache-Control", "public, max-age=31536000, immutable");
+            exchange.getResponseHeaders().set("Content-Type", asset.contentType);
+            exchange.getResponseHeaders().set("Cache-Control", asset.cacheControl);
             exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
             if ("HEAD".equalsIgnoreCase(method)) {
                 exchange.sendResponseHeaders(200, -1);
@@ -651,6 +729,51 @@ public class ConfigUiServer {
                 exchange.getResponseBody().write(bytes);
             }
             exchange.getResponseBody().close();
+        }
+    }
+
+    private static Map<String, StaticAsset> configUiAssets() {
+        Map<String, StaticAsset> assets = new java.util.LinkedHashMap<>();
+        addConfigUiAsset(assets, "MaterialIcons-Regular.woff2", "font/woff2", true);
+        addConfigUiAsset(assets, "css/base.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/channels.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/starweave.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/tasks.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/resources.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/responsive.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/dark-theme.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/schedules.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/theme.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/core.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/mcp-auth.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/providers.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/starweave.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/resources.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/channels.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/agents.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/tasks.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/schedules.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/ui.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/app.js", "application/javascript; charset=utf-8", false);
+        return java.util.Collections.unmodifiableMap(assets);
+    }
+
+    private static void addConfigUiAsset(Map<String, StaticAsset> assets, String relativePath,
+                                         String contentType, boolean immutable) {
+        assets.put("/assets/" + relativePath,
+                new StaticAsset("/configui/assets/" + relativePath, contentType,
+                        immutable ? "public, max-age=31536000, immutable" : "no-cache"));
+    }
+
+    private static final class StaticAsset {
+        private final String resourcePath;
+        private final String contentType;
+        private final String cacheControl;
+
+        private StaticAsset(String resourcePath, String contentType, String cacheControl) {
+            this.resourcePath = resourcePath;
+            this.contentType = contentType;
+            this.cacheControl = cacheControl;
         }
     }
 
@@ -939,6 +1062,36 @@ public class ConfigUiServer {
         }
         sendResponse(exchange, 200, "application/json",
                 JSON.toJSONString(providerJobJson(job)));
+    }
+
+    private void handleProviderModels(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendResponse(exchange, 405, "application/json",
+                    "{\"success\":false,\"message\":\"Method Not Allowed\"}");
+            return;
+        }
+        try {
+            JSONObject request = JSON.parseObject(readBody(exchange, 64L * 1024L));
+            if (request == null) request = new JSONObject(true);
+            String action = request.getString("action");
+            if ("remember".equalsIgnoreCase(action)) {
+                providerModelDiscovery.remember(request);
+                JSONObject result = new JSONObject(true);
+                result.put("success", true);
+                sendResponse(exchange, 200, "application/json", result.toJSONString());
+                return;
+            }
+            JSONObject result = providerModelDiscovery.models(
+                    request, request.getBooleanValue("force"));
+            sendResponse(exchange, 200, "application/json", result.toJSONString());
+        } catch (IllegalArgumentException e) {
+            sendResponse(exchange, 400, "application/json",
+                    JSON.toJSONString(apiError("INVALID_REQUEST", e.getMessage())));
+        } catch (Exception e) {
+            logger.warn("模型目录请求失败", e);
+            sendResponse(exchange, 500, "application/json",
+                    JSON.toJSONString(apiError("MODEL_DISCOVERY_FAILED", e.getMessage())));
+        }
     }
 
     private AgentProviderType requiredNpmProvider(HttpExchange exchange) throws IOException {
@@ -1619,7 +1772,7 @@ public class ConfigUiServer {
                             request.getLongValue("expectedGeneration"),
                             request.getString("busyPolicy"), uploadValues == null
                                     ? java.util.Collections.emptyList()
-                                    : uploadValues.toJavaList(String.class));
+                                    : uploadValues.toJavaList(String.class), request.getString("requestId"));
                     break;
                 case "cancel":
                     data = StarweaveSessionApiBridge.cancel(

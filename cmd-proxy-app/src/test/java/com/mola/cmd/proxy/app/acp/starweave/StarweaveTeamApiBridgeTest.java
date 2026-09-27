@@ -505,6 +505,61 @@ public class StarweaveTeamApiBridgeTest {
         }
     }
 
+    @Test
+    public void sendRetryUsesOneCoordinatorMutationAndHistoryReturnsReplayBoundary() throws Exception {
+        String instance = "chat-projection";
+        TeamManager manager = new TeamManager(
+                new TeamStore(temporary.newFolder("chat-projection").toPath()),
+                new TeamClientRegistry(), new MapTeamSourceRobotResolver(
+                        java.util.Collections.emptyMap()));
+        java.util.concurrent.atomic.AtomicInteger sends = new java.util.concurrent.atomic.AtomicInteger();
+        final StarweaveTeamGateway[] gateway = new StarweaveTeamGateway[1];
+        gateway[0] = new StarweaveTeamGateway(instance, "team-acp-" + instance,
+                200L, 200L, (command, group, callback) -> {
+            JSONObject payload = JSON.parseObject(callback.getResultMap().get("payload"));
+            JSONObject data = new JSONObject(true);
+            data.put("sessionId", "new-session");
+            if ("send".equals(payload.getString("action"))) {
+                sends.incrementAndGet();
+                assertEquals("send-unique", payload.getString("clientMessageId"));
+            } else {
+                data.put("messages", new JSONArray());
+            }
+            JSONObject response = new JSONObject(true);
+            response.put("requestId", callback.getCmdId());
+            response.put("accepted", true);
+            response.put("data", data);
+            gateway[0].acceptResult("rpc-result", new String[]{response.toJSONString()});
+        });
+        JSONObject ready = new JSONObject(true);
+        ready.put("instanceId", instance);
+        ready.put("ownerChatterId", StarweaveIdentity.ownerId(instance));
+        gateway[0].acceptReady("ready", new String[]{ready.toJSONString()});
+        StarweaveTeamApiBridge.install(manager, instance, java.util.Collections::emptyList, gateway[0]);
+        try {
+            JSONObject request = new JSONObject(true);
+            request.put("requestId", "send-unique");
+            request.put("clientMessageId", "send-unique");
+            request.put("coordinated", true);
+            request.put("action", "send");
+            request.put("teamId", "team-remote");
+            request.put("teamMemberId", "member-remote");
+            request.put("sessionId", "old-session");
+            request.put("message", "你好");
+            JSONObject first = StarweaveTeamApiBridge.member(request);
+            assertEquals(first, StarweaveTeamApiBridge.member(request));
+            assertEquals(1, sends.get());
+            request.put("requestId", "history-unique");
+            request.put("action", "history");
+            JSONObject snapshot = StarweaveTeamApiBridge.member(request).getJSONObject("data");
+            assertEquals("new-session", snapshot.getString("sessionId"));
+            assertTrue(snapshot.containsKey("replayAfter"));
+        } finally {
+            StarweaveTeamApiBridge.clear(manager);
+            manager.close();
+        }
+    }
+
     private static JSONObject productSend(String teamId, String memberId,
                                           String sessionId) {
         JSONObject request = new JSONObject(true);

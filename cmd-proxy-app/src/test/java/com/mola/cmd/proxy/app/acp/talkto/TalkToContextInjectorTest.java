@@ -13,25 +13,48 @@ import static org.junit.Assert.assertTrue;
 public class TalkToContextInjectorTest {
 
     @Test
-    public void keepsDynamicCallingGuidanceWithoutRepeatingToolContract() {
+    public void omitsExternalChannelContextWhenNoChannelIsConfigured() {
         String context = new TalkToContextInjector().buildContext(
                 Collections.emptyList(), Collections.emptyMap(), "self");
 
         assertTrue(context.contains("<agent-team>"));
-        assertTrue(context.contains("<external-channel>"));
+        assertFalse(context.contains("<external-channel>"));
         assertFalse(context.contains("<external-channels>"));
         assertFalse(context.contains("<external-channel-routing>"));
         assertTrue(context.contains("talk_to MCP 工具"));
-        assertTrue(context.contains("回复当前来信时，将 target 设为“回复”"));
-        assertTrue(context.contains("{\"target\":\"回复\",\"content\":\"处理结果\"}"));
-        assertTrue(context.contains("当前未配置主动通知目标"));
         assertFalse(context.contains("只有用户明确要求通知"));
         assertFalse(context.contains("主动通知完成后"));
         assertTrue(context.contains("重要运行时约束"));
-        assertTrue(context.contains("禁止发送“收到”"));
+        assertTrue(context.contains("禁止向其他 Agent 发送“收到”"));
+        assertTrue(context.contains("除非发送方明确要求你确认收到或作答"));
         assertFalse(context.contains("目标 Agent 忙碌时消息会排队"));
         assertFalse(context.contains("不表示接收方已处理"));
         assertFalse(context.contains("与 dispatch_subagent 的区别"));
+    }
+
+    @Test
+    public void explainsReplyRoutingWhenChannelHasNoProactiveTargets() {
+        ExternalTalkToContactProvider provider = new ExternalTalkToContactProvider() {
+            @Override
+            public java.util.List<ExternalTalkToContact> contactsForGroup(String groupId) {
+                return Collections.emptyList();
+            }
+
+            @Override
+            public boolean hasEnabledChannelForGroup(String groupId) {
+                return "group-1".equals(groupId);
+            }
+        };
+        String context = new TalkToContextInjector(provider, "group-1").buildContext(
+                Collections.emptyList(), Collections.emptyMap(), "self");
+
+        assertTrue(context.contains("<external-channel>"));
+        assertTrue(context.contains("外部信道连接企业微信等外部消息平台"));
+        assertTrue(context.contains("处理外部信道来信时，将 target 设为“回复”"));
+        assertTrue(context.contains("{\"target\":\"回复\",\"content\":\"处理结果\"}"));
+        assertTrue(context.contains("同一轮处理中，可按需多次调用“回复”"));
+        assertTrue(context.contains("当前未配置主动通知目标"));
+        assertFalse(context.contains("只有用户明确要求通知"));
     }
 
     @Test
@@ -51,6 +74,8 @@ public class TalkToContextInjectorTest {
         assertTrue(context.contains("reviewer: 代码审查"));
         assertTrue(context.indexOf("</agent-team>")
                 < context.indexOf("<external-channel>"));
+        assertTrue(context.contains("外部信道连接企业微信等外部消息平台"));
+        assertTrue(context.contains("同一轮处理中，可按需多次调用“回复”"));
         assertTrue(context.contains("release-group（target: channel:release-group）"));
         assertTrue(context.contains("{\"target\":\"channel:release-group\",\"content\":\"通知内容\"}"));
         assertTrue(context.contains("只有用户明确要求通知"));

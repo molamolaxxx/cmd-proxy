@@ -2,6 +2,7 @@ package com.mola.cmd.proxy.app.acp.acpclient;
 
 import com.google.gson.*;
 import com.mola.cmd.proxy.app.acp.AcpRobotParam;
+import com.mola.cmd.proxy.app.acp.AutoNewSessionConfig;
 import com.mola.cmd.proxy.app.acp.action.ActionRuntimeRegistry;
 import com.mola.cmd.proxy.app.acp.action.ActionToolService;
 import com.mola.cmd.proxy.app.acp.action.CmdProxyMcpHttpHandler;
@@ -169,11 +170,11 @@ public class AcpClient extends AbstractAcpClient {
     /** 最近一次真正处于可接收请求状态的时间，用于计算空闲时长。 */
     private final AtomicLong lastActivityAt = new AtomicLong(0L);
 
-    /** 睡眠期间命中自动新会话时，延迟到下一次唤醒再创建。 */
-    private final AtomicBoolean newSessionOnWake = new AtomicBoolean(false);
-
     /** 睡眠唤醒并创建新会话后，通知持有者同步外部会话身份（可为 null）。 */
     private volatile SessionRotationListener sessionRotationListener;
+
+    /** MAIN lifecycle persistence; Team sleep state is already part of TeamDefinition. */
+    private volatile SleepStateListener sleepStateListener;
 
     /** Codex/Claude/Kiro 压缩完成后置为 true，下一次 prompt 完整重注入 ACP harness。 */
     private final AtomicBoolean acpHarnessReinjectionPending = new AtomicBoolean(false);
@@ -268,7 +269,7 @@ public class AcpClient extends AbstractAcpClient {
     }
 
     /**
-     * 注册睡眠唤醒轮转回调：当 {@link #wakeIfSleeping()} 按延迟标记创建全新会话时，
+     * 注册睡眠唤醒轮转回调：当 {@link #wakeIfSleeping()} 按空闲时长创建全新会话时，
      * 以旧/新 sessionId 通知持有者同步其外部会话索引，保证后续请求不会命中过期身份。
      */
     public void setSessionRotationListener(SessionRotationListener sessionRotationListener) {
@@ -279,6 +280,16 @@ public class AcpClient extends AbstractAcpClient {
     @FunctionalInterface
     public interface SessionRotationListener {
         void onSessionRotatedOnWake(String previousSessionId, String newSessionId);
+    }
+
+    public interface SleepStateListener {
+        void onSleeping();
+
+        void onWaking();
+    }
+
+    public void setSleepStateListener(SleepStateListener sleepStateListener) {
+        this.sleepStateListener = sleepStateListener;
     }
 
     public boolean isRestoredSession() {
@@ -328,21 +339,37 @@ public class AcpClient extends AbstractAcpClient {
         }
         lifecycleBoundary();
         releaseRuntimeForSleep();
+        notifySleeping();
         logger.info("ACP client 已进入睡眠, logicalId={}, sessionId={}", groupId, sessionId);
         return true;
     }
 
-    /** Marks a sleeping client to create a fresh session on its next wake. */
-    public synchronized boolean markNewSessionOnWake() {
-        if (getState() != State.SLEEP) return false;
-        newSessionOnWake.set(true);
+    /** Restores a persisted SLEEP state after session/load without waiting for idle timeout. */
+    public synchronized boolean restoreSleepAfterRestart() {
+        if (!agentProvider.supportsSessionLoad()
+                || !state.compareAndSet(State.READY, State.SLEEP)) {
+            notifyWaking();
+            return false;
+        }
+        lifecycleBoundary();
+        releaseRuntimeForSleep();
+        notifySleeping();
+        logger.info("ACP client 已恢复重启前睡眠状态, logicalId={}, sessionId={}",
+                groupId, sessionId);
         return true;
     }
 
     /** Wakes a sleeping client in-place. Concurrent callers share the same lifecycle lock. */
     public synchronized boolean wakeIfSleeping() throws IOException {
         if (getState() != State.SLEEP) return false;
-        boolean createNew = newSessionOnWake.getAndSet(false);
+        notifyWaking();
+        // 在新消息更新时间之前判断，覆盖重启和后台检查尚未执行的情况。
+        long sleepingLastMessageAt = lastMessageAt.get();
+        long now = System.currentTimeMillis();
+        AutoNewSessionConfig config = robotParam == null ? null : robotParam.getAutoNewSession();
+        boolean createNew = config != null && config.isEnabled()
+                && sleepingLastMessageAt > 0L && now >= sleepingLastMessageAt
+                && now - sleepingLastMessageAt >= TimeUnit.MINUTES.toMillis(config.getIdleMinutes());
         String sleepingSessionId = sessionId;
         int sleepingTurnCount = historyManager.getTurnCount();
         int sleepingInitialTurnCount = initialTurnCount;
@@ -386,13 +413,34 @@ public class AcpClient extends AbstractAcpClient {
                     System.currentTimeMillis() - startedAt, createNew);
             return true;
         } catch (IOException | RuntimeException failure) {
-            newSessionOnWake.compareAndSet(false, createNew);
+            notifySleeping();
+            forceNewSession = false;
             if (createNew && sleepingSessionId != null) {
                 historyManager.restoreState(sleepingSessionId);
                 initialTurnCount = sleepingInitialTurnCount;
-                lastMessageAt.set(historyManager.getLastMessageAt(sleepingSessionId));
             }
+            lastMessageAt.set(sleepingLastMessageAt);
             throw failure;
+        }
+    }
+
+    private void notifySleeping() {
+        SleepStateListener listener = sleepStateListener;
+        if (listener == null) return;
+        try {
+            listener.onSleeping();
+        } catch (RuntimeException error) {
+            logger.warn("记录 ACP 睡眠状态失败, logicalId={}", groupId, error);
+        }
+    }
+
+    private void notifyWaking() {
+        SleepStateListener listener = sleepStateListener;
+        if (listener == null) return;
+        try {
+            listener.onWaking();
+        } catch (RuntimeException error) {
+            logger.warn("清除 ACP 睡眠状态失败, logicalId={}", groupId, error);
         }
     }
 
@@ -690,6 +738,10 @@ public class AcpClient extends AbstractAcpClient {
             }
         }
 
+        // Only admitted turns may appear in a UI snapshot before the provider starts.
+        historyManager.acceptUiMessage(effectiveOptions.getClientMessageId(),
+                userInput, attachmentNames);
+
         AcpResponseListener guardedListener = new LifecycleGuardedAcpResponseListener(
                 outputListener, () -> isLifecycleGenerationActive(generation));
         notifyScheduleExecutionStarted(
@@ -709,6 +761,7 @@ public class AcpClient extends AbstractAcpClient {
                     }
                     sendPrompt(userInput, historyManager.getFileAbsolutePaths(), newImagePaths,
                             attachmentNames, guardedListener, effectiveOptions);
+                    completeScheduleExecution(effectiveOptions, true, null);
                     releaseMcpAuthBinding(effectiveOptions);
                     if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
                         lastActivityAt.set(System.currentTimeMillis());
@@ -719,6 +772,8 @@ public class AcpClient extends AbstractAcpClient {
                         }
                     }
                 } catch (Exception e) {
+                    completeScheduleExecution(effectiveOptions, false,
+                            e.getClass().getName() + ": " + e.getMessage());
                     releaseMcpAuthBinding(effectiveOptions);
                     logger.error("ACP send 失败", e);
                     releaseChannelTurn(effectiveOptions);
@@ -735,6 +790,8 @@ public class AcpClient extends AbstractAcpClient {
                 }
             });
         } catch (RejectedExecutionException e) {
+            completeScheduleExecution(effectiveOptions, false,
+                    e.getClass().getName() + ": " + e.getMessage());
             acceptedPromptOptions.compareAndSet(effectiveOptions, null);
             queuedWorkCancellationPending.set(false);
             releaseMcpAuthBinding(effectiveOptions);
@@ -744,6 +801,13 @@ public class AcpClient extends AbstractAcpClient {
                 guardedListener.onError(e);
             }
         }
+    }
+
+    private void completeScheduleExecution(PromptOptions options, boolean success,
+                                           String detail) {
+        ScheduleTaskManager manager = scheduleTaskManager;
+        if (manager == null || options == null || !options.isScheduleExecution()) return;
+        manager.completeExecutionTurn(options.getScheduleExecutionId(), success, detail);
     }
 
     private void notifyAfterTurnReady() {
@@ -1212,7 +1276,8 @@ public class AcpClient extends AbstractAcpClient {
         AtomicReference<IOException> stdinWriteError = new AtomicReference<>();
         sendJsonInBackground(request, stdinWriteError);
 
-        historyManager.addUserMessage(userInput, historyOrigin(options), attachmentNames);
+        historyManager.addUserMessage(userInput, historyOrigin(options), attachmentNames,
+                options.takeClientMessageId());
 
         // 流式读取
         StringBuilder fullResponse = new StringBuilder();

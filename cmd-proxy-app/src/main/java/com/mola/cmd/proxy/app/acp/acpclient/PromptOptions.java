@@ -20,6 +20,8 @@ public class PromptOptions {
 
     /** 是否为定时任务触发的执行场景。能力上下文仍按普通首轮规则注入。 */
     private boolean scheduleExecution;
+    /** Durable journal row correlated with this scheduled turn. */
+    private String scheduleExecutionId;
     /** Non-null only when this turn originated from an external channel message. */
     private ChannelTurnContext channelTurnContext;
     /** Channel-neutral identity inherited by derived work. */
@@ -40,6 +42,14 @@ public class PromptOptions {
     private Long taskRevision;
     private Long taskContentVersion;
     private boolean taskControl;
+    private String clientMessageId;
+    public PromptOptions setClientMessageId(String id) { clientMessageId = id; return this; }
+    public synchronized String getClientMessageId() { return clientMessageId; }
+    public synchronized String takeClientMessageId() {
+        String id = clientMessageId;
+        clientMessageId = null;
+        return id;
+    }
 
     public PromptOptions() {
     }
@@ -50,6 +60,14 @@ public class PromptOptions {
 
     public PromptOptions setScheduleExecution(boolean scheduleExecution) {
         this.scheduleExecution = scheduleExecution;
+        return this;
+    }
+
+    public String getScheduleExecutionId() { return scheduleExecutionId; }
+
+    public PromptOptions setScheduleExecutionId(String executionId) {
+        this.scheduleExecutionId = executionId == null || executionId.trim().isEmpty()
+                ? null : executionId.trim();
         return this;
     }
 

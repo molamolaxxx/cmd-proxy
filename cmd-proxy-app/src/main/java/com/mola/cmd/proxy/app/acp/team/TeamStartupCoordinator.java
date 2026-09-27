@@ -147,7 +147,10 @@ public final class TeamStartupCoordinator implements AutoCloseable {
                 List<TeamMemberDefinition> ready = new ArrayList<>();
                 for (StartedMember member : started) {
                     ready.add(member.definition.withState(
-                            TeamMemberState.READY, member.client.getSessionId(), null));
+                            member.client.getState()
+                                    == com.mola.cmd.proxy.app.acp.acpclient.AbstractAcpClient.State.SLEEP
+                                    ? TeamMemberState.SLEEP : TeamMemberState.READY,
+                            member.client.getSessionId(), null));
                 }
                 return new Result(true, ready, null);
             } catch (Exception e) {

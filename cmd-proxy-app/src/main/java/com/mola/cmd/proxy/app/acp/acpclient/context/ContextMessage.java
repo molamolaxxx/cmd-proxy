@@ -28,6 +28,16 @@ public class ContextMessage {
         USER, TASK, CHANNEL, TALK_TO, SCHEDULE
     }
 
+    private String messageId;
+    private long revision;
+    public String getMessageId() { return messageId; }
+    public long getRevision() { return revision; }
+    public ContextMessage withIdentity(String id, long version) {
+        messageId = id;
+        revision = version;
+        return this;
+    }
+
     private final Role role;
     private final String content;
     private final UserOrigin userOrigin;

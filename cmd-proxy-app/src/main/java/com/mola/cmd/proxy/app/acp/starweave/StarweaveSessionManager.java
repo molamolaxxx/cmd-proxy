@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -141,6 +142,11 @@ public final class StarweaveSessionManager {
      * not prevent the remaining Starweave sessions from being recovered.
      */
     public JSONObject recoverActiveSessions() {
+        return recoverActiveSessions(groupId -> false);
+    }
+
+    public JSONObject recoverActiveSessions(Predicate<String> restoreSleeping) {
+        Objects.requireNonNull(restoreSleeping, "restoreSleeping");
         JSONArray recovered = new JSONArray();
         JSONArray failed = new JSONArray();
         int attempted = 0;
@@ -148,7 +154,13 @@ public final class StarweaveSessionManager {
             if (!entry.isActive()) continue;
             attempted++;
             try {
-                recovered.add(open(entry.getRobotName()));
+                JSONObject view = open(entry.getRobotName());
+                AcpClient client = registry.getClient(entry.getGroupId());
+                if (client != null && restoreSleeping.test(entry.getGroupId())) {
+                    client.restoreSleepAfterRestart();
+                    view = view(client, index.get(entry.getGroupId()));
+                }
+                recovered.add(view);
             } catch (Exception error) {
                 JSONObject failure = new JSONObject(true);
                 failure.put("robotName", entry.getRobotName());
@@ -193,6 +205,12 @@ public final class StarweaveSessionManager {
     public JSONObject send(String groupId, String message, String expectedSessionId,
                            long expectedGeneration, String busyPolicy,
                            List<String> uploadIds) {
+        return send(groupId, message, expectedSessionId, expectedGeneration, busyPolicy, uploadIds, null);
+    }
+
+    public JSONObject send(String groupId, String message, String expectedSessionId,
+                           long expectedGeneration, String busyPolicy,
+                           List<String> uploadIds, String clientMessageId) {
         StarweaveSessionIndex.Entry entry = requireCurrent(
                 groupId, expectedSessionId, expectedGeneration);
         List<StarweaveUploadStore.ResolvedUpload> uploads = new java.util.ArrayList<>();
@@ -234,6 +252,7 @@ public final class StarweaveSessionManager {
             JSONObject payload = new JSONObject(true);
             payload.put("content", message);
             payload.put("source", "STARWEAVE");
+            payload.put("messageId", clientMessageId);
             JSONArray attachments = new JSONArray();
             for (StarweaveUploadStore.ResolvedUpload upload : uploads) {
                 JSONObject attachment = new JSONObject(true);

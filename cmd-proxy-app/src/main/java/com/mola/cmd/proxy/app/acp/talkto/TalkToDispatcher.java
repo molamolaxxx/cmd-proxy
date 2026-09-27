@@ -201,6 +201,18 @@ public class TalkToDispatcher implements ExternalTalkToContactProvider {
         return java.util.Collections.unmodifiableList(contacts);
     }
 
+    @Override
+    public boolean hasEnabledChannelForGroup(String groupId) {
+        for (ExternalTalkToGateway gateway : externalGateways) {
+            if (gateway instanceof ExternalTalkToContactProvider
+                    && ((ExternalTalkToContactProvider) gateway)
+                    .hasEnabledChannelForGroup(groupId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * 本地消息投递（原有逻辑）。
      */

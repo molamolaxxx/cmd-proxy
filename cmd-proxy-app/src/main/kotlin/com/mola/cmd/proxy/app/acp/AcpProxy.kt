@@ -8,6 +8,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.AcpClient
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientFeatureInitializer
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientIdentity
 import com.mola.cmd.proxy.app.acp.acpclient.AcpClientRegistry
+import com.mola.cmd.proxy.app.acp.acpclient.AcpSleepStateStore
 import com.mola.cmd.proxy.app.acp.acpclient.MainSessionApplicationService
 import com.mola.cmd.proxy.app.acp.acpclient.agent.AgentProviderRouter
 import com.mola.cmd.proxy.app.acp.common.PathUtils
@@ -71,6 +72,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -114,6 +116,12 @@ object AcpProxy {
 
     /** Ordinary MAIN lifecycle boundary shared by MolaChat RPC and Starweave REST. */
     private val mainSessionService = MainSessionApplicationService(registry)
+
+    /** MAIN logical clients that were sleeping before the previous process stopped. */
+    private val sleepStateStore = AcpSleepStateStore()
+
+    /** Persisted sleepers are restored one at a time to cap transient provider memory. */
+    private val sleepingRecoveryPermit = Semaphore(1, true)
 
     /** 普通、Team 与 sub-agent 共用的 manager/存储锁注册表。 */
     private val memoryManagers = MemoryManagerRegistry()
@@ -343,7 +351,8 @@ object AcpProxy {
         }
         StarweaveSessionApiBridge.install(starweaveSessionManager!!)
         initializeTeamTransport()
-        val starweaveRecovery = starweaveSessionManager!!.recoverActiveSessions()
+        val starweaveRecovery = starweaveSessionManager!!.recoverActiveSessions(
+            sleepStateStore::isSleeping)
         log.info(
             "Starweave ACTIVE 会话恢复完成, attempted={}, recovered={}, failed={}",
             starweaveRecovery.getIntValue("attempted"),
@@ -397,9 +406,16 @@ object AcpProxy {
                         return@submit
                     }
 
-                    mainSessionService.create(groupId, workDir, robot) { client ->
-                        featureInitializer.initialize(
-                            AcpClientFeatureInitializer.Context.main(groupId), client, robot)
+                    val restoreSleeping = sleepStateStore.isSleeping(groupId)
+                    if (restoreSleeping) sleepingRecoveryPermit.acquire()
+                    try {
+                        val client = mainSessionService.create(groupId, workDir, robot) { created ->
+                            featureInitializer.initialize(
+                                AcpClientFeatureInitializer.Context.main(groupId), created, robot)
+                        }
+                        if (restoreSleeping) client.restoreSleepAfterRestart()
+                    } finally {
+                        if (restoreSleeping) sleepingRecoveryPermit.release()
                     }
 
                     log.info("ACP client 冷加载完成, groupId={}, robot={}, workDir={}, memory={}, subAgents={}",
@@ -569,7 +585,15 @@ object AcpProxy {
                             team.teamId, member.teamMemberId),
                         client, robot
                     )
-                    client.start()
+                    val restoreSleeping = member.state ==
+                        com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.SLEEP
+                    if (restoreSleeping) sleepingRecoveryPermit.acquire()
+                    try {
+                        client.start()
+                        if (restoreSleeping) client.restoreSleepAfterRestart()
+                    } finally {
+                        if (restoreSleeping) sleepingRecoveryPermit.release()
+                    }
                     client
                 } catch (e: Exception) {
                     try {
@@ -1561,6 +1585,18 @@ object AcpProxy {
     private fun createFeatureInitializer(): AcpClientFeatureInitializer {
         return AcpClientFeatureInitializer(
             { context, client, robot ->
+                if (context.scope == AcpClientFeatureInitializer.Scope.MAIN) {
+                    val logicalId = client.clientIdentity.logicalId
+                    client.setSleepStateListener(object : AcpClient.SleepStateListener {
+                        override fun onSleeping() {
+                            sleepStateStore.markSleeping(logicalId)
+                        }
+
+                        override fun onWaking() {
+                            sleepStateStore.markAwake(logicalId)
+                        }
+                    })
+                }
                 taskMcpDescriptor?.takeIf {
                     com.mola.cmd.proxy.app.acp.task.mcp.TaskMcpEligibility.isEligible(
                         client.clientIdentity)
@@ -1724,13 +1760,29 @@ object AcpProxy {
                         notifyMainSessionChanged(
                             targetGroupId, client.sessionId,
                             replacement.sessionId, "SCHEDULE")
-                        replacement.send(prompt, null,
+                        val delivery = registry.sendMessageWithResult(
+                            targetGroupId, prompt, null, "REJECT",
                             replacement.promptOptionsForScheduleExecution(
-                                authPrincipal, channelDelivery))
+                                authPrincipal, channelDelivery)
+                                .setScheduleExecutionId(scheduleTaskManager.activeExecutionId(
+                                    owner, taskId)))
+                        if (!delivery.isAccepted) {
+                            log.info("定时任务投递被拒绝, robot={}, code={}, message={}",
+                                robotName, delivery.code, delivery.result)
+                            return@setScopedExecutionCallback false
+                        }
                     } else if (boundSessionId == client.sessionId) {
-                        registry.sendMessage(targetGroupId,
-                            prompt, null, client.promptOptionsForScheduleExecution(
-                                authPrincipal, channelDelivery))
+                        val delivery = registry.sendMessageWithResult(
+                            targetGroupId, prompt, null, "REJECT",
+                            client.promptOptionsForScheduleExecution(
+                                authPrincipal, channelDelivery)
+                                .setScheduleExecutionId(scheduleTaskManager.activeExecutionId(
+                                    owner, taskId)))
+                        if (!delivery.isAccepted) {
+                            log.info("定时任务投递被拒绝, robot={}, code={}, message={}",
+                                robotName, delivery.code, delivery.result)
+                            return@setScopedExecutionCallback false
+                        }
                     } else {
                         try {
                             val replacement = mainSessionService.replaceIfCurrent(
@@ -1743,9 +1795,17 @@ object AcpProxy {
                             notifyMainSessionChanged(
                                 targetGroupId, client.sessionId,
                                 replacement.sessionId, "SCHEDULE_RESTORE")
-                            replacement.send(prompt, null,
+                            val delivery = registry.sendMessageWithResult(
+                                targetGroupId, prompt, null, "REJECT",
                                 replacement.promptOptionsForScheduleExecution(
-                                    authPrincipal, channelDelivery))
+                                    authPrincipal, channelDelivery)
+                                    .setScheduleExecutionId(scheduleTaskManager.activeExecutionId(
+                                        owner, taskId)))
+                            if (!delivery.isAccepted) {
+                                log.info("定时任务恢复会话后投递被拒绝, robot={}, code={}, message={}",
+                                    robotName, delivery.code, delivery.result)
+                                return@setScopedExecutionCallback false
+                            }
                         } catch (e: Exception) {
                             log.error(
                                 "定时会话分组恢复失败，等待下一轮重试, owner={}, groupName={}, sessionId={}",
@@ -1759,6 +1819,7 @@ object AcpProxy {
         }
 
         scheduleTaskManager.start()
+        com.mola.cmd.proxy.app.acp.schedule.ScheduleAdminApiBridge.install(scheduleTaskManager)
         log.info("定时任务调度器已启动")
     }
 
@@ -1817,10 +1878,7 @@ object AcpProxy {
                         }
                         val idleMillis = TimeUnit.MINUTES.toMillis(config.idleMinutes.toLong())
                         if (observed.state == AbstractAcpClient.State.SLEEP) {
-                            if (observed.hasSessionMessages()
-                                && now - observed.lastMessageAt >= idleMillis) {
-                                observed.markNewSessionOnWake()
-                            }
+                            // 睡眠会话在唤醒时按最新空闲时长判断是否新建。
                             return@forEach
                         }
                         val replacement = mainSessionService.replaceIdleIfCurrent(
@@ -1961,6 +2019,7 @@ object AcpProxy {
 
         // 停止定时任务调度器
         try {
+            com.mola.cmd.proxy.app.acp.schedule.ScheduleAdminApiBridge.clear(scheduleTaskManager)
             scheduleTaskManager.stop()
         } catch (e: Exception) {
             log.warn("停止定时任务调度器失败", e)

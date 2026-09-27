@@ -13,6 +13,7 @@ import com.google.gson.reflect.TypeToken;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleConfig;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduledTask;
+import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleExecutionRecord;
 import com.mola.cmd.proxy.app.acp.mcpauth.AuthPrincipalContext;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelDeliveryContext;
 import org.slf4j.Logger;
@@ -97,6 +98,8 @@ public class ScheduleTaskManager {
     private final Set<String> blockedTeamIds = ConcurrentHashMap.newKeySet();
     private final Map<String, DeferredScheduleState> deferredSchedules =
             new ConcurrentHashMap<>();
+    /** owner/task -> current journal row, used to close the real Agent turn. */
+    private final Map<String, String> activeExecutionIds = new ConcurrentHashMap<>();
 
     /** 任务触发回调 */
     private ScheduleExecutionCallback executionCallback;
@@ -188,6 +191,7 @@ public class ScheduleTaskManager {
                                     AuthPrincipalContext authPrincipalContext,
                                     ChannelDeliveryContext channelDeliveryContext) {
         ensureOwnerWritable(owner);
+        validateScheduleConfig(config);
         String robotName = registerOwner(owner);
         ScheduledTask task = new ScheduledTask();
         task.setId(generateId(title));
@@ -229,6 +233,86 @@ public class ScheduleTaskManager {
         synchronized (tasks) {
             return new ArrayList<>(tasks);
         }
+    }
+
+    /** Immutable-enough snapshots for the local administration API. */
+    public List<ScheduledTask> listAllTaskSnapshots() {
+        List<ScheduledTask> result = new ArrayList<>();
+        for (Map.Entry<String, List<ScheduledTask>> entry : tasksByRobot.entrySet()) {
+            List<ScheduledTask> tasks = entry.getValue();
+            synchronized (tasks) {
+                for (ScheduledTask task : tasks) result.add(copyTask(task));
+            }
+        }
+        return result;
+    }
+
+    public ScheduledTask findTaskSnapshot(String ownerPath, String taskId) {
+        List<ScheduledTask> tasks = tasksByRobot.get(ownerPath);
+        if (tasks == null) return null;
+        synchronized (tasks) {
+            for (ScheduledTask task : tasks) {
+                if (task.getId().equals(taskId)) return copyTask(task);
+            }
+        }
+        return null;
+    }
+
+    public ScheduledTask cancelTaskByOwnerPath(String ownerPath, String taskId) {
+        return cancelTask(ownerFor(ownerPath), taskId);
+    }
+
+    public ScheduledTask updateTaskByOwnerPath(String ownerPath, String taskId,
+                                               String title, String prompt,
+                                               ScheduleConfig schedule,
+                                               boolean updateGroupName,
+                                               String groupName) {
+        ScheduleOwnerKey owner = ownerFor(ownerPath);
+        String normalizedGroup = updateGroupName ? normalizeGroupName(groupName) : null;
+        if (updateGroupName) validateGroupNameTemplate(normalizedGroup);
+        ScheduledTask updated = updateTask(owner, taskId, title, prompt, schedule);
+        if (updated == null || !updateGroupName) return updated;
+        String storageId = owner.getPersistencePath();
+        List<ScheduledTask> tasks = tasksByRobot.get(storageId);
+        if (tasks == null) return null;
+        synchronized (tasks) {
+            for (ScheduledTask task : tasks) {
+                if (task.getId().equals(taskId)
+                        && ScheduledTask.STATUS_WAITING.equals(task.getStatus())) {
+                    task.setGroupName(normalizedGroup);
+                    updated = copyTask(task);
+                    break;
+                }
+            }
+        }
+        persistTasks(storageId);
+        return updated;
+    }
+
+    public List<ScheduleExecutionRecord> listExecutionRecords(
+            String ownerPath, String taskId, String status, int offset, int limit) {
+        return executionJournal.query(ownerPath, taskId, status, offset, limit);
+    }
+
+    public long countExecutionRecords(String ownerPath, String taskId, String status) {
+        return executionJournal.count(ownerPath, taskId, status);
+    }
+
+    private static ScheduledTask copyTask(ScheduledTask source) {
+        ScheduledTask copy = new ScheduledTask();
+        copy.setId(source.getId());
+        copy.setOwner(source.getOwner());
+        copy.setTitle(source.getTitle());
+        copy.setPrompt(source.getPrompt());
+        copy.setGroupName(source.getGroupName());
+        ScheduleConfig schedule = source.getSchedule();
+        copy.setSchedule(schedule == null ? null
+                : new ScheduleConfig(schedule.getType(), schedule.getExpr()));
+        copy.setStatus(source.getStatus());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setLastRunAt(source.getLastRunAt());
+        copy.setNextRunAt(source.getNextRunAt());
+        return copy;
     }
 
     /**
@@ -278,6 +362,7 @@ public class ScheduleTaskManager {
                                     String newTitle, String newPrompt,
                                     ScheduleConfig newSchedule) {
         ensureOwnerWritable(owner);
+        if (newSchedule != null) validateScheduleConfig(newSchedule);
         String robotName = registerOwner(owner);
         List<ScheduledTask> tasks = tasksByRobot.get(robotName);
         if (tasks == null) return null;
@@ -393,12 +478,16 @@ public class ScheduleTaskManager {
         long scheduledAt = task.getNextRunAt();
         String executionId = beginExecutionRecord(
                 owner, task, nextExecutionAttempt(robotName, task.getId()));
+        if (executionId != null) {
+            activeExecutionIds.put(deferredKey(robotName, task.getId()), executionId);
+        }
 
         if (executionCallback == null && scopedExecutionCallback == null) {
             logger.error("executionCallback 未设置，无法执行定时任务");
             onTaskCompleted(robotName, task.getId(), false);
             finishExecutionRecord(executionId, "FAILED",
                     "CALLBACK_NOT_CONFIGURED", "execution callback is not configured");
+            activeExecutionIds.remove(deferredKey(robotName, task.getId()), executionId);
             return;
         }
 
@@ -433,6 +522,7 @@ public class ScheduleTaskManager {
                     finishExecutionRecord(executionId, "DEFERRED",
                             "TARGET_NOT_EXECUTABLE",
                             "execution admission returned false; retry scheduled");
+                    activeExecutionIds.remove(deferredKey(robotName, task.getId()), executionId);
                     return;
                 }
                 DeferredScheduleState deferred = deferredSchedules.remove(
@@ -446,13 +536,13 @@ public class ScheduleTaskManager {
                             deferred.attempts);
                 }
                 onTaskCompleted(robotName, task.getId(), true);
-                finishExecutionRecord(executionId, "SUCCESS",
-                        "EXECUTION_ACCEPTED", null);
+                markExecutionAccepted(executionId);
             } catch (Exception e) {
                 logger.error("定时任务执行异常, robot={}, id={}", robotName, task.getId(), e);
                 onTaskCompleted(robotName, task.getId(), false);
                 finishExecutionRecord(executionId, "FAILED",
                         "EXECUTION_EXCEPTION", e.getClass().getName() + ": " + e.getMessage());
+                activeExecutionIds.remove(deferredKey(robotName, task.getId()), executionId);
             }
         }, "schedule-exec-" + robotName);
         execThread.setDaemon(true);
@@ -550,6 +640,31 @@ public class ScheduleTaskManager {
                             + " status={}, resultCode={}",
                     executionId, status, resultCode, error);
         }
+    }
+
+    private void markExecutionAccepted(String executionId) {
+        if (executionId == null) return;
+        try {
+            executionJournal.markAccepted(executionId, System.currentTimeMillis());
+        } catch (Exception error) {
+            logger.error("定时任务执行记录写入失败, phase=accepted, executionId={}",
+                    executionId, error);
+        }
+    }
+
+    /** Returns the journal row for the currently admitted owner/task attempt. */
+    public String activeExecutionId(ScheduleOwnerKey owner, String taskId) {
+        if (owner == null || taskId == null) return null;
+        return activeExecutionIds.get(deferredKey(owner.getPersistencePath(), taskId));
+    }
+
+    /** Closes an admitted schedule row when the actual Agent turn finishes. */
+    public void completeExecutionTurn(String executionId, boolean success, String detail) {
+        if (executionId == null || executionId.trim().isEmpty()) return;
+        finishExecutionRecord(executionId, success ? "SUCCEEDED" : "FAILED",
+                success ? "TURN_COMPLETED" : "TURN_FAILED", detail);
+        activeExecutionIds.entrySet().removeIf(
+                entry -> executionId.equals(entry.getValue()));
     }
 
     private static String deferredKey(String robotName, String taskId) {
@@ -737,6 +852,7 @@ public class ScheduleTaskManager {
         runningByRobot.remove(storageId);
         String deferredPrefix = storageId + "\n";
         deferredSchedules.keySet().removeIf(key -> key.startsWith(deferredPrefix));
+        activeExecutionIds.keySet().removeIf(key -> key.startsWith(deferredPrefix));
         ownerKeys.remove(storageId);
         Path base = schedulesBaseDir;
         Path dir = base.resolve(owner.getPersistencePath()).normalize();
@@ -1008,6 +1124,32 @@ public class ScheduleTaskManager {
             return calculateCronNextRunAt(config.getExpr());
         } else {
             return calculateOnceRunAt(config.getExpr());
+        }
+    }
+
+    private void validateScheduleConfig(ScheduleConfig config) {
+        if (config == null || config.getType() == null || config.getExpr() == null
+                || config.getExpr().trim().isEmpty()) {
+            throw new IllegalArgumentException("schedule type and expr must not be blank");
+        }
+        if (config.isCron()) {
+            Cron cron = cronParser.parse(config.getExpr().trim());
+            cron.validate();
+            return;
+        }
+        if (!config.isOnce()) {
+            throw new IllegalArgumentException("schedule type must be cron or once");
+        }
+        String expr = config.getExpr().trim();
+        if (RELATIVE_TIME_PATTERN.matcher(expr).matches()) return;
+        try {
+            ZonedDateTime.parse(expr);
+        } catch (DateTimeParseException first) {
+            try {
+                LocalDateTime.parse(expr);
+            } catch (DateTimeParseException second) {
+                throw new IllegalArgumentException("invalid once schedule expression: " + expr);
+            }
         }
     }
 

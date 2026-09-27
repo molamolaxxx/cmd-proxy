@@ -2,10 +2,6 @@ package com.mola.cmd.proxy.app.acp.configui;
 
 import org.junit.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
-
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -91,7 +87,10 @@ public class StarweaveTaskUiContractTest {
         assertTrue(html.contains("delivery=p.deliveryState"));
         assertTrue(html.contains("p.taskEventSeq?'<span>事件 #'"));
         assertTrue(html.contains("if(p.eventId&&taskEventIds[p.eventId])return"));
-        assertTrue(html.contains("teamSession.messages.filter(uniqueTask)"));
+        String teamRender = section(html, "function renderTeamSessionMessages()",
+                "function handleTeamSessionScroll()");
+        assertTrue(teamRender.contains("id=p.eventId||item.eventId"));
+        assertTrue(teamRender.contains("if(seen[id])return false"));
         assertTrue(html.contains("function openTaskFromCard(taskId)"));
     }
 
@@ -187,14 +186,6 @@ public class StarweaveTaskUiContractTest {
     }
 
     private static String loadConfigUi() throws Exception {
-        try (InputStream input = StarweaveTaskUiContractTest.class.getClassLoader()
-                .getResourceAsStream("configui/index.html")) {
-            if (input == null) throw new IllegalStateException("configui/index.html missing");
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
-            return new String(output.toByteArray(), StandardCharsets.UTF_8);
-        }
+        return ConfigUiTestResources.loadBundle();
     }
 }

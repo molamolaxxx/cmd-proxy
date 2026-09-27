@@ -55,6 +55,28 @@ public class TeamRecoveryTest {
     }
 
     @Test
+    public void sleepingMemberRemainsSleepingAfterRecovery() throws Exception {
+        RecoveryFixture fixture = fixture();
+        TeamDefinition creating = definition(fixture.resolver);
+        List<TeamMemberDefinition> members = Arrays.asList(
+                creating.getMembers().get(0).withState(
+                        TeamMemberState.SLEEP, "old-1", null),
+                creating.getMembers().get(1).withState(
+                        TeamMemberState.READY, "old-2", null));
+        fixture.store.saveTeam(creating);
+        fixture.store.saveTeam(creating.transitionWithMembers(
+                TeamState.READY, members, null, 2L));
+
+        fixture.manager.recoverPersistedDefinitions();
+
+        assertTrue(fixture.events.await(2, TimeUnit.SECONDS));
+        TeamDefinition recovered = fixture.store.loadTeam("team-1").get();
+        assertEquals(TeamMemberState.SLEEP, recovered.getMembers().get(0).getState());
+        assertEquals(TeamMemberState.READY, recovered.getMembers().get(1).getState());
+        fixture.manager.close();
+    }
+
+    @Test
     public void creatingResumesStartup() throws Exception {
         RecoveryFixture creatingFixture = fixture();
         creatingFixture.store.saveTeam(
@@ -158,8 +180,11 @@ public class TeamRecoveryTest {
             if (failStarts) {
                 throw new IOException("member recovery failed");
             }
-            AcpClient client = client(
+            RecoveryClient client = client(
                     runtime.getDefinition(), member, snapshot.copyRobotParam());
+            if (member.getState() == TeamMemberState.SLEEP) {
+                client.restorePersistedSleep();
+            }
             created.accept(client);
             return client;
         }, registry, 2, 1_000L);
@@ -207,15 +232,26 @@ public class TeamRecoveryTest {
                         TeamMemberState.READY, "old-2", null));
     }
 
-    private static AcpClient client(
+    private static RecoveryClient client(
             TeamDefinition team, TeamMemberDefinition member,
             AcpRobotParam robot) {
-        return new AcpClient(".", AcpClientIdentity.team(
+        return new RecoveryClient(".", AcpClientIdentity.team(
                 member.getAcpClientId(), team.getTransportGroup(),
                 "team/" + team.getTeamId() + "/"
                         + member.getTeamMemberId(),
                 team.getOwnerChatterId(), team.getTeamId(),
                 member.getTeamMemberId(), member.getSourceRobotName()), robot);
+    }
+
+    private static final class RecoveryClient extends AcpClient {
+        private RecoveryClient(String workspacePath, AcpClientIdentity identity,
+                               AcpRobotParam robot) {
+            super(workspacePath, identity, robot);
+        }
+
+        private void restorePersistedSleep() {
+            state.set(State.SLEEP);
+        }
     }
 
     private static AcpRobotParam robot(String name) {

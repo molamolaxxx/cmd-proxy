@@ -53,6 +53,47 @@ public class ConversationHistoryManager {
 
     /** 当前 turn 的上下文消息，flushTurn 后清空 */
     private final List<ContextMessage> currentTurn = new ArrayList<>();
+    private ContextMessage streamingAssistant;
+    private final java.util.Map<String, ContextMessage> acceptedUiMessages = new java.util.LinkedHashMap<>();
+
+    public synchronized void acceptUiMessage(String id, String content, List<String> attachments) {
+        if (id != null) acceptedUiMessages.put(id,
+                new ContextMessage(ContextMessage.Role.USER, content, ContextMessage.UserOrigin.USER, attachments)
+                        .withIdentity(id, 1L));
+    }
+
+
+    /** UI snapshot includes partial output; model history remains unchanged. */
+    public synchronized List<ContextMessage> getUiHistory(String sessionId) {
+        List<ContextMessage> result = new ArrayList<>(getFullHistory(sessionId));
+        result.addAll(acceptedUiMessages.values());
+        if (streamingAssistant != null) result.add(streamingAssistant);
+        return result;
+    }
+
+    /** Preserve an interrupted partial reply without carrying it into the next turn. */
+    public synchronized void finishUiAssistant() {
+        if (streamingAssistant != null) {
+            currentTurn.add(streamingAssistant);
+            streamingAssistant = null;
+        }
+    }
+
+    public synchronized ContextMessage appendUiAssistant(String text) {
+        String id = streamingAssistant == null ? java.util.UUID.randomUUID().toString()
+                : streamingAssistant.getMessageId();
+        String content = (streamingAssistant == null ? "" : streamingAssistant.getContent()) + text;
+        streamingAssistant = new ContextMessage(ContextMessage.Role.ASSISTANT, content)
+                .withIdentity(id, content.length());
+        return streamingAssistant;
+    }
+
+    public synchronized void addUserMessage(String content, ContextMessage.UserOrigin origin,
+                                            List<String> attachments, String messageId) {
+        if (messageId != null) acceptedUiMessages.remove(messageId);
+        currentTurn.add(new ContextMessage(ContextMessage.Role.USER, content, origin, attachments)
+                .withIdentity(messageId, 1L));
+    }
 
     /** 累积的文件绝对路径（去重） */
     private final LinkedHashSet<String> fileAbsolutePaths = new LinkedHashSet<>();
@@ -190,7 +231,12 @@ public class ConversationHistoryManager {
 
     /** 记录一条 agent 回答 */
     public synchronized void addAssistantMessage(String content) {
-        currentTurn.add(new ContextMessage(ContextMessage.Role.ASSISTANT, content));
+        ContextMessage message = new ContextMessage(ContextMessage.Role.ASSISTANT, content);
+        if (streamingAssistant != null) {
+            message.withIdentity(streamingAssistant.getMessageId(), content.length() + 1L);
+            streamingAssistant = null;
+        }
+        currentTurn.add(message);
     }
 
     /** 记录一条工具调用结果 */
@@ -610,6 +656,8 @@ public class ConversationHistoryManager {
      * 重置状态（用于 session 重建等场景）。
      */
     public synchronized void reset() {
+        streamingAssistant = null;
+        acceptedUiMessages.clear();
         currentTurn.clear();
         fileAbsolutePaths.clear();
         turnCounter.set(0);
@@ -809,6 +857,8 @@ public class ConversationHistoryManager {
     private JsonObject serializeMessage(ContextMessage msg) {
         JsonObject obj = new JsonObject();
         obj.addProperty("role", msg.getRole().name());
+        if (msg.getMessageId() != null) obj.addProperty("messageId", msg.getMessageId());
+        obj.addProperty("revision", msg.getRevision());
         if (msg.getRole() == ContextMessage.Role.TOOL) {
             obj.addProperty("toolCallId", msg.getToolCallId());
             obj.addProperty("toolName", msg.getToolName());
@@ -836,6 +886,12 @@ public class ConversationHistoryManager {
     }
 
     private ContextMessage deserializeMessage(JsonObject obj) {
+        return deserializeMessageBody(obj).withIdentity(
+                obj.has("messageId") ? obj.get("messageId").getAsString() : null,
+                obj.has("revision") ? obj.get("revision").getAsLong() : 0L);
+    }
+
+    private ContextMessage deserializeMessageBody(JsonObject obj) {
         ContextMessage.Role role = ContextMessage.Role.valueOf(obj.get("role").getAsString());
         if (role == ContextMessage.Role.TOOL) {
             return new ContextMessage(

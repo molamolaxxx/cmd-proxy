@@ -194,8 +194,7 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
                         "消息目标。必须使用系统上下文中列出的准确 target；回复绑定信道时使用上下文明确提供的目标。"
                                 + "禁止自行猜测名称、ID 或路由。")),
                 objectProperty("content", described(stringSchema(),
-                        "要发送的完整消息内容。应直接包含结果、新事实、问题或阻塞信息，"
-                                + "不要发送“收到”“好的”“谢谢”等纯确认消息。")));
+                        "要发送的完整消息内容。")));
         if (availableTools.contains("talk_to")) {
             tools.add(tool("talk_to",
                     "向系统上下文列出的 Agent、Team 成员或当前绑定的信道回复目标异步发送消息。"

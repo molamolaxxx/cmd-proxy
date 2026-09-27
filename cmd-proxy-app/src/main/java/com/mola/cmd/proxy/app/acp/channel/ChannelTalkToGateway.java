@@ -221,7 +221,7 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         if (resolved == null) return failure("主动推送目标不存在或未启用。");
         ChannelConfig config = resolved.config;
         if (senderGroupId == null
-                || !senderGroupId.equals(bindingOwnerKey(config.getBinding()))) {
+                || !bindingAllowsOwner(config.getBinding(), senderGroupId)) {
             return failure("当前 ACP 不是该信道绑定的 client。");
         }
         String chatId = trim(resolved.target.getChatId());
@@ -246,7 +246,7 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         List<ExternalTalkToContact> result = new ArrayList<>();
         for (ChannelConfig config : configs.values()) {
             if (!config.isEnabled()
-                    || !groupId.equals(bindingOwnerKey(config.getBinding()))) continue;
+                    || !bindingAllowsOwner(config.getBinding(), groupId)) continue;
             for (ChannelOutboundTarget target : config.effectiveOutboundTargets()) {
                 if (!usable(target)) continue;
                 result.add(new ExternalTalkToContact(PREFIX + trim(target.getId()),
@@ -255,6 +255,18 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         }
         result.sort(Comparator.comparing(ExternalTalkToContact::getTarget));
         return Collections.unmodifiableList(result);
+    }
+
+    @Override
+    public boolean hasEnabledChannelForGroup(String groupId) {
+        if (groupId == null) return false;
+        for (ChannelConfig config : configs.values()) {
+            if (config != null && config.isEnabled()
+                    && bindingAllowsOwner(config.getBinding(), groupId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void clear() { routes.clear(); }

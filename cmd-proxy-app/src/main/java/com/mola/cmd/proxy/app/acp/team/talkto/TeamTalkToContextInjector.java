@@ -102,11 +102,14 @@ public final class TeamTalkToContextInjector extends TalkToContextInjector {
             sb.append("- ").append(GSON.toJson(card)).append("\n");
         }
         List<ExternalTalkToContact> externalContacts = externalContacts(team);
+        boolean hasExternalChannel = externalContactProvider != null
+                && externalOwnerKey != null
+                && externalContactProvider.hasEnabledChannelForGroup(externalOwnerKey);
         sb.append("\n发送 Agent 消息时直接调用 talk_to MCP 工具，并使用上方列出的准确 target。\n");
         sb.append("\nTeam talk_to 限制不适用于 dispatch_subagent、schedule、memory 或其他 ACP 能力；");
         sb.append("这些能力仍按正常模式工作。\n");
         sb.append("</agent-team>\n");
-        appendExternalChannelContext(sb, externalContacts);
+        if (hasExternalChannel) appendExternalChannelContext(sb, externalContacts);
         return sb.toString();
     }
 

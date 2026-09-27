@@ -307,9 +307,31 @@ public final class StarweaveTeamApiBridge {
     }
 
     public static JSONObject member(JSONObject request) {
-        Runtime current = requireRuntime();
         if (request == null) throw new IllegalArgumentException("request body is required");
-        JSONObject commandValue = new JSONObject(request);
+        Runtime current = requireRuntime();
+        if ("send".equals(request.getString("action"))) {
+            try {
+                return current.messageRequests.execute(request.getString("requestId"), request.toJSONString(),
+                        () -> executeMember(current, request));
+            } catch (RuntimeException error) { throw error;
+            } catch (Exception error) { throw new IllegalStateException(error); }
+        }
+        // A lower replay bound, sampled before history. Overlap is merged by message ID/revision.
+        long replayAfter;
+        synchronized (EVENTS) {
+            replayAfter = EVENTS.isEmpty() ? 0L : EVENTS.getLast().getLongValue("eventSeq");
+        }
+        JSONObject result = executeMember(current, request);
+        if ("history".equals(request.getString("action")) && result.getJSONObject("data") != null) {
+            result.getJSONObject("data").put("replayAfter", replayAfter);
+        }
+        return result;
+    }
+
+    private static JSONObject executeMember(Runtime current, JSONObject request) {
+        if (request == null) throw new IllegalArgumentException("request body is required");
+        JSONObject commandValue = new JSONObject(true);
+        commandValue.putAll(request);
         commandValue.put("schemaVersion", TeamDefinition.SCHEMA_VERSION);
         commandValue.put("ownerChatterId", current.ownerId);
         List<StarweaveUploadStore.ResolvedUpload> resolvedUploads = new ArrayList<>();
@@ -454,8 +476,8 @@ public final class StarweaveTeamApiBridge {
                 team.get().getDefinition().getOwnerChatterId())) return false;
         JSONObject value = JSON.parseObject(GSON.toJson(event));
         value.put("teamEventSeq", event.getEventSeq());
-        value.put("eventSeq", EVENT_SEQUENCE.incrementAndGet());
         synchronized (EVENTS) {
+            value.put("eventSeq", EVENT_SEQUENCE.incrementAndGet());
             EVENTS.addLast(value);
             while (EVENTS.size() > EVENT_CAPACITY) EVENTS.removeFirst();
             EVENTS.notifyAll();
@@ -779,6 +801,7 @@ public final class StarweaveTeamApiBridge {
     }
 
     private static final class Runtime {
+        final StarweaveRequestDeduplicator messageRequests = new StarweaveRequestDeduplicator();
         final TeamManager manager;
         final String ownerId;
         final String instanceId;

@@ -6,6 +6,7 @@ import org.junit.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -51,6 +52,65 @@ public class ConfigUiStaticAssetHttpTest {
         HttpURLConnection connection = open("/assets/unknown.woff2");
 
         assertEquals(404, connection.getResponseCode());
+        connection.disconnect();
+    }
+
+    @Test
+    public void servesStylesAndScriptsWithSafeContentTypesAndRevalidation() throws Exception {
+        HttpURLConnection stylesheet = open("/assets/css/base.css");
+        assertEquals(200, stylesheet.getResponseCode());
+        assertEquals("text/css; charset=utf-8", stylesheet.getHeaderField("Content-Type"));
+        assertEquals("no-cache", stylesheet.getHeaderField("Cache-Control"));
+        assertEquals("nosniff", stylesheet.getHeaderField("X-Content-Type-Options"));
+        assertTrue(new String(readAll(stylesheet.getInputStream()), StandardCharsets.UTF_8)
+                .contains("@font-face"));
+        stylesheet.disconnect();
+
+        HttpURLConnection script = open("/assets/js/app.js");
+        assertEquals(200, script.getResponseCode());
+        assertEquals("application/javascript; charset=utf-8",
+                script.getHeaderField("Content-Type"));
+        assertEquals("no-cache", script.getHeaderField("Cache-Control"));
+        assertTrue(new String(readAll(script.getInputStream()), StandardCharsets.UTF_8)
+                .contains("async function init"));
+        script.disconnect();
+    }
+
+    @Test
+    public void supportsHeadAndRejectsWritesAndUnlistedPaths() throws Exception {
+        HttpURLConnection head = open("/assets/js/core.js");
+        head.setRequestMethod("HEAD");
+        assertEquals(200, head.getResponseCode());
+        assertEquals("application/javascript; charset=utf-8",
+                head.getHeaderField("Content-Type"));
+        head.disconnect();
+
+        HttpURLConnection post = open("/assets/js/core.js");
+        post.setRequestMethod("POST");
+        assertEquals(405, post.getResponseCode());
+        post.disconnect();
+
+        HttpURLConnection traversal = open("/assets/%2e%2e/index.html");
+        assertEquals(404, traversal.getResponseCode());
+        traversal.disconnect();
+    }
+
+    @Test
+    public void exposesEditableProviderModelCatalogEndpoint() throws Exception {
+        HttpURLConnection connection = open("/api/provider-models");
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json");
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(("{\"provider\":\"KIRO_CLI\","
+                    + "\"workDir\":\"/workspace/model-catalog-http-test\"}")
+                    .getBytes(StandardCharsets.UTF_8));
+        }
+
+        assertEquals(200, connection.getResponseCode());
+        String body = new String(readAll(connection.getInputStream()), StandardCharsets.UTF_8);
+        assertTrue(body.contains("\"success\":true"));
+        assertTrue(body.contains("\"models\""));
         connection.disconnect();
     }
 

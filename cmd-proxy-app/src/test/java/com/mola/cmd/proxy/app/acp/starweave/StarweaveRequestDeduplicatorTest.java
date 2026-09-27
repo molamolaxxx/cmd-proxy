@@ -38,4 +38,21 @@ public class StarweaveRequestDeduplicatorTest {
         deduplicator.execute("request-1", "new:session-1", JSONObject::new);
         deduplicator.execute("request-1", "delete:session-1", JSONObject::new);
     }
+    @Test
+    public void ambiguousFailureIsNotExecutedAgainOnRetry() throws Exception {
+        StarweaveRequestDeduplicator deduplicator = new StarweaveRequestDeduplicator(4, 60_000L);
+        AtomicInteger calls = new AtomicInteger();
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                deduplicator.execute("send-1", "same-message", () -> {
+                    calls.incrementAndGet();
+                    throw new java.io.IOException("response lost after acceptance");
+                });
+                org.junit.Assert.fail("expected ambiguous failure");
+            } catch (java.io.IOException expected) {
+                assertEquals("response lost after acceptance", expected.getMessage());
+            }
+        }
+        assertEquals(1, calls.get());
+    }
 }

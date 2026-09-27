@@ -1,10 +1,7 @@
 package com.mola.cmd.proxy.app.acp.channel;
 
+import com.mola.cmd.proxy.app.acp.configui.ConfigUiTestResources;
 import org.junit.Test;
-
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -12,12 +9,7 @@ import static org.junit.Assert.assertTrue;
 public class ChannelConfigUiContractTest {
     @Test
     public void outboundTargetsAreAnEditableDiscoveryBackedList() throws Exception {
-        InputStream input = getClass().getResourceAsStream("/configui/index.html");
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[4096];
-        int read;
-        while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
-        String html = new String(output.toByteArray(), StandardCharsets.UTF_8);
+        String html = ConfigUiTestResources.loadBundle();
 
         assertTrue(html.contains("id=\"channelDialog\""));
         assertTrue(html.contains("onclick=\"openChannelDialog(-1)\""));

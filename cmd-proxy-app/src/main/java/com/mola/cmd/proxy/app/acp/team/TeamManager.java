@@ -212,7 +212,9 @@ public final class TeamManager implements AutoCloseable {
             List<TeamMemberDefinition> members) {
         List<TeamMemberDefinition> starting = new ArrayList<>();
         for (TeamMemberDefinition member : members) {
-            starting.add(member.withState(TeamMemberState.STARTING, null, null));
+            starting.add(member.getState() == TeamMemberState.SLEEP
+                    ? member
+                    : member.withState(TeamMemberState.STARTING, null, null));
         }
         return starting;
     }
@@ -1172,7 +1174,9 @@ public final class TeamManager implements AutoCloseable {
                     TeamEventType.SCHEDULE_EVENT, data));
             replacement.send(prompt, null,
                     replacement.promptOptionsForScheduleExecution(
-                            authPrincipalContext, channelDeliveryContext));
+                            authPrincipalContext, channelDeliveryContext)
+                            .setScheduleExecutionId(scheduleTaskManager == null ? null
+                                    : scheduleTaskManager.activeExecutionId(owner, taskId)));
             return true;
         } catch (Exception error) {
             logger.warn("schedule_gate result=error taskId={} owner={} message={}",
@@ -1251,8 +1255,29 @@ public final class TeamManager implements AutoCloseable {
             AcpClient client = requireReadyClient(route);
             publishMemberState(route.runtime, route.member.getTeamMemberId(),
                     com.mola.cmd.proxy.app.acp.team.model.TeamMemberState.BUSY, null);
-            if (options == null) client.send(command.getMessage(), command.getFiles());
-            else client.send(command.getMessage(), command.getFiles(), options);
+            com.mola.cmd.proxy.app.acp.acpclient.PromptOptions effective = options == null
+                    ? com.mola.cmd.proxy.app.acp.acpclient.PromptOptions.defaults() : options;
+            effective.setClientMessageId(command.getClientMessageId());
+            client.send(command.getMessage(), command.getFiles(), effective);
+            if (command.getClientMessageId() != null) {
+                Map<String, Object> accepted = new LinkedHashMap<>();
+                accepted.put("messageId", command.getClientMessageId());
+                accepted.put("revision", 1L);
+                accepted.put("content", command.getMessage());
+                accepted.put("sessionId", client.getSessionId());
+                List<Map<String, Object>> attachments = new ArrayList<>();
+                if (command.getFiles() != null) for (Map<String, String> file : command.getFiles()) {
+                    for (String name : file.keySet()) {
+                        Map<String, Object> attachment = new LinkedHashMap<>();
+                        attachment.put("fileName", name);
+                        attachments.add(attachment);
+                    }
+                }
+                accepted.put("attachments", attachments);
+                eventSink.publish(TeamEventEnvelope.next(route.runtime,
+                        route.member.getTeamMemberId(), route.member.getAcpClientId(),
+                        TeamEventType.USER_MESSAGE_ACCEPTED, accepted));
+            }
             TeamMemberDefinition busy = findMember(
                     route.runtime.getDefinition(), route.member.getTeamMemberId());
             Map<String, Object> data = memberData(route.runtime, busy, client);
@@ -1377,6 +1402,21 @@ public final class TeamManager implements AutoCloseable {
     public TeamCommandResult getSessionHistory(String requestId, TeamMemberCommand command) {
         try {
             MemberRoute route = requireMemberRoute(command, false);
+            // Pair the session identity and history across wake/new-session transitions.
+            route.runtime.getOperationLock().lock();
+            try {
+                return readSessionHistory(requestId, command);
+            } finally {
+                route.runtime.getOperationLock().unlock();
+            }
+        } catch (MemberRouteException e) {
+            return TeamCommandResult.error(requestId, e.code, e.getMessage());
+        }
+    }
+
+    private TeamCommandResult readSessionHistory(String requestId, TeamMemberCommand command) {
+        try {
+            MemberRoute route = requireMemberRoute(command, false);
             ensureGrantActive(route.team);
             AcpClient client = requireExistingClient(route);
             String sessionId = command.getSessionId();
@@ -1384,7 +1424,7 @@ public final class TeamManager implements AutoCloseable {
                 sessionId = client.getSessionId();
             }
             List<com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage> history =
-                    client.getHistoryManager().getFullHistory(sessionId);
+                    client.getHistoryManager().getUiHistory(sessionId);
             Set<String> eventTypes = new HashSet<>();
             Set<String> receivedTalkTo = new HashSet<>();
             Set<String> channelMessages = new HashSet<>();
@@ -1425,6 +1465,8 @@ public final class TeamManager implements AutoCloseable {
                         history.get(historyIndex);
                 Map<String, Object> value = new LinkedHashMap<>();
                 value.put("role", message.getRole().name());
+                value.put("messageId", message.getMessageId());
+                value.put("revision", message.getRevision());
                 if (message.getRole()
                         == com.mola.cmd.proxy.app.acp.acpclient.context.ContextMessage.Role.EVENT) {
                     if (TeamEventType.TOOL_CALL.name().equals(message.getEventType())
@@ -2132,10 +2174,7 @@ public final class TeamManager implements AutoCloseable {
                             checkKey, lastCheck, nowMillis)) continue;
                     long idleMillis = TimeUnit.MINUTES.toMillis(config.getIdleMinutes());
                     if (old.getState() == AbstractAcpClient.State.SLEEP) {
-                        if (old.hasSessionMessages()
-                                && nowMillis - old.getLastMessageAt() >= idleMillis) {
-                            old.markNewSessionOnWake();
-                        }
+                        // 睡眠会话在唤醒时按最新空闲时长判断是否新建。
                         continue;
                     }
                     if (!old.tryReserveIdleForAutoNewSession(nowMillis, idleMillis)) continue;
