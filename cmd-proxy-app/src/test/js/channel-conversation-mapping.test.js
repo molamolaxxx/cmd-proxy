@@ -105,3 +105,22 @@ test('combined picker searches, selects and restores committed selection when cl
     assert.match(input.value,/张三/)
     assert.equal(c.channelDialogDraft.binding.conversationMappings[0].conversationId,'user-1')
 })
+
+test('conversation options separate name, preview and ID and mark the actual selection', () => {
+    const {context:c}=fixture()
+    c.addChannelConversationMapping()
+    c.channelDialogDraft.knownChatTargets[0].lastMessagePreview='长消息 <script>danger</script>'
+    c.setChannelMappingConversation(0,JSON.stringify(['group','chat-1']))
+    const html=c.channelMappingOptions(0,'')
+    assert.match(html,/channel-conversation-heading/)
+    assert.match(html,/channel-conversation-preview">最新消息：长消息 &lt;script>/)
+    assert.match(html,/channel-conversation-id">群 ID：chat-1/)
+    assert.equal((html.match(/aria-label="已选中"/g)||[]).length,1)
+    assert.equal(c.channelMappingLabel(c.channelDialogDraft.binding.conversationMappings[0]),'[群聊] 收入群')
+    assert.match(c.channelMappingTooltip(c.channelDialogDraft.binding.conversationMappings[0]),/最新消息：长消息/)
+    assert.doesNotMatch(html,/<script>/)
+})
+test('unnamed groups are distinguishable by ID suffix without expanding the closed field', () => {
+    const {context:c}=fixture()
+    assert.equal(c.channelConversationTitle({chatType:'group',displayName:'未提供群名',id:'wr57CoCQAA7xq6K6ZeTVE1VoS45Hxohq'}),'[群聊] 未提供群名 · S45Hxohq')
+})
