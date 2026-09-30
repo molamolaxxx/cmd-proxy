@@ -849,7 +849,8 @@ public class ConfigUiServer {
         }
         // 全局代理已改为批量操作；清理旧配置字段，避免继续维护独立状态。
         json.remove("globalProxyEnabled");
-        String channelTargetError = validateChannelOutboundTargets(json);
+        String channelTargetError = validateChannelConversationMappings(json);
+        if (channelTargetError == null) channelTargetError = validateChannelOutboundTargets(json);
         if (channelTargetError != null) {
             JSONObject error = new JSONObject(true);
             error.put("error", channelTargetError);
@@ -886,6 +887,45 @@ public class ConfigUiServer {
             return;
         }
         sendResponse(exchange, 200, "application/json", "{\"ok\":true}");
+    }
+
+    String validateChannelConversationMappings(JSONObject root) {
+        com.alibaba.fastjson.JSONArray channels = root.getJSONArray("channels");
+        if (channels == null) return null;
+        List<Map<String, Object>> teams = null;
+        for (int i = 0; i < channels.size(); i++) {
+            JSONObject channel = channels.getJSONObject(i);
+            JSONObject value = channel == null ? null : channel.getJSONObject("binding");
+            if (value == null) continue;
+            com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding binding;
+            try {
+                binding = value.toJavaObject(com.mola.cmd.proxy.app.acp.channel.model.ChannelBinding.class);
+            } catch (RuntimeException e) {
+                return "channel binding is invalid";
+            }
+            if (!binding.usesConversationMapping()) continue;
+            if (trimmed(binding.getTeamId()).isEmpty()) return "binding.teamId is required";
+            if (!trimmed(binding.getTeamMemberId()).isEmpty()) return "conversation mapping binding cannot contain teamMemberId";
+            if (teams == null) {
+                try { teams = channelBindingTargetSupplier.get(); }
+                catch (RuntimeException e) { return "Team binding targets are unavailable"; }
+                if (teams == null) teams = java.util.Collections.emptyList();
+            }
+            java.util.Set<String> members = null;
+            for (Map<String, Object> team : teams) {
+                if (!trimmed(binding.getTeamId()).equals(String.valueOf(team.get("id")))) continue;
+                if ("CAPTAIN".equals(String.valueOf(team.get("mode")))) return "CAPTAIN_ONLY_BINDING: captain Team must use FIXED captain member";
+                members = new java.util.HashSet<>();
+                Object list = team.get("members");
+                if (list instanceof List) for (Object item : (List<?>) list) {
+                    if (item instanceof Map) members.add(String.valueOf(((Map<?, ?>) item).get("id")));
+                }
+            }
+            String error = binding.validateConversationMappings(members);
+            if (error != null) return error;
+            value.put("conversationMappings", binding.getConversationMappings());
+        }
+        return null;
     }
 
     private String validateChannelOutboundTargets(JSONObject root) {

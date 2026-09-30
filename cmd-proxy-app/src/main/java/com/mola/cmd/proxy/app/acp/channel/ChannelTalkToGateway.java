@@ -104,6 +104,12 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
         if (!("group".equals(chatType) || "single".equals(chatType))) return null;
         String address = trim(context.getConversationAddress());
         if (address.isEmpty()) return null;
+        if (binding.usesConversationMapping()) {
+            com.mola.cmd.proxy.app.acp.channel.model.ChannelConversationMapping mapping =
+                    binding.findConversationMapping(chatType, address);
+            if (mapping == null || !senderGroupId.equals("team:" + trim(binding.getTeamId())
+                    + ":" + trim(mapping.getTeamMemberId()))) return null;
+        }
         long expiresAt = System.currentTimeMillis() + ttlMs;
         ChannelReplyRoute route = new ChannelReplyRoute(null, null,
                 "group".equals(chatType) ? context.getSenderId() : address,
@@ -358,6 +364,14 @@ public final class ChannelTalkToGateway implements ExternalTalkToGateway, Extern
             return ownerKey.equals(bindingOwnerKey(binding));
         }
         String teamId = trim(binding.getTeamId());
+        if (binding.usesConversationMapping()) {
+            for (com.mola.cmd.proxy.app.acp.channel.model.ChannelConversationMapping mapping
+                    : binding.getConversationMappings()) {
+                if (mapping != null && ownerKey.equals("team:" + teamId + ":"
+                        + trim(mapping.getTeamMemberId()))) return true;
+            }
+            return false;
+        }
         return !teamId.isEmpty() && ownerKey.startsWith("team:" + teamId + ":")
                 && ownerKey.length() > ("team:" + teamId + ":").length();
     }

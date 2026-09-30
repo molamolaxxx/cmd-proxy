@@ -78,12 +78,21 @@ public final class ChannelTalkToBridge {
                 return TalkToDispatcher.InboundDeliveryResult.rejected(
                         "channel private chat disabled");
             }
+            boolean mapped = config.getBinding().usesConversationMapping();
+            if (mapped && config.getBinding().findConversationMapping(chatType,
+                    DefaultChannelBindingResolver.conversationAddress(event)) == null) {
+                String replyTarget = gateway.createRoute(event.getChannelId(), event.getReplyRoute(), null);
+                replyFailureAsync(replyTarget, "当前企微会话尚未绑定智能体，请联系管理员配置会话路由。");
+                return TalkToDispatcher.InboundDeliveryResult.rejected("conversation binding not configured");
+            }
             ChannelBoundTarget target = bindingResolver.resolve(config.getBinding(), event);
             AcpClient client = target == null ? null : target.getClient();
             if (!isMainClient(client)) {
                 String replyTarget = gateway.createRoute(event.getChannelId(),
                         event.getReplyRoute(), null);
-                replyFailureAsync(replyTarget, "信道当前未绑定到可用的 ACP，请检查配置。");
+                replyFailureAsync(replyTarget, mapped
+                        ? "当前会话绑定的智能体暂不可用，请联系管理员检查配置。"
+                        : "信道当前未绑定到可用的 ACP，请检查配置。");
                 return TalkToDispatcher.InboundDeliveryResult.rejected("ACP binding not found");
             }
 

@@ -5,7 +5,7 @@ const path = require('node:path')
 const vm = require('node:vm')
 
 const html = fs.readFileSync(path.resolve(
-    __dirname, '../../main/resources/configui/index.html'
+    __dirname, '../../main/resources/configui/assets/js/channels.js'
 ), 'utf8')
 
 function functionSource(name) {

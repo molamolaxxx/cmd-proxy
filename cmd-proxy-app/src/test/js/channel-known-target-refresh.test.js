@@ -5,7 +5,7 @@ const path = require('node:path')
 const vm = require('node:vm')
 
 const html = fs.readFileSync(path.resolve(
-    __dirname, '../../main/resources/configui/index.html'
+    __dirname, '../../main/resources/configui/assets/js/channels.js'
 ), 'utf8')
 
 function functionSource(name) {
@@ -36,7 +36,8 @@ test('refreshing known targets preserves the outbound target draft', () => {
         },
         document: {getElementById: id => selects[id] || null},
         channelOutboundTargetOptions: () => '<option>new</option>',
-        normalizeChannelOutboundTargets: ch => ch.outboundTargets
+        normalizeChannelOutboundTargets: ch => ch.outboundTargets,
+        refreshChannelMappingOptions: () => {}
     })
     vm.runInContext(functionSource('applyChannelKnownTargets'), context)
 

@@ -1,0 +1,78 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const vm = require('node:vm')
+const source = fs.readFileSync(path.resolve(__dirname, '../../main/resources/configui/assets/js/channels.js'), 'utf8')
+function fixture() {
+    const nodes = {}, messages = []
+    const context = vm.createContext({
+        document: {getElementById: id => nodes[id] || null},
+        esc: value => String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'),
+        showSnackbar: message => messages.push(message),
+        channelDialogDraft: {
+            binding: {type:'TEAM_MEMBER', teamId:'team-1', teamMemberSelection:'CONVERSATION_MAPPING', conversationMappings:[]},
+            outboundTargets: [{id:'ops', chatId:'chat-1', description:'通知'}],
+            knownChatTargets: [{id:'chat-1', chatType:'group', displayName:'收入群'}, {id:'user-1', chatType:'single', displayName:'张三'}]
+        }
+    })
+    vm.runInContext(source, context)
+    context.renderChannelDialogBody = () => {}
+    return {context, nodes, messages}
+}
+test('many conversations may map to one member, but duplicate conversations are rejected', () => {
+    const {context:c, messages} = fixture()
+    c.addChannelConversationMapping(); c.addChannelConversationMapping()
+    c.setChannelMappingConversation(0, JSON.stringify(['group','chat-1']))
+    c.setChannelMappingConversation(1, JSON.stringify(['group','chat-1']))
+    assert.equal(messages.length, 1)
+    assert.equal(c.channelDialogDraft.binding.conversationMappings[1].conversationId, '')
+    c.setChannelMappingConversation(1, JSON.stringify(['single','user-1']))
+    c.channelDialogDraft.binding.conversationMappings.forEach(m => m.teamMemberId='member-a')
+    assert.equal(c.validateChannelConversationMappings(c.channelDialogDraft, {members:[{id:'member-a'}]}), '')
+    assert.match(c.validateChannelConversationMappings(c.channelDialogDraft, {members:[]}), /有效团队成员/)
+})
+test('search and runtime discovery refresh preserve selections, members and outbound draft', () => {
+    const {context:c, nodes} = fixture()
+    c.addChannelConversationMapping()
+    c.setChannelMappingConversation(0, JSON.stringify(['group','chat-1']))
+    c.channelDialogDraft.binding.conversationMappings[0].teamMemberId='member-a'
+    nodes.channelMappingChat_0 = {innerHTML:''}
+    nodes.channelMappingSearch_0 = {value:'新群'}
+    c.applyChannelKnownTargets([{id:'chat-2', chatType:'group', displayName:'新群'}])
+    assert.match(nodes.channelMappingChat_0.innerHTML, /chat-2/)
+    assert.match(nodes.channelMappingChat_0.innerHTML, /历史会话/)
+    assert.equal(c.channelDialogDraft.binding.conversationMappings[0].conversationId, 'chat-1')
+    assert.equal(c.channelDialogDraft.binding.conversationMappings[0].teamMemberId, 'member-a')
+    assert.equal(c.channelDialogDraft.outboundTargets[0].description, '通知')
+})
+test('type is part of identity and a row can be removed without changing the other mapping', () => {
+    const {context:c} = fixture()
+    c.addChannelConversationMapping(); c.addChannelConversationMapping()
+    c.setChannelMappingConversation(0, JSON.stringify(['group','same']))
+    c.setChannelMappingConversation(1, JSON.stringify(['single','same']))
+    c.channelDialogDraft.binding.conversationMappings.forEach(m => m.teamMemberId='member-a')
+    assert.equal(c.validateChannelConversationMappings(c.channelDialogDraft, {members:[{id:'member-a'}]}), '')
+    c.removeChannelConversationMapping(0)
+    assert.equal(c.channelDialogDraft.binding.conversationMappings[0].chatType, 'single')
+    c.removeChannelConversationMapping(0)
+    assert.equal(c.validateChannelConversationMappings(c.channelDialogDraft, {members:[]}), '')
+})
+test('rendering exposes routing mode only for ordinary teams and retains the mapping list', () => {
+    const {context:c, nodes} = fixture()
+    delete c.renderChannelDialogBody
+    vm.runInContext(source, c)
+    nodes.channelDialogBody={innerHTML:''}
+    c.availableGroups=()=>[]
+    c.channelBindingTargets={teams:[{id:'team-1', mode:'NORMAL', members:[{id:'member-a',name:'收入专家'}]}]}
+    c.channelDialogDraft.binding.conversationMappings=[{chatType:'group',conversationId:'chat-1',teamMemberId:'member-a'}]
+    c.renderChannelDialogBody()
+    assert.match(nodes.channelDialogBody.innerHTML, /value="CONVERSATION_MAPPING"/)
+    assert.match(nodes.channelDialogBody.innerHTML, /会话路由映射/)
+    assert.match(nodes.channelDialogBody.innerHTML, /收入专家/)
+    c.channelBindingTargets.teams[0].mode='CAPTAIN'
+    c.channelBindingTargets.teams[0].captainTeamMemberId='member-a'
+    c.renderChannelDialogBody()
+    assert.doesNotMatch(nodes.channelDialogBody.innerHTML, /value="CONVERSATION_MAPPING"/)
+    assert.equal(c.channelDialogDraft.binding.teamMemberSelection, 'FIXED')
+})

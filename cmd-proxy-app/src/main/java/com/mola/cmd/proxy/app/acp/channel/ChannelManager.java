@@ -282,7 +282,8 @@ public final class ChannelManager implements AutoCloseable {
             String selection = binding.effectiveTeamMemberSelection();
             if (!ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)
                     && !ChannelBinding.MEMBER_SELECTION_RANDOM.equals(selection)
-                    && !ChannelBinding.MEMBER_SELECTION_AFFINITY.equals(selection)) {
+                    && !ChannelBinding.MEMBER_SELECTION_AFFINITY.equals(selection)
+                    && !ChannelBinding.MEMBER_SELECTION_CONVERSATION_MAPPING.equals(selection)) {
                 return "unsupported binding.teamMemberSelection";
             }
             if (ChannelBinding.MEMBER_SELECTION_FIXED.equals(selection)) {
@@ -305,6 +306,14 @@ public final class ChannelManager implements AutoCloseable {
                             trim(binding.getTeamMemberId()))) memberFound = true;
                 }
                 if (!memberFound) return "binding Team member not found locally";
+            }
+            if (binding.usesConversationMapping()) {
+                Set<String> members = team == null ? null : new HashSet<>();
+                if (team != null) for (TeamMemberDefinition member : team.getMembers()) {
+                    members.add(member.getTeamMemberId());
+                }
+                String mappingError = binding.validateConversationMappings(members);
+                if (mappingError != null) return mappingError;
             }
         } else {
             return "unsupported binding.type";

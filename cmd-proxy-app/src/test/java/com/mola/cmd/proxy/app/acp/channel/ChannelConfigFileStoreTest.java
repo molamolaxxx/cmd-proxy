@@ -16,6 +16,31 @@ import static org.junit.Assert.assertTrue;
 public class ChannelConfigFileStoreTest {
 
     @Test
+    public void mappingPersistsIndependentlyOfDiscoveredConversationEviction() throws Exception {
+        Path file = Files.createTempFile("channel-mapping", ".json");
+        try {
+            Files.write(file, "{\"channels\":[{\"id\":\"wecom-1\",\"secret\":\"secret\"}]}".getBytes(StandardCharsets.UTF_8));
+            com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig channel = new com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig();
+            channel.setId("wecom-1");
+            channel.setSecret("********");
+            channel.setBinding(com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.binding());
+            channel.getBinding().setConversationMappings(java.util.Collections.singletonList(
+                    com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.mapping("group", "old-chat", "member-a")));
+            JSONObject submitted = JSON.parseObject("{\"channels\":[]}");
+            submitted.getJSONArray("channels").add(channel);
+            submitted = JSON.parseObject(submitted.toJSONString());
+            ChannelConfigFileStore.saveUiConfig(file, submitted, "********");
+            for (int i = 0; i < 201; i++) ChannelConfigFileStore.recordKnownChatTarget(file,
+                    "wecom-1", "new-chat-" + i, "新群", "group");
+            com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig restored = read(file).getJSONArray("channels")
+                    .getJSONObject(0).toJavaObject(com.mola.cmd.proxy.app.acp.channel.model.ChannelConfig.class);
+            assertEquals(200, restored.getKnownChatTargets().size());
+            assertNotNull(restored.getBinding().findConversationMapping("group", "old-chat"));
+            assertEquals("secret", restored.getSecret());
+        } finally { Files.deleteIfExists(file); }
+    }
+
+    @Test
     public void addsStableArchiveIdsToLegacyChannelsIdempotently() throws Exception {
         Path file = Files.createTempFile("channel-archive-id-", ".json");
         Files.write(file, "{\"channels\":[{\"id\":\"wecom-1\",\"secret\":\"s\"}]}"

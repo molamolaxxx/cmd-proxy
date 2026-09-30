@@ -90,6 +90,19 @@ public final class DefaultChannelBindingResolver implements ChannelBindingResolv
             String fixed = trim(binding.getTeamMemberId());
             return fixed.isEmpty() ? null : fixed;
         }
+        if (binding.usesConversationMapping()) {
+            if (event == null) return null;
+            com.mola.cmd.proxy.app.acp.channel.model.ChannelConversationMapping mapping =
+                    binding.findConversationMapping(event.getReplyRoute().getChatType(),
+                            conversationAddress(event));
+            if (mapping == null) return null;
+            for (TeamMemberDefinition member : team.getMembers()) {
+                if (mapping.getTeamMemberId().equals(member.getTeamMemberId())
+                        && member.getState() != TeamMemberState.CLOSING
+                        && member.getState() != TeamMemberState.CLOSED) return member.getTeamMemberId();
+            }
+            return null;
+        }
         List<String> stable = new ArrayList<>();
         List<String> selectable = new ArrayList<>();
         for (TeamMemberDefinition member : team.getMembers()) {
@@ -136,6 +149,11 @@ public final class DefaultChannelBindingResolver implements ChannelBindingResolv
             return userId.isEmpty() ? null : "SINGLE:" + userId;
         }
         return null;
+    }
+
+    static String conversationAddress(ChannelEvent event) {
+        return "group".equals(event.getReplyRoute().getChatType())
+                ? trim(event.getReplyRoute().getChatId()) : trim(event.getSenderId());
     }
 
     private static String trim(String value) {

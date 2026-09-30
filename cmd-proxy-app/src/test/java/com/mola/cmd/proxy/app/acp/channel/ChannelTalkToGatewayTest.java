@@ -36,6 +36,62 @@ import static org.junit.Assert.*;
 public class ChannelTalkToGatewayTest {
 
     @Test
+    public void mappedConversationRestorationChecksCurrentConversationOwner() {
+        ChannelConfig config = config(null, "target-chat");
+        ChannelBinding binding = com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.binding();
+        binding.setConversationMappings(Arrays.asList(
+                com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.mapping("group", "chat-a", "member-a"),
+                com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.mapping("group", "chat-b", "member-b")));
+        config.setBinding(binding);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(Collections.emptyMap(),
+                Collections.singletonMap("wecom-main", config));
+        ChannelDeliveryContext context = new ChannelDeliveryContext("wecom-main", "group",
+                "chat-a", "user", "sender", "team:team-1:member-a");
+        assertNotNull(gateway.restoreChannelTurn(context, "team:team-1:member-a"));
+        assertNull(gateway.restoreChannelTurn(context, "team:team-1:member-b"));
+        assertFalse(gateway.hasEnabledChannelForGroup("team:team-1:outsider"));
+        assertTrue(gateway.hasEnabledChannelForGroup("team:team-1:member-a"));
+        binding.getConversationMappings().get(0).setTeamMemberId("member-b");
+        assertNull(gateway.restoreChannelTurn(context, "team:team-1:member-a"));
+    }
+
+    @Test
+    public void unmappedAndUnavailableConversationsReplyWithoutDispatchingToAnAgent() throws Exception {
+        CountDownLatch firstReply = new CountDownLatch(1), secondReply = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> reply = new java.util.concurrent.atomic.AtomicReference<>();
+        RecordingAdapter adapter = new RecordingAdapter() {
+            @Override public ChannelSendResult send(ChannelReplyRoute route, String markdown) {
+                ChannelSendResult result = super.send(route, markdown);
+                reply.set(markdown);
+                if (firstReply.getCount() > 0) firstReply.countDown(); else secondReply.countDown();
+                return result;
+            }
+        };
+        ChannelConfig config = config(null, "");
+        config.setBinding(com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.binding());
+        Map<String, ChannelConfig> configs = Collections.singletonMap("wecom-main", config);
+        ChannelTalkToGateway gateway = new ChannelTalkToGateway(
+                Collections.singletonMap("wecom-main", adapter), configs);
+        AtomicInteger resolutions = new AtomicInteger();
+        ChannelTalkToBridge bridge = new ChannelTalkToBridge(configs, binding -> {
+            resolutions.incrementAndGet(); return null;
+        }, gateway);
+        com.mola.cmd.proxy.app.acp.channel.model.ChannelEvent event =
+                new com.mola.cmd.proxy.app.acp.channel.model.ChannelEvent("wecom-main", "msg", "user", "sender", "hello",
+                        new ChannelReplyRoute("req", "msg", "user", "chat", "group", System.currentTimeMillis() + 60000));
+        assertEquals("conversation binding not configured", bridge.onEvent(event).getReason());
+        assertEquals(0, resolutions.get());
+        assertTrue(firstReply.await(5, TimeUnit.SECONDS));
+        assertEquals("当前企微会话尚未绑定智能体，请联系管理员配置会话路由。", reply.get());
+        config.getBinding().setConversationMappings(Collections.singletonList(
+                com.mola.cmd.proxy.app.acp.team.ChannelConversationRoutingTest.mapping("group", "chat", "member-a")));
+        assertEquals("ACP binding not found", bridge.onEvent(event).getReason());
+        assertEquals(1, resolutions.get());
+        assertTrue(secondReply.await(5, TimeUnit.SECONDS));
+        assertEquals("当前会话绑定的智能体暂不可用，请联系管理员检查配置。", reply.get());
+    }
+
+    @Test
     public void channelTurnUsesPreciseReplyOnceThenCurrentConversationAndReleasesExplicitly() {
         RecordingAdapter adapter = new RecordingAdapter();
         Map<String, ChannelAdapter> adapters = new HashMap<>();
@@ -578,7 +634,7 @@ public class ChannelTalkToGatewayTest {
         return new ChannelReplyRoute("req", "msg", "user", "chat", "single", expiresAt);
     }
 
-    private static final class RecordingAdapter implements ChannelAdapter {
+    private static class RecordingAdapter implements ChannelAdapter {
         private final AtomicInteger calls = new AtomicInteger();
         private final AtomicInteger preciseCalls = new AtomicInteger();
         private final AtomicInteger proactiveCalls = new AtomicInteger();
