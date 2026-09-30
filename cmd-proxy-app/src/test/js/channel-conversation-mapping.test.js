@@ -37,11 +37,12 @@ test('search and runtime discovery refresh preserve selections, members and outb
     c.addChannelConversationMapping()
     c.setChannelMappingConversation(0, JSON.stringify(['group','chat-1']))
     c.channelDialogDraft.binding.conversationMappings[0].teamMemberId='member-a'
-    nodes.channelMappingChat_0 = {innerHTML:''}
-    nodes.channelMappingSearch_0 = {value:'新群'}
+    nodes.channelMappingChat_0 = {value:'新群',dataset:{query:'新群'},getAttribute:()=> 'true'}
+    nodes.channelMappingMenu_0 = {innerHTML:''}
     c.applyChannelKnownTargets([{id:'chat-2', chatType:'group', displayName:'新群'}])
-    assert.match(nodes.channelMappingChat_0.innerHTML, /chat-2/)
-    assert.match(nodes.channelMappingChat_0.innerHTML, /历史会话/)
+    assert.match(nodes.channelMappingMenu_0.innerHTML, /chat-2/)
+    assert.match(c.channelMappingOptions(0,''), /历史会话/)
+    assert.equal(nodes.channelMappingChat_0.value, '新群')
     assert.equal(c.channelDialogDraft.binding.conversationMappings[0].conversationId, 'chat-1')
     assert.equal(c.channelDialogDraft.binding.conversationMappings[0].teamMemberId, 'member-a')
     assert.equal(c.channelDialogDraft.outboundTargets[0].description, '通知')
@@ -70,9 +71,37 @@ test('rendering exposes routing mode only for ordinary teams and retains the map
     assert.match(nodes.channelDialogBody.innerHTML, /value="CONVERSATION_MAPPING"/)
     assert.match(nodes.channelDialogBody.innerHTML, /会话路由映射/)
     assert.match(nodes.channelDialogBody.innerHTML, /收入专家/)
+    assert.match(nodes.channelDialogBody.innerHTML, /role="combobox"/)
+    assert.doesNotMatch(nodes.channelDialogBody.innerHTML, /channelMappingSearch_/)
+    assert.doesNotMatch(nodes.channelDialogBody.innerHTML, /<select id="channelMappingChat_/)
     c.channelBindingTargets.teams[0].mode='CAPTAIN'
     c.channelBindingTargets.teams[0].captainTeamMemberId='member-a'
     c.renderChannelDialogBody()
     assert.doesNotMatch(nodes.channelDialogBody.innerHTML, /value="CONVERSATION_MAPPING"/)
     assert.equal(c.channelDialogDraft.binding.teamMemberSelection, 'FIXED')
+})
+
+test('combined picker searches, selects and restores committed selection when closed', () => {
+    const {context:c,nodes} = fixture()
+    c.addChannelConversationMapping()
+    const classes=new Set(),attributes={}
+    const input={value:'',dataset:{},closest:()=>({classList:{add:v=>classes.add(v),remove:v=>classes.delete(v)}}),
+        setAttribute:(k,v)=>attributes[k]=v,getAttribute:k=>attributes[k],select:()=>{}}
+    nodes.channelMappingChat_0=input
+    nodes.channelMappingMenu_0={innerHTML:''}
+    c.openChannelMappingPicker(0)
+    assert.equal(attributes['aria-expanded'],'true')
+    c.filterChannelMappingOptions(0,'张三')
+    assert.match(nodes.channelMappingMenu_0.innerHTML,/张三/)
+    assert.doesNotMatch(nodes.channelMappingMenu_0.innerHTML,/收入群/)
+    c.chooseChannelMappingOption(0,JSON.stringify(['single','user-1']))
+    assert.equal(attributes['aria-expanded'],'false')
+    assert.match(input.value,/张三/)
+    c.openChannelMappingPicker(0)
+    input.value='does not exist'
+    c.filterChannelMappingOptions(0,input.value)
+    assert.match(nodes.channelMappingMenu_0.innerHTML,/没有匹配/)
+    c.closeChannelMappingPicker(0)
+    assert.match(input.value,/张三/)
+    assert.equal(c.channelDialogDraft.binding.conversationMappings[0].conversationId,'user-1')
 })
