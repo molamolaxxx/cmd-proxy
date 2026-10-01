@@ -14,13 +14,12 @@ function harness(api) {
 }
 test('registers entered values immediately without applying unrelated business config', async () => {
     const calls=[];
-    const h=harness(async (url,options)=>{calls.push({url,body:options&&JSON.parse(options.body)});return {ok:true,json:async()=>({clientEnabled:true,centerUrl:'10.0.0.1:10528',clientCredential:'********',clientStatus:'CONNECTING'})};});
-    h.get('registryCenterUrl').value='10.0.0.1:10528';h.get('registryClientCredential').value='private';h.get('registryDisplayName').value='我的电脑';
+    const h=harness(async (url,options)=>{calls.push({url,body:options&&JSON.parse(options.body)});return {ok:true,json:async()=>({clientEnabled:true,centerUrl:'10.0.0.1:10528',clientStatus:'CONNECTING'})};});
+    h.get('registryCenterUrl').value='10.0.0.1:10528';h.get('registryDisplayName').value='我的电脑';
     await h.context.registerEnvironment();
     assert.equal(calls[0].url,'/api/registry/settings');
-    assert.deepEqual(calls[0].body,{clientEnabled:true,centerUrl:'10.0.0.1:10528',clientCredential:'private',displayName:'我的电脑'});
+    assert.deepEqual(calls[0].body,{clientEnabled:true,centerUrl:'10.0.0.1:10528',displayName:'我的电脑'});
     assert.equal(h.get('registryClientStatus').textContent,'连接中');
-    assert.equal(h.get('registryClientCredential').value,'********');
     assert.equal(h.context.registryBusy,false);
     assert.ok(calls.every(c=>!c.url.includes('/api/refresh')));
 });
@@ -37,8 +36,8 @@ test('a late response from another environment cannot overwrite selected setting
     assert.equal(h.get('registryCenterUrl').value,'新环境');
 });
 test('failed registration releases controls and reports the server error', async () => {
-    const h=harness(async()=>({ok:false,json:async()=>({error:'注册凭证无效'})}));await h.context.registerEnvironment();
-    assert.equal(h.context.registryBusy,false);assert.equal(h.get('registryRegister').disabled,false);assert.equal(h.messages[0],'注册凭证无效');
+    const h=harness(async()=>({ok:false,json:async()=>({error:'中心未启用'})}));await h.context.registerEnvironment();
+    assert.equal(h.context.registryBusy,false);assert.equal(h.get('registryRegister').disabled,false);assert.equal(h.messages[0],'中心未启用');
 });
 test('cancellation only changes registration state', async () => {
     const calls=[];const h=harness(async(url,options)=>{calls.push(options&&JSON.parse(options.body));return{ok:true,json:async()=>({clientEnabled:false,clientStatus:'UNREGISTERED'})}});
@@ -65,4 +64,16 @@ test('fills the default environment name and preserves an edited name during pol
     h.get('registryDisplayName').value='我的开发电脑';
     await h.context.loadRegistrySettings(false);
     assert.equal(h.get('registryDisplayName').value,'我的开发电脑');
+});
+
+test('registry server settings are always visible and contain no credential controls', () => {
+    const html = fs.readFileSync(path.resolve(__dirname, '../../main/resources/configui/index.html'), 'utf8');
+    const section = html.slice(html.indexOf('id="registryClientStatus"'), html.indexOf('id="chatterList"'));
+    assert.ok(section.includes('作为注册中心接受远程环境'));
+    assert.ok(section.includes('id="registryServerEnabled"'));
+    assert.ok(section.includes('id="registryTunnelPort"'));
+    assert.ok(!section.includes('<details'));
+    assert.ok(!section.includes('<summary'));
+    assert.ok(!section.includes('registryClientCredential'));
+    assert.ok(!section.includes('copyRegistryCredential'));
 });

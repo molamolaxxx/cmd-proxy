@@ -8,12 +8,11 @@ import java.nio.charset.StandardCharsets;
 
 /** 只发送注册控制请求，不承接业务消息；写操作不自动重放。 */
 public final class RegistryClient {
-    public JSONObject request(String center, String action, String credential, JSONObject body) throws IOException {
+    public JSONObject request(String center, String action, JSONObject body) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(center + "/api/registry/" + action).openConnection();
         connection.setInstanceFollowRedirects(false);
         connection.setConnectTimeout(5000); connection.setReadTimeout(8000);
         connection.setRequestMethod("POST"); connection.setDoOutput(true);
-        connection.setRequestProperty("Authorization", "Bearer " + credential);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         try {
             byte[] payload = body.toJSONString().getBytes(StandardCharsets.UTF_8);

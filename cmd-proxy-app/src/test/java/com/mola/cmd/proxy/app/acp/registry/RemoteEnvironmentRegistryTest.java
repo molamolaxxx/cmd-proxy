@@ -1,5 +1,6 @@
 package com.mola.cmd.proxy.app.acp.registry;
 
+import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.mola.cmd.proxy.app.acp.registry.model.RegistryConfig;
 import org.junit.Test;
@@ -66,14 +67,20 @@ public class RemoteEnvironmentRegistryTest {
         user.put("run_id", "new"); registry.pluginAllowed("CloseProxy", proxy);
         assertFalse(registry.list().get(0).online);
     }
-    @Test public void validatesCenterUrlAndRoundTripsPrivateSettings() throws Exception {
+    @Test public void validatesCenterUrlAndLoadsLegacySettingsWithoutCredentials() throws Exception {
         assertEquals("http://192.168.0.1:10528", RegistryConfig.normalizeUrl("192.168.0.1:10528"));
         assertEquals("https://example.com:443", RegistryConfig.normalizeUrl("https://example.com:443/"));
         for (String url : new String[]{"file:///etc/passwd", "http://user:pass@host", "http://host/path", "http://host?x=y", "http://host:0"}) {
             try { RegistryConfig.normalizeUrl(url); fail(url); } catch (IllegalArgumentException expected) { }
         }
         RegistryConfigStore store = new RegistryConfigStore(temporary.newFolder().toPath());
-        RegistryConfig config = new RegistryConfig(); config.serverCredential = "a-private-credential"; store.save(config);
-        RegistryConfig restored = store.load(); assertEquals(config.nodeId, restored.nodeId); assertEquals(config.serverCredential, restored.serverCredential);
+        RegistryConfig config = new RegistryConfig(); config.clientEnabled = true; config.centerUrl = "http://localhost:10528";
+        JSONObject legacy = (JSONObject) JSON.toJSON(config);
+        legacy.put("serverCredential", "old-server-secret"); legacy.put("clientCredential", "old-client-secret");
+        store.write("config.json", legacy.toJSONString());
+        RegistryConfig restored = store.load(); assertEquals(config.nodeId, restored.nodeId); assertTrue(restored.clientEnabled);
+        store.save(restored);
+        JSONObject saved = JSON.parseObject(new String(java.nio.file.Files.readAllBytes(store.directory().resolve("config.json")), java.nio.charset.StandardCharsets.UTF_8));
+        assertFalse(saved.containsKey("serverCredential")); assertFalse(saved.containsKey("clientCredential"));
     }
 }

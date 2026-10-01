@@ -24,7 +24,6 @@ public class FrpRegistryIntegrationTest {
     @Test(timeout=180_000) public void realTunnelRegistersProxiesAndRecoversAfterCenterRestart() throws Exception {
         Assume.assumeTrue("enable with -Dfrp.integration=true", Boolean.getBoolean("frp.integration"));
         Path centerDirectory=temporary.newFolder("center").toPath(),localDirectory=temporary.newFolder("local").toPath();
-        String credential="integration-credential-012345678901234567890";
         int tunnelPort;try(ServerSocket socket=new ServerSocket(0)){tunnelPort=socket.getLocalPort();}
         centerHttp=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
         localHttp=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
@@ -38,15 +37,13 @@ public class FrpRegistryIntegrationTest {
         centerHttp.createContext("/binary",exchange->{String id=exchange.getRequestURI().getRawQuery().substring("instance=".length());proxy.forward(exchange,center.resolve(id));});
         centerHttp.start();localHttp.start();center.start(500);local.start(500);
         try {
-            JSONObject settings=new JSONObject();settings.put("serverEnabled",true);settings.put("tunnelPort",tunnelPort);settings.put("serverCredential",credential);center.configure(settings);
+            JSONObject settings=new JSONObject();settings.put("serverEnabled",true);settings.put("tunnelPort",tunnelPort);center.configure(settings);
             await(()->"RUNNING".equals(center.settings().getString("serverStatus")),60_000,()->center.settings().toJSONString());
-            RegistryClient client=new RegistryClient();JSONObject request=new JSONObject();request.put("nodeId","invalid");request.put("instanceId","x");request.put("displayName","x");
-            try{client.request(baseUrl(),"register","wrong",request);fail("bad credential accepted");}catch(IOException expected){}
-            settings=new JSONObject();settings.put("clientEnabled",true);settings.put("centerUrl",baseUrl());settings.put("clientCredential",credential);settings.put("displayName","我的电脑");local.configure(settings);
+            settings=new JSONObject();settings.put("clientEnabled",true);settings.put("centerUrl",baseUrl());settings.put("displayName","我的电脑");local.configure(settings);
             await(()->"REGISTERED".equals(local.settings().getString("clientStatus")),60_000,()->local.settings().toJSONString());
             assertEquals(1,center.environments().size());String id=center.environments().get(0).instanceId;assertTrue(center.environments().get(0).online);
             checkDownload(id);
-            assertEquals(RegistryManager.MASK,local.settings().getString("clientCredential"));assertFalse(local.settings().toJSONString().contains(credential));
+            assertFalse(local.settings().containsKey("clientCredential"));assertFalse(center.settings().containsKey("serverCredential"));
             center.close();
             center=new RegistryManager(centerDirectory,centerHttp.getAddress().getPort(),"center");center.start(500);
             await(()->"REGISTERED".equals(local.settings().getString("clientStatus"))&&center.environments().get(0).online,60_000,()->local.settings().toJSONString()+center.settings().toJSONString());
@@ -61,7 +58,7 @@ public class FrpRegistryIntegrationTest {
                     Path log = directory.resolve(name);
                     if (java.nio.file.Files.exists(log)) {
                         String text = new String(java.nio.file.Files.readAllBytes(log), StandardCharsets.UTF_8);
-                        System.err.println(name + ": " + text.substring(Math.max(0, text.length() - 6000)).replace(credential, "[redacted]"));
+                        System.err.println(name + ": " + text.substring(Math.max(0, text.length() - 6000)));
                     }
                 }
             }

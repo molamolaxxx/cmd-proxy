@@ -15,7 +15,7 @@ var token=++registryLoadToken,environment=(curInstance&&curInstance.instanceId)|
 try{var response=await api('/api/registry/settings');if(!response.ok)throw new Error('HTTP '+response.status);var next=await response.json();
 if(token!==registryLoadToken||environment!==((curInstance&&curInstance.instanceId)||''))return;
 registryState=next;
-if(fill){document.getElementById('registryCenterUrl').value=next.centerUrl||'';document.getElementById('registryClientCredential').value=next.clientCredential||'';document.getElementById('registryDisplayName').value=next.displayName||'';document.getElementById('registryTunnelPort').value=next.tunnelPort||10530;document.getElementById('registryServerEnabled').checked=!!next.serverEnabled}
+if(fill){document.getElementById('registryCenterUrl').value=next.centerUrl||'';document.getElementById('registryDisplayName').value=next.displayName||'';document.getElementById('registryTunnelPort').value=next.tunnelPort||10530;document.getElementById('registryServerEnabled').checked=!!next.serverEnabled}
 renderRegistryStatus();
 }catch(e){if(fill&&token===registryLoadToken){registryState={clientEnabled:false,serverEnabled:false,clientError:'注册设置加载失败',serverError:''};renderRegistryStatus()}}
 }
@@ -30,10 +30,6 @@ await loadRegistrySettings(true);
 }catch(e){showSnackbar(e.message);if(environment===((curInstance&&curInstance.instanceId)||''))document.getElementById('registryServerEnabled').checked=!!registryState.serverEnabled}
 finally{registryBusy=false;renderRegistryStatus()}
 }
-function registerEnvironment(){return configureRegistry({clientEnabled:true,centerUrl:document.getElementById('registryCenterUrl').value,clientCredential:document.getElementById('registryClientCredential').value,displayName:document.getElementById('registryDisplayName').value})}
+function registerEnvironment(){return configureRegistry({clientEnabled:true,centerUrl:document.getElementById('registryCenterUrl').value,displayName:document.getElementById('registryDisplayName').value})}
 function unregisterEnvironment(){return configureRegistry({clientEnabled:false})}
 function configureRegistryServer(){return configureRegistry({serverEnabled:document.getElementById('registryServerEnabled').checked,tunnelPort:parseInt(document.getElementById('registryTunnelPort').value)||10530})}
-async function copyRegistryCredential(){
-try{var response=await api('/api/registry/settings/credential',{method:'POST'}),result=await response.json();if(!response.ok)throw new Error(result.error||'读取失败');if(!result.credential)throw new Error('请先启用注册中心');await writeClipboard(result.credential);showSnackbar('中心注册凭证已复制')}
-catch(e){showSnackbar(e.message)}
-}

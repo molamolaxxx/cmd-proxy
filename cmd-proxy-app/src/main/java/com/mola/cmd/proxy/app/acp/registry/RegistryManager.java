@@ -16,7 +16,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立生命周期：中心只寻址与转发，客户端只注册当前进程。 */
 public final class RegistryManager implements AutoCloseable {
-    public static final String MASK = "********";
     private final RegistryConfigStore store;
     private final RemoteEnvironmentRegistry environments;
     private final TunnelProvider tunnel;
@@ -57,8 +56,6 @@ public final class RegistryManager implements AutoCloseable {
     public synchronized JSONObject settings() {
         JSONObject result = (JSONObject) JSON.toJSON(config);
         result.put("displayName", config.displayName.isEmpty() ? localInstanceId : config.displayName);
-        result.put("serverCredential", config.serverCredential.isEmpty() ? "" : MASK);
-        result.put("clientCredential", config.clientCredential.isEmpty() ? "" : MASK);
         result.remove("nodeId"); result.put("serverStatus", serverStatus); result.put("clientStatus", clientStatus);
         result.put("serverError", serverError); result.put("clientError", clientError);
         result.put("frpVersion", FrpRuntimeInstaller.VERSION);
@@ -69,11 +66,8 @@ public final class RegistryManager implements AutoCloseable {
         RegistryConfig next = JSON.parseObject(JSON.toJSONString(config), RegistryConfig.class);
         if (input.containsKey("serverEnabled")) next.serverEnabled = input.getBooleanValue("serverEnabled");
         if (input.containsKey("tunnelPort")) next.tunnelPort = input.getIntValue("tunnelPort");
-        if (input.containsKey("serverCredential") && !MASK.equals(input.getString("serverCredential"))) next.serverCredential = text(input, "serverCredential");
-        if (next.serverEnabled && next.serverCredential.isEmpty()) next.serverCredential = UUID.randomUUID().toString() + UUID.randomUUID();
         if (input.containsKey("clientEnabled")) next.clientEnabled = input.getBooleanValue("clientEnabled");
         if (input.containsKey("centerUrl")) next.centerUrl = text(input, "centerUrl");
-        if (input.containsKey("clientCredential") && !MASK.equals(input.getString("clientCredential"))) next.clientCredential = text(input, "clientCredential");
         if (input.containsKey("displayName")) next.displayName = text(input, "displayName");
         next.validate(); store.save(next); config = next;
         serverStatus = next.serverEnabled ? "STARTING" : "STOPPED";
@@ -96,9 +90,8 @@ public final class RegistryManager implements AutoCloseable {
             }
 
             RegistryConfig snapshot = config;
-            String supplied = exchange.getRequestHeaders().getFirst("Authorization");
-            if (!snapshot.serverEnabled || !RemoteEnvironmentRegistry.equal("Bearer " + snapshot.serverCredential, supplied)) {
-                respond(exchange, 401, error("中心未启用或注册凭证无效")); return;
+            if (!snapshot.serverEnabled) {
+                respond(exchange, 401, error("中心未启用")); return;
             }
             if (!"POST".equals(exchange.getRequestMethod())) { respond(exchange, 405, error("Method Not Allowed")); return; }
             if (!Arrays.asList("register", "heartbeat", "unregister").contains(action)) { respond(exchange, 404, error("接口不存在")); return; }
@@ -121,11 +114,6 @@ public final class RegistryManager implements AutoCloseable {
     public void handleAdmin(HttpExchange exchange) throws IOException {
         try {
             String path = exchange.getRequestURI().getPath();
-            if ("/api/registry/settings/credential".equals(path)) {
-                if (!"POST".equals(exchange.getRequestMethod())) { respond(exchange, 405, error("Method Not Allowed")); return; }
-                JSONObject result = new JSONObject(); result.put("credential", config.serverCredential);
-                exchange.getResponseHeaders().set("Cache-Control", "no-store"); respond(exchange, 200, result); return;
-            }
             if (!"/api/registry/settings".equals(path)) { respond(exchange, 404, error("接口不存在")); return; }
             if ("GET".equals(exchange.getRequestMethod())) respond(exchange, 200, settings());
             else if ("POST".equals(exchange.getRequestMethod())) {
@@ -157,7 +145,7 @@ public final class RegistryManager implements AutoCloseable {
         catch (Exception e) { serverReady = false; serverStatus = "ERROR"; serverError = safeError(e); environments.clearOnline(); }
         if (closed.get()) return;
         try { reconcileClient(snapshot); }
-        catch (Exception e) { clientStatus = "ERROR"; clientError = redact(safeError(e), snapshot.clientCredential); }
+        catch (Exception e) { clientStatus = "ERROR"; clientError = safeError(e); }
         if (serverReady) for (RemoteEnvironmentRegistry.Entry entry : environments.candidates()) {
             if (closed.get()) break;
             if (!verifying.add(entry.id)) continue;
@@ -168,7 +156,7 @@ public final class RegistryManager implements AutoCloseable {
         }
     }
     private void reconcileServer(RegistryConfig snapshot) throws IOException {
-        String signature = snapshot.serverEnabled + ":" + snapshot.tunnelPort + ":" + snapshot.serverCredential;
+        String signature = snapshot.serverEnabled + ":" + snapshot.tunnelPort;
         if (!signature.equals(serverSignature)) {
             tunnel.stopServer(); serverReady = false; environments.clearOnline(); serverSignature = signature; serverAttempted = false;
         }
@@ -196,11 +184,11 @@ public final class RegistryManager implements AutoCloseable {
     }
 
     private void reconcileClient(RegistryConfig snapshot) throws IOException {
-        String signature = snapshot.clientEnabled + ":" + snapshot.centerUrl + ":" + snapshot.clientCredential + ":" + snapshot.displayName;
+        String signature = snapshot.clientEnabled + ":" + snapshot.centerUrl + ":" + snapshot.displayName;
         if (!signature.equals(clientSignature)) {
             tunnel.stopClient(); JSONObject old = connection; connection = null;
             if (old != null) {
-                try { client.request(old.getString("centerUrl"), "unregister", old.getString("credential"), leaseBody(old)); }
+                try { client.request(old.getString("centerUrl"), "unregister", leaseBody(old)); }
                 catch (IOException ignored) { }
             }
             clientSignature = signature;
@@ -210,19 +198,19 @@ public final class RegistryManager implements AutoCloseable {
             clientStatus = "CONNECTING";
             JSONObject request = new JSONObject(); request.put("nodeId", snapshot.nodeId); request.put("instanceId", localInstanceId);
             request.put("displayName", snapshot.displayName.isEmpty() ? localInstanceId : snapshot.displayName);
-            JSONObject result = client.request(snapshot.centerUrl, "register", snapshot.clientCredential, request);
+            JSONObject result = client.request(snapshot.centerUrl, "register", request);
             validateConnection(result);
             if (closed.get() || snapshot != config) {
-                try { client.request(snapshot.centerUrl, "unregister", snapshot.clientCredential, leaseBody(result)); }
+                try { client.request(snapshot.centerUrl, "unregister", leaseBody(result)); }
                 catch (IOException ignored) { }
                 return;
             }
-            result.put("centerUrl", snapshot.centerUrl); result.put("credential", snapshot.clientCredential); result.put("connectedAt", System.currentTimeMillis());
+            result.put("centerUrl", snapshot.centerUrl); result.put("connectedAt", System.currentTimeMillis());
             connection = result;
         }
         JSONObject active = connection;
         try {
-            JSONObject status = client.request(snapshot.centerUrl, "heartbeat", snapshot.clientCredential, leaseBody(active));
+            JSONObject status = client.request(snapshot.centerUrl, "heartbeat", leaseBody(active));
             if (!tunnel.clientAlive()) {
                 clientStatus = "CONNECTING";
                 tunnel.startClient(URI.create(snapshot.centerUrl).getHost(), active.getIntValue("tunnelPort"), active.getString("tunnelToken"),
@@ -263,9 +251,6 @@ public final class RegistryManager implements AutoCloseable {
     }
     private static JSONObject leaseBody(JSONObject active) { JSONObject result = new JSONObject(); result.put("environmentId", active.getString("environmentId")); result.put("lease", active.getString("lease")); return result; }
     private static String text(JSONObject input, String key) { String value = input.getString(key); return value == null ? "" : value.trim(); }
-    private static String redact(String message, String credential) {
-        return credential == null || credential.isEmpty() ? message : message.replace(credential, "[已隐藏]");
-    }
     private static String safeError(Exception e) {
         // 不回显 HTTP 请求头、配置文本或 frp 原始日志中的凭证。
         if (e instanceof java.net.ConnectException) return "无法连接服务器，请检查地址与端口";
