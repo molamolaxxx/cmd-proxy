@@ -56,6 +56,7 @@ public final class RegistryManager implements AutoCloseable {
     public int resolve(String instanceId) { return environments.resolve(instanceId); }
     public synchronized JSONObject settings() {
         JSONObject result = (JSONObject) JSON.toJSON(config);
+        result.put("displayName", config.displayName.isEmpty() ? localInstanceId : config.displayName);
         result.put("serverCredential", config.serverCredential.isEmpty() ? "" : MASK);
         result.put("clientCredential", config.clientCredential.isEmpty() ? "" : MASK);
         result.remove("nodeId"); result.put("serverStatus", serverStatus); result.put("clientStatus", clientStatus);

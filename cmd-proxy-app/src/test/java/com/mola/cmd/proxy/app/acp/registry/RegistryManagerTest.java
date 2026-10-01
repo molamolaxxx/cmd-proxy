@@ -53,6 +53,23 @@ public class RegistryManagerTest {
             assertFalse(manager.settings().getBooleanValue("clientEnabled"));
         }finally{manager.close();}
     }
+    @Test public void nameDefaultsToSourceInstanceAndCustomNameSurvivesRestart() throws Exception {
+        Path directory = temporary.newFolder().toPath();
+        RegistryManager manager = new RegistryManager(directory, 12345, "environment-b", new FakeTunnel());
+        manager.start();
+        try {
+            assertEquals("environment-b", manager.settings().getString("displayName"));
+            JSONObject input = new JSONObject(); input.put("displayName", "我的开发电脑");
+            assertEquals("我的开发电脑", manager.configure(input).getString("displayName"));
+        } finally { manager.close(); }
+        RegistryManager restored = new RegistryManager(directory, 12345, "environment-b", new FakeTunnel());
+        restored.start();
+        try {
+            assertEquals("我的开发电脑", restored.settings().getString("displayName"));
+            JSONObject input = new JSONObject(); input.put("displayName", "   ");
+            assertEquals("environment-b", restored.configure(input).getString("displayName"));
+        } finally { restored.close(); }
+    }
     private JSONObject plugin(FakeTunnel tunnel,String op,JSONObject input)throws Exception {
         HttpURLConnection connection=(HttpURLConnection)new URL("http://"+tunnel.pluginAddress+tunnel.pluginPath+"?op="+op).openConnection();connection.setRequestMethod("POST");connection.setDoOutput(true);
         try(OutputStream output=connection.getOutputStream()){output.write(input.toJSONString().getBytes(StandardCharsets.UTF_8));}

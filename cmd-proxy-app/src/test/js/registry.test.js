@@ -57,3 +57,12 @@ test('refresh retains an offline selection instead of redirecting operations to 
     vm.runInContext(coreSection('async function loadInstances(', 'function setEnvMenuOpen('),context);
     await context.loadInstances(false);assert.equal(context.curInstance.instanceId,'remote');assert.equal(context.curInstance.online,false);
 });
+
+test('fills the default environment name and preserves an edited name during polling', async () => {
+    const h=harness(async()=>({ok:true,json:async()=>({displayName:'environment-b',clientStatus:'UNREGISTERED'})}));
+    await h.context.loadRegistrySettings(true);
+    assert.equal(h.get('registryDisplayName').value,'environment-b');
+    h.get('registryDisplayName').value='我的开发电脑';
+    await h.context.loadRegistrySettings(false);
+    assert.equal(h.get('registryDisplayName').value,'我的开发电脑');
+});
