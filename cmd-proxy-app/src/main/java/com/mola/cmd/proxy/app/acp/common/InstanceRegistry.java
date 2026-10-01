@@ -441,5 +441,10 @@ public final class InstanceRegistry {
         public Set<String> robotNames = new LinkedHashSet<>();
         /** 是否为当前进程所属环境 */
         public boolean self;
+        /** 中心登记的跨主机环境。 */
+        public boolean remote;
+        public boolean online = true;
+        public String displayName;
+        public String sourceInstanceId;
     }
 }

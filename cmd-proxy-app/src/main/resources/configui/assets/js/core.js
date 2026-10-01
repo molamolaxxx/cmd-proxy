@@ -215,6 +215,7 @@ return fetch(url,opts);
 }
 
 function envName(inst){
+if(inst.displayName)return inst.displayName;
 var h=(inst.home||'').replace(/[\/\\]+$/,'');
 var i=Math.max(h.lastIndexOf('/'),h.lastIndexOf('\\'));
 return i>=0?h.substring(i+1):h;
@@ -250,10 +251,9 @@ if(!instances.length){c.innerHTML='<div class="env-tab"><div class="env-tab-name
 c.innerHTML=instances.map(function(inst,index){
 var active=curInstance&&inst.instanceId===curInstance.instanceId;
 var cls='env-tab'+(active?' active':'')+(inst.self?'':' remote');
-var badge=inst.self?'<span class="env-badge">本机</span>'
+var badge=inst.remote?'<span class="env-badge">'+(inst.online===false?'离线':'远程')+'</span>':inst.self?'<span class="env-badge">本机</span>'
 :(inst.configUiPort>0?'':'<span class="env-badge ro">只读</span>');
-var meta=(inst.configUiPort>0?':'+inst.configUiPort:'配置页未开启')
-+' · '+((inst.robotNames&&inst.robotNames.length)||0)+' robots';
+var meta=inst.remote?(inst.online===false?'目标环境离线':(inst.sourceInstanceId||'已连接')):((inst.configUiPort>0?':'+inst.configUiPort:'配置页未开启')+' · '+((inst.robotNames&&inst.robotNames.length)||0)+' robots');
 return '<button type="button" class="'+cls+'" onclick="switchInstance(instances['+index+'].instanceId)" title="'+esc(inst.home)+'"'+(active?' aria-current="true"':'')+'>'
 +'<span class="env-tab-name">'+esc(envName(inst))+badge+'</span>'
 +'<span class="env-tab-meta">'+esc(meta)+'</span></button>';
@@ -261,7 +261,7 @@ return '<button type="button" class="'+cls+'" onclick="switchInstance(instances[
 trigger.classList.toggle('remote',!curInstance.self);
 trigger.title='当前环境：'+envName(curInstance)+(curInstance.self?'（本机）':(curInstance.configUiPort>0?'（远程）':'（只读）'))+'；点击切换运行环境';
 if(curInstance&&!curInstance.self){
-note.style.display='block';note.textContent='正在编辑其它环境 '+curInstance.home+(curInstance.configUiPort>0?'（端口 '+curInstance.configUiPort+'）':'（配置页未开启，无法保存）')+'；保存、保存并应用、检查更新都会作用于该环境';
+note.style.display='block';note.textContent=curInstance.remote?('正在编辑远程环境 '+envName(curInstance)+'；所有操作作用于该环境'+(curInstance.online===false?'（当前离线）':'')):'正在编辑其它环境 '+curInstance.home+(curInstance.configUiPort>0?'（端口 '+curInstance.configUiPort+'）':'（配置页未开启，无法保存）')+'；保存、保存并应用、检查更新都会作用于该环境';
 }else{note.style.display='none';note.textContent=''}
 }
 
@@ -270,6 +270,8 @@ if(curInstance&&curInstance.instanceId===id){setEnvMenuOpen(false);document.getE
 if(dirty&&!await showConfirm('当前环境有未保存的修改，切换环境后这些修改将丢失。',{title:'放弃未保存的修改？',confirmText:'放弃并切换',danger:true}))return;
 var target=instances.filter(function(i){return i.instanceId===id})[0];
 if(!target)return;
+if(target.remote&&target.online===false){showSnackbar('目标环境离线');return}
+registryLoadToken+=1;
 setEnvMenuOpen(false);
 document.getElementById('envTrigger').focus();
 closeStarweaveStream();closeTeamSessionStream();closeDialog('channelMessagesDialog');closeDialog('channelDialog');starSessions={items:[],selectedGroupId:'',events:[],lastSeq:0,polling:false,stream:null,streamKey:'',uploads:[],followOutput:true,transitioning:false,transitionId:0,snapshotToken:0};
@@ -285,7 +287,7 @@ await loadConfig();
 }
 
 async function loadConfig(){
-try{var r=await api('/api/config');config=await r.json();
+try{var r=await api('/api/config');if(!r.ok)throw new Error('目标环境不可用（HTTP '+r.status+'）');config=await r.json();
 if(!config.robots)config.robots=[];
 config.robots.forEach(function(robot){if(robot.onlyTeamMember===undefined)robot.onlyTeamMember=false});
 if(!config.chatterIds)config.chatterIds=[];
@@ -303,6 +305,7 @@ await loadChannelBindingTargets();
 await loadMcpAuth();
 clearDirty();
 render();
+await loadRegistrySettings(true);
 await Promise.all([loadStarweaveSessions(false),loadStarweaveTeams(false),loadTaskCount()]);
 await loadScheduleCount();
 }

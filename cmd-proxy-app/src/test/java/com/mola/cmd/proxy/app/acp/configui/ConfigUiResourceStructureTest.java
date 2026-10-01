@@ -33,6 +33,7 @@ public class ConfigUiResourceStructureTest {
                 "assets/css/dark-theme.css",
                 "assets/css/schedules.css",
                 "assets/js/core.js",
+                "assets/js/registry.js",
                 "assets/js/mcp-auth.js",
                 "assets/js/providers.js",
                 "assets/js/starweave.js",

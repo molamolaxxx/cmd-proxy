@@ -1,0 +1,79 @@
+package com.mola.cmd.proxy.app.acp.registry;
+
+import com.alibaba.fastjson.JSONObject;
+import com.mola.cmd.proxy.app.acp.registry.model.RegistryConfig;
+import org.junit.Test;
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
+import java.util.concurrent.atomic.AtomicLong;
+import static org.junit.Assert.*;
+
+public class RemoteEnvironmentRegistryTest {
+    @Rule public TemporaryFolder temporary = new TemporaryFolder();
+    @Test public void registrationIsIdempotentAndRequiresVerificationBeforeOnline() throws Exception {
+        AtomicLong clock = new AtomicLong(100_000);
+        RegistryConfigStore store = new RegistryConfigStore(temporary.newFolder().toPath());
+        RemoteEnvironmentRegistry registry = new RemoteEnvironmentRegistry(store, clock::get);
+        RemoteEnvironmentRegistry.Entry first = registry.register("node-one", "source", "电脑");
+        assertFalse(registry.list().get(0).online);
+        assertEquals("new registrations must be probed before ever verified", 1, registry.candidates().size());
+        assertEquals(first.id, registry.register("node-one", "source", "电脑").id);
+        try { registry.resolve(first.id); fail(); } catch (IllegalStateException expected) { }
+        registry.verified(first.id, first.lease, true);
+        assertEquals(first.port, registry.resolve(first.id));
+        assertTrue(registry.list().get(0).remote);
+        assertEquals("source", registry.list().get(0).sourceInstanceId);
+        clock.addAndGet(RemoteEnvironmentRegistry.LEASE_MILLIS);
+        assertFalse(registry.list().get(0).online);
+        RemoteEnvironmentRegistry.Entry next = registry.register("node-one", "source", "电脑");
+        assertEquals(first.id, next.id); assertNotEquals(first.lease, next.lease);
+        registry.verified(next.id, first.lease, true);
+        assertFalse(registry.list().get(0).online);
+        registry.verified(next.id, next.lease, true);
+        registry.verified(next.id, first.lease, false);
+        assertTrue(registry.list().get(0).online);
+        RemoteEnvironmentRegistry recovered = new RemoteEnvironmentRegistry(store, clock::get);
+        assertEquals(first.id, recovered.list().get(0).instanceId);
+        assertFalse(recovered.list().get(0).online);
+    }
+    @Test public void rejectsInvalidLeasesAndArbitraryProxyPorts() throws Exception {
+        RemoteEnvironmentRegistry registry = new RemoteEnvironmentRegistry(new RegistryConfigStore(temporary.newFolder().toPath()));
+        RemoteEnvironmentRegistry.Entry entry = registry.register("node", "source", "电脑");
+        try { registry.heartbeat(entry.id, "bad"); fail(); } catch (IllegalArgumentException expected) { }
+        JSONObject meta = new JSONObject(); meta.put("environmentId", entry.id); meta.put("lease", entry.lease);
+        JSONObject user = new JSONObject(); user.put("metas", meta);
+        JSONObject proxy = new JSONObject(); proxy.put("user", user); proxy.put("proxy_type", "tcp"); proxy.put("proxy_name", entry.id); proxy.put("remote_port", entry.port);
+        assertTrue(registry.pluginAllowed("NewProxy", proxy));
+        proxy.put("remote_port", 22); assertFalse(registry.pluginAllowed("NewProxy", proxy));
+        proxy.put("remote_port", entry.port); proxy.put("proxy_type", "http"); assertFalse(registry.pluginAllowed("NewProxy", proxy));
+        registry.unregister(entry.id, entry.lease);
+        assertFalse(registry.pluginAllowed("Ping", proxy));
+        assertFalse(registry.list().get(0).online);
+    }
+    @Test public void oldConnectionCloseAndProbeCannotInvalidateReplacement() throws Exception {
+        RemoteEnvironmentRegistry registry = new RemoteEnvironmentRegistry(new RegistryConfigStore(temporary.newFolder().toPath()));
+        RemoteEnvironmentRegistry.Entry entry = registry.register("node", "source", "电脑");
+        JSONObject meta = new JSONObject(); meta.put("environmentId", entry.id); meta.put("lease", entry.lease);
+        JSONObject user = new JSONObject(); user.put("metas", meta); user.put("run_id", "old");
+        JSONObject proxy = new JSONObject(); proxy.put("user", user); proxy.put("proxy_type", "tcp"); proxy.put("proxy_name", entry.id); proxy.put("remote_port", entry.port);
+        assertTrue(registry.pluginAllowed("NewProxy", proxy));
+        registry.verified(entry.id, entry.lease, "old", true);
+        user.put("run_id", "new"); assertTrue(registry.pluginAllowed("NewProxy", proxy));
+        registry.verified(entry.id, entry.lease, "new", true);
+        registry.verified(entry.id, entry.lease, "old", false);
+        user.put("run_id", "old"); registry.pluginAllowed("CloseProxy", proxy);
+        assertTrue(registry.list().get(0).online);
+        user.put("run_id", "new"); registry.pluginAllowed("CloseProxy", proxy);
+        assertFalse(registry.list().get(0).online);
+    }
+    @Test public void validatesCenterUrlAndRoundTripsPrivateSettings() throws Exception {
+        assertEquals("http://192.168.0.1:10528", RegistryConfig.normalizeUrl("192.168.0.1:10528"));
+        assertEquals("https://example.com:443", RegistryConfig.normalizeUrl("https://example.com:443/"));
+        for (String url : new String[]{"file:///etc/passwd", "http://user:pass@host", "http://host/path", "http://host?x=y", "http://host:0"}) {
+            try { RegistryConfig.normalizeUrl(url); fail(url); } catch (IllegalArgumentException expected) { }
+        }
+        RegistryConfigStore store = new RegistryConfigStore(temporary.newFolder().toPath());
+        RegistryConfig config = new RegistryConfig(); config.serverCredential = "a-private-credential"; store.save(config);
+        RegistryConfig restored = store.load(); assertEquals(config.nodeId, restored.nodeId); assertEquals(config.serverCredential, restored.serverCredential);
+    }
+}

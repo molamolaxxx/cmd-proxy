@@ -47,6 +47,12 @@
 <div class="toggle-row"><div><div class="toggle-label">启用管理页面</div><div class="toggle-desc">关闭后，下次启动将无法访问 Starweave 管理页面</div></div><label class="switch"><input type="checkbox" id="cfgEnabled"><span class="slider"></span></label></div>
 <div class="toggle-row"><div><div class="toggle-label">全局网络代理</div><div class="toggle-desc">统一控制所有智能体的网络代理，仅对已填写代理地址的智能体生效</div></div><label class="switch"><input type="checkbox" id="globalProxy" onchange="applyGlobalProxy()"><span class="slider"></span></label></div>
 </div></div>
+<div class="card"><div class="card-header"><h2>注册中心服务器</h2><span class="toggle-desc" id="registryClientStatus"></span></div><div class="card-body">
+<div class="field-group"><label>中心地址</label><div class="field-row"><input id="registryCenterUrl" placeholder="192.168.1.10:10528" autocomplete="off"><button type="button" class="btn btn-secondary btn-sm" id="registryRegister" onclick="registerEnvironment()" title="注册当前环境" aria-label="注册当前环境"><span class="material-icons">cloud_upload</span></button><button type="button" class="btn btn-secondary btn-sm" id="registryCancel" onclick="unregisterEnvironment()" title="取消注册" aria-label="取消注册"><span class="material-icons">link_off</span></button></div></div>
+<div class="grid-2"><div class="field-group"><label>中心注册凭证</label><input id="registryClientCredential" type="password" autocomplete="new-password" placeholder="填写中心提供的凭证"></div><div class="field-group"><label>环境名称</label><input id="registryDisplayName" maxlength="120" placeholder="默认使用当前实例名称"></div></div>
+<div class="toggle-desc">点击注册立即保存；成功后可从中心的环境列表切换到当前进程。重启后自动恢复连接。</div>
+<details><summary>作为注册中心接受远程环境</summary><div class="toggle-row"><div><div class="toggle-label">启用注册中心</div><div class="toggle-desc" id="registryServerStatus"></div></div><label class="switch"><input type="checkbox" id="registryServerEnabled" onchange="configureRegistryServer()"><span class="slider"></span></label></div><div class="field-group"><label>隧道监听端口</label><div class="field-row"><input id="registryTunnelPort" type="number" min="1" max="65535" value="10530"><button type="button" class="btn btn-secondary btn-sm" onclick="configureRegistryServer()" title="应用中心设置" aria-label="应用中心设置"><span class="material-icons">check</span></button><button type="button" class="btn btn-secondary btn-sm" onclick="copyRegistryCredential()" title="复制中心注册凭证" aria-label="复制中心注册凭证"><span class="material-icons">key</span></button></div><div class="toggle-desc">接入端需能访问管理页面和此端口；内部代理入口仅监听本机。</div></div></details>
+</div></div>
 <div class="card"><div class="card-header"><div><h2>接入用户</h2><div class="toggle-desc">查看 Starweave 本地身份，并管理允许连接当前服务的 MolaChat 用户</div></div><button class="btn btn-secondary btn-sm" onclick="addChatterId()"><span class="material-icons">add</span>添加 MolaChat ID</button></div><div class="card-body"><div id="chatterList" class="access-user-list"></div></div></div>
 </section>
 <section class="page-section" id="page-channels">
@@ -274,6 +280,7 @@
 
 
 <script src="/assets/js/core.js"></script>
+<script src="/assets/js/registry.js"></script>
 <script src="/assets/js/mcp-auth.js"></script>
 <script src="/assets/js/providers.js"></script>
 <script src="/assets/js/starweave.js"></script>

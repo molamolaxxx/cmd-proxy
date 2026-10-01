@@ -26,6 +26,7 @@ import com.mola.cmd.proxy.app.acp.task.model.TaskException;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleAdminApiBridge;
 import com.mola.cmd.proxy.app.acp.team.TeamSharingStatusRegistry;
 import com.mola.cmd.proxy.app.acp.common.InstanceRegistry;
+import com.mola.cmd.proxy.app.acp.registry.RegistryManager;
 import com.mola.cmd.proxy.app.acp.mcpauth.McpAuthManager;
 import com.mola.cmd.proxy.app.utils.CmdProxyHome;
 import com.mola.cmd.proxy.client.conf.CmdProxyConf;
@@ -93,6 +94,8 @@ public class ConfigUiServer {
     private final StarweaveRequestDeduplicator starweaveRequests =
             new StarweaveRequestDeduplicator();
     private HttpServer server;
+    private RegistryManager registryManager;
+    private final EnvironmentHttpProxy environmentProxy = new EnvironmentHttpProxy();
     private ExecutorService executor;
     private ExecutorService starweaveStreamExecutor;
     private ScheduledExecutorService updateCheckExecutor;
@@ -245,6 +248,11 @@ public class ConfigUiServer {
         server.createContext("/", this::handleIndex);
         // 环境列表（不代理，始终由本进程扫描主机级注册表）
         server.createContext("/api/instances", this::handleInstances);
+        registryManager = new RegistryManager(Paths.get(CmdProxyHome.pathOf("registry")),
+                server.getAddress().getPort(), CmdProxyHome.instanceId());
+        // 注册控制属于接收进程；系统设置操作跟随当前选中的环境。
+        server.createContext("/api/registry/", registryManager::handleControl);
+        server.createContext("/api/registry/settings", proxied(registryManager::handleAdmin));
         // Public endpoint: authentication is handled by its configured Bearer code.
         // Deliberately do not proxy by ConfigUI's instance query parameter.
         server.createContext(ExternalTaskApiHandler.PREFIX,
@@ -359,6 +367,7 @@ public class ConfigUiServer {
                 proxied(this::handleProviderModels));
 
         server.start();
+        registryManager.start();
         updateCheckExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "jar-update-checker");
             thread.setDaemon(true);
@@ -433,6 +442,8 @@ public class ConfigUiServer {
     }
 
     public void stop() {
+        if (registryManager != null) registryManager.close();
+        environmentProxy.close();
         if (updateCheckExecutor != null) {
             updateCheckExecutor.shutdownNow();
         }
@@ -568,100 +579,35 @@ public class ConfigUiServer {
             return;
         }
         List<InstanceRegistry.InstanceInfo> instances = InstanceRegistry.listAll();
+        if (registryManager != null) instances.addAll(registryManager.environments());
         sendResponse(exchange, 200, "application/json",
                 JSON.toJSONString(instances, SerializerFeature.DisableCircularReferenceDetect));
     }
 
-    /** 把当前请求原样转发到目标环境的 ConfigUI */
+    /** 本机和跨主机环境均复用同一通用代理。 */
     private void forward(HttpExchange exchange, String instanceId) throws IOException {
-        InstanceRegistry.InstanceInfo target = null;
-        for (InstanceRegistry.InstanceInfo info : InstanceRegistry.listAll()) {
-            if (instanceId.equals(info.instanceId)) {
-                target = info;
-                break;
-            }
-        }
-        if (target == null) {
-            sendResponse(exchange, 404, "application/json",
-                    "{\"ok\":false,\"error\":\"环境不存在或已退出: " + jsonEscape(instanceId) + "\"}");
-            return;
-        }
-        if (target.configUiPort <= 0) {
-            sendResponse(exchange, 409, "application/json",
-                    "{\"ok\":false,\"error\":\"环境 " + jsonEscape(target.home)
-                            + " 未开启配置页，无法远程编辑\"}");
-            return;
-        }
-
-        byte[] body;
-        if ("/api/agent-resources/import".equals(exchange.getRequestURI().getPath())) {
-            try { body = AgentResourceMigration.readBounded(exchange.getRequestBody(), AgentResourceMigration.MAX_BYTES); }
-            catch (IOException e) { sendResponse(exchange, 413, "application/json",
-                    JSON.toJSONString(apiError("MIGRATION_TOO_LARGE", e.getMessage()))); return; }
-        } else { body = readAllBytes(exchange.getRequestBody()); }
-        String query = stripInstanceParam(exchange.getRequestURI().getRawQuery());
-        String url = "http://127.0.0.1:" + target.configUiPort + exchange.getRequestURI().getPath()
-                + (query.isEmpty() ? "" : "?" + query);
-
-        java.net.HttpURLConnection conn = null;
-        try {
-            conn = (java.net.HttpURLConnection) new URL(url).openConnection();
-            conn.setRequestMethod(exchange.getRequestMethod());
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(60000);
-            conn.setRequestProperty(PROXY_HEADER, "1");
-            String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
-            if (contentType != null) {
-                conn.setRequestProperty("Content-Type", contentType);
-            }
-            if (body.length > 0) {
-                conn.setDoOutput(true);
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(body);
-                }
-            }
-            int code = conn.getResponseCode();
-            InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
-            byte[] respBytes = is == null ? new byte[0] : readAllBytes(is);
-            String respType = conn.getContentType();
-            if ("/api/agent-resources/export".equals(exchange.getRequestURI().getPath()) && code == 200) {
-                exchange.getResponseHeaders().set("Content-Type", "application/zip");
-                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=agent-resources.zip");
-                exchange.getResponseHeaders().set("Cache-Control", "no-store");
-                exchange.sendResponseHeaders(code, respBytes.length);
-                try (OutputStream output = exchange.getResponseBody()) { output.write(respBytes); }
-            } else {
-                sendResponse(exchange, code,
-                        respType == null ? "application/json" : respType,
-                        new String(respBytes, StandardCharsets.UTF_8));
-            }
-        } catch (IOException e) {
-            logger.warn("跨环境转发失败: url={}", url, e);
-            sendResponse(exchange, 502, "application/json",
-                    "{\"ok\":false,\"error\":\"目标环境无响应: " + jsonEscape(e.getMessage()) + "\"}");
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
-        }
+        int targetPort = resolveEnvironmentPort(exchange, instanceId);
+        if (targetPort > 0) environmentProxy.forward(exchange, targetPort);
     }
 
-    /** 转发时去掉 instance 参数，使目标环境按本地逻辑处理 */
-    private String stripInstanceParam(String rawQuery) {
-        if (rawQuery == null || rawQuery.isEmpty()) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        for (String pair : rawQuery.split("&")) {
-            if (pair.isEmpty() || pair.equals("instance") || pair.startsWith("instance=")) {
-                continue;
+    private int resolveEnvironmentPort(HttpExchange exchange, String instanceId) throws IOException {
+        if (registryManager != null) {
+            try {
+                int remotePort = registryManager.resolve(instanceId);
+                if (remotePort > 0) return remotePort;
+            } catch (IllegalStateException e) {
+                sendResponse(exchange, 503, "application/json", JSON.toJSONString(apiError("ENVIRONMENT_OFFLINE", "目标环境离线")));
+                return 0;
             }
-            if (sb.length() > 0) {
-                sb.append('&');
-            }
-            sb.append(pair);
         }
-        return sb.toString();
+        for (InstanceRegistry.InstanceInfo info : InstanceRegistry.listAll()) {
+            if (!instanceId.equals(info.instanceId)) continue;
+            if (info.configUiPort > 0) return info.configUiPort;
+            sendResponse(exchange, 409, "application/json", JSON.toJSONString(apiError("CONFIG_UI_DISABLED", "目标环境未开启配置页")));
+            return 0;
+        }
+        sendResponse(exchange, 404, "application/json", JSON.toJSONString(apiError("INSTANCE_NOT_FOUND", "环境不存在或已退出")));
+        return 0;
     }
 
     /** 读取 query 参数（已 URL 解码） */
@@ -744,6 +690,7 @@ public class ConfigUiServer {
         addConfigUiAsset(assets, "css/dark-theme.css", "text/css; charset=utf-8", false);
         addConfigUiAsset(assets, "css/schedules.css", "text/css; charset=utf-8", false);
         addConfigUiAsset(assets, "js/theme.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/registry.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/core.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/mcp-auth.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/providers.js", "application/javascript; charset=utf-8", false);
@@ -1397,51 +1344,7 @@ public class ConfigUiServer {
 
     private void forwardStarweaveStream(HttpExchange exchange, String instanceId)
             throws IOException {
-        InstanceRegistry.InstanceInfo target = null;
-        for (InstanceRegistry.InstanceInfo info : InstanceRegistry.listAll()) {
-            if (instanceId.equals(info.instanceId)) {
-                target = info;
-                break;
-            }
-        }
-        if (target == null || target.configUiPort <= 0) {
-            sendResponse(exchange, 404, "application/json",
-                    JSON.toJSONString(apiError("INSTANCE_NOT_FOUND", "目标环境不存在或未开启配置页")));
-            return;
-        }
-        String query = stripInstanceParam(exchange.getRequestURI().getRawQuery());
-        URL url = new URL("http://127.0.0.1:" + target.configUiPort
-                + exchange.getRequestURI().getPath() + (query.isEmpty() ? "" : "?" + query));
-        java.net.HttpURLConnection connection =
-                (java.net.HttpURLConnection) url.openConnection();
-        try {
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(35_000);
-            connection.setRequestProperty(PROXY_HEADER, "1");
-            String lastEventId = exchange.getRequestHeaders().getFirst("Last-Event-ID");
-            if (lastEventId != null) connection.setRequestProperty("Last-Event-ID", lastEventId);
-            int status = connection.getResponseCode();
-            String contentType = connection.getContentType();
-            exchange.getResponseHeaders().set("Content-Type", contentType == null
-                    ? "text/event-stream; charset=utf-8" : contentType);
-            exchange.getResponseHeaders().set("Cache-Control", "no-cache, no-transform");
-            exchange.getResponseHeaders().set("X-Accel-Buffering", "no");
-            exchange.sendResponseHeaders(status, 0);
-            InputStream input = status >= 400
-                    ? connection.getErrorStream() : connection.getInputStream();
-            if (input == null) return;
-            try (InputStream source = input; OutputStream output = exchange.getResponseBody()) {
-                byte[] buffer = new byte[4096];
-                int length;
-                while ((length = source.read(buffer)) >= 0) {
-                    output.write(buffer, 0, length);
-                    output.flush();
-                }
-            }
-        } finally {
-            connection.disconnect();
-            exchange.close();
-        }
+        forward(exchange, instanceId);
     }
 
     private static void writeSse(OutputStream output, String id, String event,
