@@ -38,6 +38,49 @@ public class EnvironmentHttpProxyTest {
             connection=(HttpURLConnection)new URL("http://127.0.0.1:"+gateway.getAddress().getPort()+"/error").openConnection();assertEquals(409,connection.getResponseCode());assertEquals("failed",new String(read(connection.getErrorStream()),StandardCharsets.UTF_8));connection.disconnect();
         } finally {proxy.close();gateway.stop(0);target.stop(0);}
     }
+    @Test public void preservesBrowserOriginAcrossProxyHopsAndRejectsCrossSiteRequests() throws Exception {
+        ConfigUiServer target = new ConfigUiServer(0, () -> { }, ignored -> { });
+        HttpServer gateway = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        HttpServer relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        EnvironmentHttpProxy proxy = new EnvironmentHttpProxy(), relayProxy = new EnvironmentHttpProxy();
+        okhttp3.OkHttpClient browser = new okhttp3.OkHttpClient();
+        target.start();
+        relay.createContext("/", exchange -> relayProxy.forward(exchange, target.getBoundPort()));
+        gateway.createContext("/", exchange -> proxy.forward(exchange, relay.getAddress().getPort()));
+        relay.start(); gateway.start();
+        String base = "http://127.0.0.1:" + gateway.getAddress().getPort();
+        try {
+            okhttp3.Request.Builder request = new okhttp3.Request.Builder()
+                    .url(base + "/api/starweave/v1/sessions?instance=remote")
+                    .header("Host", "registry.example:8443")
+                    .header("Origin", "https://registry.example:8443")
+                    .header("Sec-Fetch-Site", "same-origin");
+            try (okhttp3.Response response = browser.newCall(request.build()).execute()) {
+                assertEquals(200, response.code());
+            }
+            request.url(base + "/api/starweave/v1/sessions/open?instance=remote")
+                    .post(okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"),
+                            "{\"requestId\":\"proxy-chat\",\"robotName\":\"Robot\"}"));
+            try (okhttp3.Response response = browser.newCall(request.build()).execute()) {
+                assertEquals(503, response.code());
+                assertEquals("SERVICE_UNAVAILABLE", com.alibaba.fastjson.JSON.parseObject(response.body().string()).getString("code"));
+            }
+            request.get().url(base + "/api/starweave/v1/sessions?instance=remote")
+                    .header("Origin", "https://attacker.invalid")
+                    .header(EnvironmentHttpProxy.PROXY_HEADER, "1");
+            try (okhttp3.Response response = browser.newCall(request.build()).execute()) {
+                assertEquals(403, response.code());
+                assertEquals("ORIGIN_REJECTED", com.alibaba.fastjson.JSON.parseObject(response.body().string()).getString("code"));
+            }
+            request.header("Origin", "https://registry.example:8443").header("Sec-Fetch-Site", "cross-site");
+            try (okhttp3.Response response = browser.newCall(request.build()).execute()) {
+                assertEquals(403, response.code());
+            }
+        } finally {
+            proxy.close(); relayProxy.close(); gateway.stop(0); relay.stop(0); target.stop();
+            browser.connectionPool().evictAll(); browser.dispatcher().executorService().shutdownNow();
+        }
+    }
     @Test public void flushesSseBeforeTargetFinishesAndCloseCancelsStream() throws Exception {
         HttpServer target=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0),gateway=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
         EnvironmentHttpProxy proxy=new EnvironmentHttpProxy();CountDownLatch release=new CountDownLatch(1),first=new CountDownLatch(1);

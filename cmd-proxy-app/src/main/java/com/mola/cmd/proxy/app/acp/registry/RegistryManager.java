@@ -256,7 +256,9 @@ public final class RegistryManager implements AutoCloseable {
         if (e instanceof java.net.ConnectException) return "无法连接服务器，请检查地址与端口";
         if (e instanceof java.net.SocketTimeoutException) return "服务器连接超时";
         String message = e.getMessage();
-        return message != null && message.length() <= 160 ? message : "注册连接失败，请检查服务器与网络";
+        if (message != null) message = message.replace("frp", "隧道");
+        return message != null && !message.isEmpty() && message.length() <= 160
+                && !message.matches("(?s).*[a-zA-Z].*") ? message : "连接暂时失败，请检查中心地址、端口和网络后重试";
     }
     private static JSONObject error(String message) { JSONObject result = new JSONObject(); result.put("error", message); return result; }
     private static void respond(HttpExchange exchange, int status, JSONObject result) throws IOException {

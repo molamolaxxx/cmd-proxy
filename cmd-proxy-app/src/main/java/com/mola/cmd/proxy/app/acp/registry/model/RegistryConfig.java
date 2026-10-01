@@ -23,7 +23,9 @@ public final class RegistryConfig {
     public static String normalizeUrl(String value) {
         String raw = value == null ? "" : value.trim();
         if (!raw.contains("://")) raw = "http://" + raw;
-        URI uri = URI.create(raw);
+        URI uri;
+        try { uri = URI.create(raw); }
+        catch (IllegalArgumentException e) { throw new IllegalArgumentException("中心地址格式不正确，请填写 IP:端口 或 http(s)://域名:端口"); }
         if (!("http".equals(uri.getScheme()) || "https".equals(uri.getScheme()))
                 || uri.getHost() == null || uri.getRawUserInfo() != null
                 || uri.getRawQuery() != null || uri.getRawFragment() != null

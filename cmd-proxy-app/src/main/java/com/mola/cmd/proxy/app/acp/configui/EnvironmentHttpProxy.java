@@ -24,7 +24,8 @@ public final class EnvironmentHttpProxy implements AutoCloseable {
         String url = "http://127.0.0.1:" + port + exchange.getRequestURI().getRawPath() + (query.isEmpty() ? "" : "?" + query);
         Request.Builder request = new Request.Builder().url(url);
         Set<String> removed = hopHeaders(exchange.getRequestHeaders());
-        removed.add("host"); removed.add("content-length"); removed.add(PROXY_HEADER.toLowerCase(Locale.ROOT));
+        // 保留浏览器访问的 Host，使经过本机或远程隧道转发的 Origin 校验仍匹配。
+        removed.add("content-length"); removed.add(PROXY_HEADER.toLowerCase(Locale.ROOT));
         for (Map.Entry<String, List<String>> header : exchange.getRequestHeaders().entrySet()) {
             if (!removed.contains(header.getKey().toLowerCase(Locale.ROOT)))
                 for (String value : header.getValue()) request.addHeader(header.getKey(), value);
