@@ -56,6 +56,8 @@ public final class RegistryManager implements AutoCloseable {
     public synchronized JSONObject settings() {
         JSONObject result = (JSONObject) JSON.toJSON(config);
         result.put("displayName", config.displayName.isEmpty() ? localInstanceId : config.displayName);
+        result.remove("accessPasswordHash"); result.remove("accessSessionKey");
+        result.put("accessPasswordSet", !config.accessPasswordHash.isEmpty());
         result.remove("nodeId"); result.put("serverStatus", serverStatus); result.put("clientStatus", clientStatus);
         result.put("serverError", serverError); result.put("clientError", clientError);
         result.put("frpVersion", FrpRuntimeInstaller.VERSION);
@@ -69,11 +71,51 @@ public final class RegistryManager implements AutoCloseable {
         if (input.containsKey("clientEnabled")) next.clientEnabled = input.getBooleanValue("clientEnabled");
         if (input.containsKey("centerUrl")) next.centerUrl = text(input, "centerUrl");
         if (input.containsKey("displayName")) next.displayName = text(input, "displayName");
+        if (input.containsKey("accessPassword")) RegistryEnvironmentAccess.setPassword(next, input.getString("accessPassword") == null ? "" : input.getString("accessPassword"));
         next.validate(); store.save(next); config = next;
         serverStatus = next.serverEnabled ? "STARTING" : "STOPPED";
         clientStatus = next.clientEnabled ? "CONNECTING" : "UNREGISTERED";
         worker.execute(this::tickSafely);
         return settings();
+    }
+    public boolean allowEnvironmentAccess(HttpExchange exchange) throws IOException {
+        RegistryConfig snapshot = config;
+        if (snapshot.accessPasswordHash.isEmpty()) return true;
+        if (!RegistryEnvironmentAccess.sameOrigin(exchange)) {
+            JSONObject result = error("请从当前管理页面操作此环境"); result.put("code", "ORIGIN_REJECTED");
+            respond(exchange, 403, result); return false;
+        }
+        if (RegistryEnvironmentAccess.expiresAt(snapshot, exchange) > 0) return true;
+        JSONObject result = error("请先输入此环境的密码，验证后再进行操作");
+        result.put("code", "ENVIRONMENT_LOCKED"); result.put("message", result.getString("error"));
+        result.put("accepted", false); respond(exchange, 401, result); return false;
+    }
+    public void handleAccess(HttpExchange exchange) throws IOException {
+        if (!RegistryEnvironmentAccess.sameOrigin(exchange)) { respond(exchange, 403, error("请从当前管理页面验证环境密码")); return; }
+        RegistryConfig snapshot = config;
+        long expires = RegistryEnvironmentAccess.expiresAt(snapshot, exchange);
+        if ("GET".equals(exchange.getRequestMethod())) {
+            JSONObject result = new JSONObject(); result.put("passwordRequired", !snapshot.accessPasswordHash.isEmpty());
+            result.put("authenticated", snapshot.accessPasswordHash.isEmpty() || expires > 0); result.put("expiresAt", expires);
+            respond(exchange, 200, result); return;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) { respond(exchange, 405, error("此操作不受支持")); return; }
+        JSONObject input;
+        try { input = JSON.parseObject(RegistryClient.read(exchange.getRequestBody())); }
+        catch (RuntimeException e) { respond(exchange, 400, error("请输入环境密码")); return; }
+        if (!snapshot.accessPasswordHash.isEmpty() && (input == null || !RegistryEnvironmentAccess.passwordMatches(snapshot, input.getString("password")))) {
+            respond(exchange, 401, error("密码不正确，请重新输入")); return;
+        }
+        if (snapshot != config) { respond(exchange, 409, error("环境设置已更新，请重新验证密码")); return; }
+        if (!snapshot.accessPasswordHash.isEmpty()) {
+            String origin = exchange.getRequestHeaders().getFirst("Origin");
+            String cookie = RegistryEnvironmentAccess.cookieName(snapshot) + "=" + RegistryEnvironmentAccess.ticket(snapshot, System.currentTimeMillis())
+                    + "; Path=/; Max-Age=604800; HttpOnly; SameSite=Strict";
+            if (origin != null && origin.startsWith("https://")) cookie += "; Secure";
+            exchange.getResponseHeaders().add("Set-Cookie", cookie);
+        }
+        JSONObject result = new JSONObject(); result.put("authenticated", true); result.put("expiresAt", System.currentTimeMillis() + RegistryEnvironmentAccess.SESSION_MILLIS);
+        respond(exchange, 200, result);
     }
     public void handleControl(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
@@ -119,6 +161,7 @@ public final class RegistryManager implements AutoCloseable {
             else if ("POST".equals(exchange.getRequestMethod())) {
                 JSONObject input = JSON.parseObject(RegistryClient.read(exchange.getRequestBody()));
                 if (input == null) throw new IllegalArgumentException("配置不能为空");
+                if (input.containsKey("accessPassword") && !RegistryEnvironmentAccess.sameOrigin(exchange)) { respond(exchange, 403, error("请从当前管理页面设置环境密码")); return; }
                 respond(exchange, 202, configure(input));
             } else respond(exchange, 405, error("Method Not Allowed"));
         } catch (IllegalArgumentException e) { respond(exchange, 400, error(e.getMessage())); }

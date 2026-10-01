@@ -252,6 +252,7 @@ public class ConfigUiServer {
                 server.getAddress().getPort(), CmdProxyHome.instanceId());
         // 注册控制属于接收进程；系统设置操作跟随当前选中的环境。
         server.createContext("/api/registry/", registryManager::handleControl);
+        server.createContext("/api/registry/access", proxied(registryManager::handleAccess));
         server.createContext("/api/registry/settings", proxied(registryManager::handleAdmin));
         // Public endpoint: authentication is handled by its configured Bearer code.
         // Deliberately do not proxy by ConfigUI's instance query parameter.
@@ -481,6 +482,8 @@ public class ConfigUiServer {
             boolean alreadyProxied = exchange.getRequestHeaders().getFirst(PROXY_HEADER) != null;
             if (target == null || target.isEmpty() || alreadyProxied
                     || target.equals(CmdProxyHome.instanceId())) {
+                if (alreadyProxied && !exchange.getRequestURI().getPath().equals("/api/registry/access")
+                        && !registryManager.allowEnvironmentAccess(exchange)) return;
                 local.handle(exchange);
                 return;
             }

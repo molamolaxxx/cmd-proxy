@@ -9,6 +9,8 @@ public final class RegistryConfig {
     public boolean clientEnabled;
     public String centerUrl = "";
     public String displayName = "";
+    public String accessPasswordHash = "";
+    public String accessSessionKey = "";
     public String nodeId = java.util.UUID.randomUUID().toString();
 
     public void validate() {

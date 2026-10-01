@@ -271,6 +271,7 @@ if(dirty&&!await showConfirm('当前环境有未保存的修改，切换环境�
 var target=instances.filter(function(i){return i.instanceId===id})[0];
 if(!target)return;
 if(target.remote&&target.online===false){showSnackbar('目标环境离线');return}
+if(target.remote&&!await ensureRegistryEnvironmentAccess(id))return;
 registryLoadToken+=1;
 setEnvMenuOpen(false);
 document.getElementById('envTrigger').focus();

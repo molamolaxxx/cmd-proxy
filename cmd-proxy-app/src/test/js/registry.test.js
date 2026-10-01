@@ -4,11 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.resolve(__dirname, '../../main/resources/configui/assets/js/registry.js'), 'utf8');
-function harness(api) {
+function harness(api, extra={}) {
     const fields = new Map();
-    const get = id => { if (!fields.has(id)) fields.set(id, {value:'', textContent:'', checked:false,style:{},attributes:{},setAttribute(name,value){this.attributes[name]=value}}); return fields.get(id); };
+    const get = id => { if (!fields.has(id)) fields.set(id, {value:'', textContent:'', checked:false,style:{},attributes:{},focus(){},setAttribute(name,value){this.attributes[name]=value}}); return fields.get(id); };
     const messages=[];
-    const context = vm.createContext({document:{getElementById:get}, curInstance:{instanceId:'local'}, api, URL, AbortController, setTimeout, clearTimeout, showSnackbar:m=>messages.push(m), writeClipboard:async()=>{}});
+    const context = vm.createContext({document:{getElementById:get}, curInstance:{instanceId:'local'}, instances:[],envName:i=>i.displayName,showDialog(){},closeDialog(){},api, URL, Response,AbortController, setTimeout, clearTimeout, showSnackbar:m=>messages.push(m), writeClipboard:async()=>{},...extra});
     vm.runInContext(source, context);
     return {context, get, messages};
 }
@@ -126,4 +126,54 @@ test('background connection errors remain readable without displaying raw Englis
     assert.ok(!/[a-zA-Z]/.test(h.get('registryClientStatus').textContent));
     assert.ok(!/[a-zA-Z]/.test(h.get('registryServerStatus').textContent));
     assert.match(h.get('registryServerStatus').textContent,/请检查/);
+});
+
+test('password is optional at registration and can be saved or explicitly removed', async () => {
+    const calls=[];
+    const h=harness(async(url,options)=>{if(options.body)calls.push(JSON.parse(options.body));return{ok:true,json:async()=>({accessPasswordSet:true})}});
+    h.get('registryCenterUrl').value='10.0.0.1:10528';h.get('registryAccessPassword').value='secret';
+    await h.context.registerEnvironment();assert.equal(calls[0].accessPassword,'secret');
+    assert.equal(h.get('registryAccessPassword').value,'');assert.match(h.get('registryAccessPassword').placeholder,/已设置/);
+    await h.context.configureRegistryPassword(true);assert.deepEqual(calls[1],{accessPassword:''});
+});
+
+test('concurrent remote operations share one password prompt and cancellation sends no business request', async () => {
+    const calls=[];
+    const win={location:{href:'https://center.example/',origin:'https://center.example'},fetch:async(url)=>{
+        calls.push(url);return new Response(JSON.stringify({authenticated:false,passwordRequired:true}),{status:200});
+    }};
+    const h=harness(()=>{}, {window:win});
+    const first=win.fetch('/api/config?instance=remote-a'),second=win.fetch('/api/starweave/v1/sessions/open?instance=remote-a',{method:'POST'});
+    await new Promise(setImmediate);assert.equal(calls.length,1);assert.equal(h.context.registryAccessPrompt.id,'remote-a');
+    h.context.finishRegistryAccess(false);assert.equal((await first).status,401);assert.equal((await second).status,401);
+    assert.ok(calls.every(url=>url.startsWith('/api/registry/access')));
+});
+
+test('wrong password keeps the modal open and successful login resumes a pending operation', async () => {
+    let authenticated=false,businessCalls=0;
+    const win={location:{href:'https://center.example/',origin:'https://center.example'},fetch:async(url,options)=>{
+        if(!url.startsWith('/api/registry/access')){businessCalls++;return new Response('{}',{status:200})}
+        if(options.method==='POST'){
+            authenticated=JSON.parse(options.body).password==='correct';
+            return new Response(JSON.stringify(authenticated?{authenticated:true}:{error:'密码不正确，请重新输入'}),{status:authenticated?200:401});
+        }
+        return new Response(JSON.stringify({authenticated}),{status:200});
+    }};
+    const h=harness(()=>{}, {window:win});const waiting=win.fetch('/api/config?instance=remote-a');
+    await new Promise(setImmediate);h.get('registryLoginPassword').value='wrong';await h.context.submitRegistryAccessPassword();
+    assert.match(h.get('registryAccessError').textContent,/密码不正确/);assert.ok(h.context.registryAccessPrompt);assert.equal(businessCalls,0);
+    h.get('registryLoginPassword').value='correct';await h.context.submitRegistryAccessPassword();
+    assert.equal((await waiting).status,200);assert.equal(businessCalls,1);assert.equal(h.get('registryLoginPassword').value,'');
+    await win.fetch('/api/config?instance=remote-a');assert.equal(h.context.registryAccessPrompt,null);assert.equal(businessCalls,2);
+});
+
+test('expired or revoked login is checked again before the next write', async () => {
+    let authenticated=true,businessCalls=0;
+    const win={location:{href:'http://center.example/',origin:'http://center.example'},fetch:async(url)=>{
+        if(url.startsWith('/api/registry/access'))return new Response(JSON.stringify({authenticated}),{status:200});
+        businessCalls++;return new Response('{}',{status:200});
+    }};
+    const h=harness(()=>{}, {window:win});await win.fetch('/api/config?instance=remote-a');authenticated=false;
+    const waiting=win.fetch('/api/refresh?instance=remote-a',{method:'POST'});await new Promise(setImmediate);
+    assert.equal(businessCalls,1);assert.ok(h.context.registryAccessPrompt);h.context.finishRegistryAccess(false);assert.equal((await waiting).status,401);
 });
