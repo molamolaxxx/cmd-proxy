@@ -1,7 +1,10 @@
 package com.mola.cmd.proxy.app.acp.configui;
 
 import com.sun.net.httpserver.HttpServer;
+import com.mola.cmd.proxy.app.acp.registry.RegistryManager;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -10,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.Assert.*;
 
 public class EnvironmentHttpProxyTest {
+    @Rule public TemporaryFolder temporary = new TemporaryFolder();
     private static byte[] read(InputStream input) throws IOException { try(InputStream source=input;ByteArrayOutputStream output=new ByteArrayOutputStream()){byte[] b=new byte[4096];int n;while((n=source.read(b))>=0)output.write(b,0,n);return output.toByteArray();} }
     @Test public void forwardsBinaryUploadDownloadHeadersErrorsAndEncodedQueries() throws Exception {
         HttpServer target=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
@@ -39,7 +43,13 @@ public class EnvironmentHttpProxyTest {
         } finally {proxy.close();gateway.stop(0);target.stop(0);}
     }
     @Test public void preservesBrowserOriginAcrossProxyHopsAndRejectsCrossSiteRequests() throws Exception {
-        ConfigUiServer target = new ConfigUiServer(0, () -> { }, ignored -> { });
+        // 此测试验证 Origin 转发，使用独立的无密码注册配置，不读取本机设置。
+        java.nio.file.Path registryDirectory = temporary.newFolder("registry").toPath();
+        ConfigUiServer target = new ConfigUiServer(0, () -> { }, ignored -> { }) {
+            @Override RegistryManager createRegistryManager(int boundPort) throws IOException {
+                return new RegistryManager(registryDirectory, boundPort, "origin-proxy-test");
+            }
+        };
         HttpServer gateway = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         HttpServer relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         EnvironmentHttpProxy proxy = new EnvironmentHttpProxy(), relayProxy = new EnvironmentHttpProxy();

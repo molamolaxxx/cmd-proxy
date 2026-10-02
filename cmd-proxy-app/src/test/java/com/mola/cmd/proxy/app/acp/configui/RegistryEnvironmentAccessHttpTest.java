@@ -5,14 +5,24 @@ import com.mola.cmd.proxy.app.acp.registry.RegistryEnvironmentAccess;
 import com.mola.cmd.proxy.app.acp.registry.model.RegistryConfig;
 import com.sun.net.httpserver.HttpServer;
 import okhttp3.*;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import static org.junit.Assert.*;
 
 public class RegistryEnvironmentAccessHttpTest {
+    @Rule public TemporaryFolder temporary = new TemporaryFolder();
+
     @Test public void protectedRemoteApisRequirePasswordAndForwardSevenDayCookie() throws Exception {
-        ConfigUiServer target = new ConfigUiServer(0, () -> { }, ignored -> { });
+        java.nio.file.Path registryDirectory = temporary.newFolder("registry").toPath();
+        ConfigUiServer target = new ConfigUiServer(0, () -> { }, ignored -> { }) {
+            @Override RegistryManager createRegistryManager(int boundPort) throws IOException {
+                return new RegistryManager(registryDirectory, boundPort, "password-proxy-test");
+            }
+        };
         HttpServer center = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         EnvironmentHttpProxy proxy = new EnvironmentHttpProxy(); OkHttpClient browser = new OkHttpClient();
         target.start();

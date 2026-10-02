@@ -248,8 +248,7 @@ public class ConfigUiServer {
         server.createContext("/", this::handleIndex);
         // 环境列表（不代理，始终由本进程扫描主机级注册表）
         server.createContext("/api/instances", this::handleInstances);
-        registryManager = new RegistryManager(Paths.get(CmdProxyHome.pathOf("registry")),
-                server.getAddress().getPort(), CmdProxyHome.instanceId());
+        registryManager = createRegistryManager(server.getAddress().getPort());
         // 注册控制属于接收进程；系统设置操作跟随当前选中的环境。
         server.createContext("/api/registry/", registryManager::handleControl);
         server.createContext("/api/registry/access", proxied(registryManager::handleAccess));
@@ -464,6 +463,12 @@ public class ConfigUiServer {
         HttpServer current = server;
         if (current == null) throw new IllegalStateException("ConfigUI is not running");
         return current.getAddress().getPort();
+    }
+
+    /** 测试可覆盖注册服务的创建，隔离真实环境的密码、登记数据和自动连接。 */
+    RegistryManager createRegistryManager(int boundPort) throws IOException {
+        return new RegistryManager(Paths.get(CmdProxyHome.pathOf("registry")),
+                boundPort, CmdProxyHome.instanceId());
     }
 
     // ==================== 多环境：环境列表与跨环境代理 ====================
