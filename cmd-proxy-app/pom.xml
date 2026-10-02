@@ -18,6 +18,17 @@
     </properties>
 
     <dependencies>
+        <!-- Embedded reverse tunnel; Java 8 compatible, no external executable. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-all</artifactId>
+            <version>4.1.138.Final</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.84</version>
+        </dependency>
         <!-- SQLite JDBC retains Java 8 compatibility and bundles Linux/Windows natives. -->
         <dependency>
             <groupId>org.xerial</groupId>

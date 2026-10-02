@@ -41,30 +41,26 @@ public class RemoteEnvironmentRegistryTest {
         RemoteEnvironmentRegistry registry = new RemoteEnvironmentRegistry(new RegistryConfigStore(temporary.newFolder().toPath()));
         RemoteEnvironmentRegistry.Entry entry = registry.register("node", "source", "电脑");
         try { registry.heartbeat(entry.id, "bad"); fail(); } catch (IllegalArgumentException expected) { }
-        JSONObject meta = new JSONObject(); meta.put("environmentId", entry.id); meta.put("lease", entry.lease);
-        JSONObject user = new JSONObject(); user.put("metas", meta);
-        JSONObject proxy = new JSONObject(); proxy.put("user", user); proxy.put("proxy_type", "tcp"); proxy.put("proxy_name", entry.id); proxy.put("remote_port", entry.port);
-        assertTrue(registry.pluginAllowed("NewProxy", proxy));
-        proxy.put("remote_port", 22); assertFalse(registry.pluginAllowed("NewProxy", proxy));
-        proxy.put("remote_port", entry.port); proxy.put("proxy_type", "http"); assertFalse(registry.pluginAllowed("NewProxy", proxy));
+        assertTrue(registry.tunnelAllowed(entry.id, entry.lease, entry.port, null));
+        assertFalse(registry.tunnelAllowed(entry.id, entry.lease, 22, null));
+        assertFalse(registry.tunnelAllowed(entry.id, "wrong", entry.port, null));
         registry.unregister(entry.id, entry.lease);
-        assertFalse(registry.pluginAllowed("Ping", proxy));
+        assertFalse(registry.tunnelAllowed(entry.id, entry.lease, entry.port, null));
         assertFalse(registry.list().get(0).online);
     }
     @Test public void oldConnectionCloseAndProbeCannotInvalidateReplacement() throws Exception {
         RemoteEnvironmentRegistry registry = new RemoteEnvironmentRegistry(new RegistryConfigStore(temporary.newFolder().toPath()));
         RemoteEnvironmentRegistry.Entry entry = registry.register("node", "source", "电脑");
-        JSONObject meta = new JSONObject(); meta.put("environmentId", entry.id); meta.put("lease", entry.lease);
-        JSONObject user = new JSONObject(); user.put("metas", meta); user.put("run_id", "old");
-        JSONObject proxy = new JSONObject(); proxy.put("user", user); proxy.put("proxy_type", "tcp"); proxy.put("proxy_name", entry.id); proxy.put("remote_port", entry.port);
-        assertTrue(registry.pluginAllowed("NewProxy", proxy));
+        registry.tunnelConnected(entry.id, entry.lease, "old");
         registry.verified(entry.id, entry.lease, "old", true);
-        user.put("run_id", "new"); assertTrue(registry.pluginAllowed("NewProxy", proxy));
+        registry.tunnelConnected(entry.id, entry.lease, "new");
+        assertFalse(registry.tunnelAllowed(entry.id, entry.lease, entry.port, "old"));
         registry.verified(entry.id, entry.lease, "new", true);
         registry.verified(entry.id, entry.lease, "old", false);
-        user.put("run_id", "old"); registry.pluginAllowed("CloseProxy", proxy);
+        registry.tunnelDisconnected(entry.id, entry.lease, "old");
         assertTrue(registry.list().get(0).online);
-        user.put("run_id", "new"); registry.pluginAllowed("CloseProxy", proxy);
+        registry.tunnelDisconnected(entry.id, entry.lease, "new");
+        registry.verified(entry.id, entry.lease, "new", true);
         assertFalse(registry.list().get(0).online);
     }
     @Test public void validatesCenterUrlAndLoadsLegacySettingsWithoutCredentials() throws Exception {

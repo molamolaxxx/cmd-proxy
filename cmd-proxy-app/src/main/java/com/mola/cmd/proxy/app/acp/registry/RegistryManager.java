@@ -22,15 +22,12 @@ public final class RegistryManager implements AutoCloseable {
     private final RegistryClient client = new RegistryClient();
     private final int localPort;
     private final String localInstanceId;
-    private final String pluginPath = "/api/registry/frp/" + UUID.randomUUID();
     private final String tunnelToken = UUID.randomUUID().toString() + UUID.randomUUID();
     private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r, "environment-registry"); t.setDaemon(true); return t; });
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ThreadPoolExecutor probes = new ThreadPoolExecutor(8, 8, 0, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(128), r -> { Thread t = new Thread(r, "registry-probe"); t.setDaemon(true); return t; });
     private final Set<String> verifying = ConcurrentHashMap.newKeySet();
-    private com.sun.net.httpserver.HttpServer pluginServer;
-    private ExecutorService pluginExecutor;
     private volatile RegistryConfig config;
     private volatile String serverStatus = "STOPPED", clientStatus = "UNREGISTERED", serverError = "", clientError = "";
     private volatile JSONObject connection;
@@ -40,7 +37,7 @@ public final class RegistryManager implements AutoCloseable {
     private final Thread shutdownHook = new Thread(this::close, "registry-shutdown");
 
     public RegistryManager(Path directory, int localPort, String localInstanceId) throws IOException {
-        this(directory, localPort, localInstanceId, new FrpTunnelProvider(directory));
+        this(directory, localPort, localInstanceId, new NettyTunnelProvider());
     }
     public RegistryManager(Path directory, int localPort, String localInstanceId, TunnelProvider tunnel) throws IOException {
         this.store = new RegistryConfigStore(directory); this.localPort = localPort; this.localInstanceId = localInstanceId; this.tunnel = tunnel;
@@ -60,7 +57,7 @@ public final class RegistryManager implements AutoCloseable {
         result.put("accessPasswordSet", !config.accessPasswordHash.isEmpty());
         result.remove("nodeId"); result.put("serverStatus", serverStatus); result.put("clientStatus", clientStatus);
         result.put("serverError", serverError); result.put("clientError", clientError);
-        result.put("frpVersion", FrpRuntimeInstaller.VERSION);
+        result.put("tunnelProvider", "netty");
         return result;
     }
     public synchronized JSONObject configure(JSONObject input) throws IOException {
@@ -145,6 +142,7 @@ public final class RegistryManager implements AutoCloseable {
                 RemoteEnvironmentRegistry.Entry entry = environments.register(input.getString("nodeId"), input.getString("instanceId"), text(input, "displayName"));
                 result.put("environmentId", entry.id); result.put("lease", entry.lease); result.put("remotePort", entry.port);
                 result.put("tunnelPort", snapshot.tunnelPort); result.put("tunnelToken", tunnelToken); result.put("online", entry.online);
+                result.put("tunnelProtocol", 1); result.put("tunnelCertificate", tunnel.serverCertificate());
             } else if ("heartbeat".equals(action)) {
                 RemoteEnvironmentRegistry.Entry entry = environments.heartbeat(input.getString("environmentId"), input.getString("lease"));
                 result.put("online", entry.online);
@@ -166,20 +164,6 @@ public final class RegistryManager implements AutoCloseable {
             } else respond(exchange, 405, error("Method Not Allowed"));
         } catch (IllegalArgumentException e) { respond(exchange, 400, error(e.getMessage())); }
         catch (IOException e) { respond(exchange, 503, error("注册配置保存失败")); }
-    }
-    private void handlePlugin(HttpExchange exchange) throws IOException {
-        if (!exchange.getRemoteAddress().getAddress().isLoopbackAddress() || !"POST".equals(exchange.getRequestMethod())) {
-            respond(exchange, 403, error("Forbidden")); return;
-        }
-        JSONObject input = JSON.parseObject(RegistryClient.read(exchange.getRequestBody()));
-        String query = exchange.getRequestURI().getRawQuery();
-        String op = "";
-        if (query != null) for (String pair : query.split("&")) if (pair.startsWith("op=")) op = URLDecoder.decode(pair.substring(3), "UTF-8");
-        boolean allowed = config.serverEnabled && input != null && input.getJSONObject("content") != null
-                && environments.pluginAllowed(op, input.getJSONObject("content"));
-        JSONObject result = new JSONObject(); result.put("reject", !allowed); result.put("unchange", true);
-        if (!allowed) result.put("reject_reason", "unregistered environment or invalid proxy");
-        respond(exchange, 200, result);
     }
     private void tickSafely() {
         if (closed.get()) return;
@@ -206,24 +190,19 @@ public final class RegistryManager implements AutoCloseable {
         if (!snapshot.serverEnabled) { serverStatus = "STOPPED"; serverError = ""; return; }
         if (!tunnel.serverAlive()) {
             serverStatus = serverAttempted ? "ERROR" : "STARTING";
-            serverError = serverAttempted ? "中心隧道未启动，请检查监听端口和 frp 日志" : "";
+            serverError = serverAttempted ? "中心隧道未启动，请检查监听端口和应用日志" : "";
             serverAttempted = true;
-            tunnel.startServer(snapshot.tunnelPort, tunnelToken, pluginAddress(), pluginPath);
+            tunnel.startServer(snapshot.tunnelPort, tunnelToken, new TunnelProvider.Authorizer() {
+                @Override public boolean authorize(String id, String lease, int port, String run) {
+                    return config.serverEnabled && environments.tunnelAllowed(id, lease, port, run);
+                }
+                @Override public void connected(String id, String lease, String run) { environments.tunnelConnected(id, lease, run); }
+                @Override public void disconnected(String id, String lease, String run) { environments.tunnelDisconnected(id, lease, run); }
+            });
         }
         if (closed.get() || snapshot != config) { tunnel.stopServer(); serverReady = false; return; }
         serverReady = tunnel.serverAlive() && reachable(snapshot.tunnelPort);
         if (serverReady) { serverStatus = "RUNNING"; serverError = ""; }
-    }
-    private synchronized String pluginAddress() throws IOException {
-        if (closed.get()) throw new IOException("注册服务已停止");
-        if (pluginServer == null) {
-            pluginServer = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            pluginExecutor = Executors.newFixedThreadPool(2, r -> { Thread t = new Thread(r, "registry-frp-callback"); t.setDaemon(true); return t; });
-            pluginServer.setExecutor(pluginExecutor);
-            pluginServer.createContext(pluginPath, this::handlePlugin);
-            pluginServer.start();
-        }
-        return "127.0.0.1:" + pluginServer.getAddress().getPort();
     }
 
     private void reconcileClient(RegistryConfig snapshot) throws IOException {
@@ -257,7 +236,7 @@ public final class RegistryManager implements AutoCloseable {
             if (!tunnel.clientAlive()) {
                 clientStatus = "CONNECTING";
                 tunnel.startClient(URI.create(snapshot.centerUrl).getHost(), active.getIntValue("tunnelPort"), active.getString("tunnelToken"),
-                        active.getString("environmentId"), active.getString("lease"), active.getIntValue("remotePort"), localPort);
+                        active.getString("environmentId"), active.getString("lease"), active.getIntValue("remotePort"), localPort, active.getString("tunnelCertificate"));
                 if (closed.get() || snapshot != config) tunnel.stopClient();
                 clientStatus = "CONNECTING"; clientError = ""; return;
             }
@@ -271,6 +250,8 @@ public final class RegistryManager implements AutoCloseable {
         }
     }
     private static void validateConnection(JSONObject result) throws IOException {
+        if (result.getIntValue("tunnelProtocol") != 1 || result.getString("tunnelCertificate") == null)
+            throw new IOException("隧道协议不兼容，请同时更新中心和远程环境");
         String id = result.getString("environmentId"), lease = result.getString("lease");
         if (id == null || !id.matches("remote-[a-f0-9-]{36}") || lease == null || lease.length() != 36
                 || result.getString("tunnelToken") == null || result.getIntValue("tunnelPort") < 1 || result.getIntValue("tunnelPort") > 65535
@@ -295,11 +276,10 @@ public final class RegistryManager implements AutoCloseable {
     private static JSONObject leaseBody(JSONObject active) { JSONObject result = new JSONObject(); result.put("environmentId", active.getString("environmentId")); result.put("lease", active.getString("lease")); return result; }
     private static String text(JSONObject input, String key) { String value = input.getString(key); return value == null ? "" : value.trim(); }
     private static String safeError(Exception e) {
-        // 不回显 HTTP 请求头、配置文本或 frp 原始日志中的凭证。
+        // 不回显 HTTP 请求头或配置文本中的凭证。
         if (e instanceof java.net.ConnectException) return "无法连接服务器，请检查地址与端口";
         if (e instanceof java.net.SocketTimeoutException) return "服务器连接超时";
         String message = e.getMessage();
-        if (message != null) message = message.replace("frp", "隧道");
         return message != null && !message.isEmpty() && message.length() <= 160
                 && !message.matches("(?s).*[a-zA-Z].*") ? message : "连接暂时失败，请检查中心地址、端口和网络后重试";
     }
@@ -314,7 +294,6 @@ public final class RegistryManager implements AutoCloseable {
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         serverReady = false; worker.shutdownNow(); probes.shutdownNow(); tunnel.close(); environments.clearOnline();
-        synchronized (this) { if (pluginServer != null) pluginServer.stop(0); if (pluginExecutor != null) pluginExecutor.shutdownNow(); }
         try { Runtime.getRuntime().removeShutdownHook(shutdownHook); }
         catch (IllegalStateException ignored) { }
     }

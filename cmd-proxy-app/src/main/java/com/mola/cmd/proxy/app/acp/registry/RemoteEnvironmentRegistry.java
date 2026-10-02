@@ -98,22 +98,20 @@ public final class RemoteEnvironmentRegistry {
         if (!entry.online) throw new IllegalStateException("目标环境离线");
         return entry.port;
     }
-    public synchronized boolean pluginAllowed(String op, JSONObject content) {
-        JSONObject user = content.getJSONObject("user");
-        JSONObject meta = "Login".equals(op) ? content.getJSONObject("metas") : user == null ? null : user.getJSONObject("metas");
-        if (meta == null) return false;
+    public synchronized boolean tunnelAllowed(String id, String lease, int port, String runId) {
         Entry entry;
-        try { entry = authorized(meta.getString("environmentId"), meta.getString("lease")); }
+        try { entry = authorized(id, lease); }
         catch (IllegalArgumentException e) { return false; }
-        if ("NewProxy".equals(op)) {
-            boolean allowed = "tcp".equals(content.getString("proxy_type"))
-                && entry.id.equals(content.getString("proxy_name")) && entry.port == content.getIntValue("remote_port")
-                && (content.getString("group") == null || content.getString("group").isEmpty());
-            if (allowed) { String runId = user.getString("run_id"); if (!equal(entry.runId, runId)) entry.online = false; entry.runId = runId == null ? "" : runId; }
-            return allowed;
+        return entry.port == port && (runId == null || equal(entry.runId, runId));
+    }
+    public synchronized void tunnelConnected(String id, String lease, String runId) {
+        Entry entry = authorized(id, lease); entry.online = false; entry.runId = runId;
+    }
+    public synchronized void tunnelDisconnected(String id, String lease, String runId) {
+        Entry entry = entries.get(id);
+        if (entry != null && equal(entry.lease, lease) && equal(entry.runId, runId)) {
+            entry.online = false; entry.runId = "";
         }
-        if ("CloseProxy".equals(op) && equal(entry.runId, user.getString("run_id"))) { entry.online = false; }
-        return Arrays.asList("Login", "Ping", "CloseProxy").contains(op);
     }
     private Entry authorized(String id, String lease) {
         Entry entry = entries.get(id);

@@ -36,9 +36,8 @@ public class RegistryManagerTest {
             JSONObject registration=client.request(url,"register",input);assertFalse(registration.getBooleanValue("online"));assertEquals(1,manager.environments().size());
             try{manager.resolve(registration.getString("environmentId"));fail();}catch(IllegalStateException expected){}
             JSONObject meta=new JSONObject();meta.put("environmentId",registration.getString("environmentId"));meta.put("lease",registration.getString("lease"));
-            JSONObject content=new JSONObject();content.put("metas",meta);JSONObject callback=new JSONObject();callback.put("content",content);
-            assertFalse(plugin(tunnel,"Login",callback).getBooleanValue("reject"));
-            meta.put("lease","wrong");assertTrue(plugin(tunnel,"Login",callback).getBooleanValue("reject"));
+            assertTrue(tunnel.authorizer.authorize(registration.getString("environmentId"), registration.getString("lease"), registration.getIntValue("remotePort"), null));
+            meta.put("lease","wrong");assertFalse(tunnel.authorizer.authorize(registration.getString("environmentId"), "wrong", registration.getIntValue("remotePort"), null));
             try{client.request(url,"heartbeat",meta);fail("invalid lease accepted");}catch(IOException expected){}
             try{client.request(url,"unregister",meta);fail("invalid lease accepted");}catch(IOException expected){}
             assertEquals(1,manager.environments().size());
@@ -72,16 +71,12 @@ public class RegistryManagerTest {
             assertEquals("environment-b", restored.configure(input).getString("displayName"));
         } finally { restored.close(); }
     }
-    private JSONObject plugin(FakeTunnel tunnel,String op,JSONObject input)throws Exception {
-        HttpURLConnection connection=(HttpURLConnection)new URL("http://"+tunnel.pluginAddress+tunnel.pluginPath+"?op="+op).openConnection();connection.setRequestMethod("POST");connection.setDoOutput(true);
-        try(OutputStream output=connection.getOutputStream()){output.write(input.toJSONString().getBytes(StandardCharsets.UTF_8));}
-        assertEquals(200,connection.getResponseCode());JSONObject result=JSON.parseObject(RegistryClient.read(connection.getInputStream()));connection.disconnect();return result;
-    }
     private static final class FakeTunnel implements TunnelProvider {
-        private ServerSocket socket;String pluginAddress,pluginPath;
+        private ServerSocket socket; Authorizer authorizer;
         final AtomicInteger starts=new AtomicInteger(),closes=new AtomicInteger();final CountDownLatch started=new CountDownLatch(1);
-        @Override public synchronized void startServer(int port,String token,String address,String path)throws IOException{socket=new ServerSocket(port,100,InetAddress.getLoopbackAddress());pluginAddress=address;pluginPath=path;starts.incrementAndGet();started.countDown();}
-        @Override public void startClient(String host,int port,String token,String id,String lease,int remotePort,int localPort){}
+        @Override public synchronized void startServer(int port,String token,Authorizer authorizer)throws IOException{socket=new ServerSocket(port,100,InetAddress.getLoopbackAddress());this.authorizer=authorizer;starts.incrementAndGet();started.countDown();}
+        @Override public String serverCertificate(){return "test-certificate";}
+        @Override public void startClient(String host,int port,String token,String id,String lease,int remotePort,int localPort,String certificate){}
         @Override public synchronized boolean serverAlive(){return socket!=null&&!socket.isClosed();}
         @Override public boolean clientAlive(){return false;}
         @Override public synchronized void stopServer(){if(socket!=null)try{socket.close();}catch(IOException ignored){}socket=null;}
