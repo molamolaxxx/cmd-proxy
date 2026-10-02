@@ -109,6 +109,10 @@ public class CmdProxyMcpHttpHandlerTest {
         assertTrue(talkToProperties.getAsJsonObject("target").has("description"));
         assertTrue(talkToProperties.getAsJsonObject("content").has("description"));
         assertFalse(talkToProperties.has("_depth"));
+        JsonObject newSessionSchema = findTool(tools, "new_session").getAsJsonObject("inputSchema");
+        assertEquals(1, newSessionSchema.getAsJsonObject("properties").size());
+        assertEquals("prompt", newSessionSchema.getAsJsonArray("required").get(0).getAsString());
+        assertFalse(newSessionSchema.get("additionalProperties").getAsBoolean());
     }
 
     @Test
@@ -131,6 +135,20 @@ public class CmdProxyMcpHttpHandlerTest {
                         + "\"params\":{\"name\":\"talk_to\",\"arguments\":{}}}",
                 "application/json", null);
         assertTrue(response.getAsJsonObject("result").get("isError").getAsBoolean());
+    }
+
+    @Test
+    public void routesNewSessionPromptToOwningRuntime() throws Exception {
+        ActionRuntimeRegistry.getInstance().register("test-session",
+                (name, arguments) -> name + ":" + arguments.get("prompt").getAsString(),
+                () -> java.util.Collections.singleton("new_session"));
+        JsonObject response = post("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+                        + "\"params\":{\"name\":\"new_session\",\"arguments\":{\"prompt\":\"continue\"}}}",
+                "application/json", "test-session");
+        JsonObject result = response.getAsJsonObject("result");
+        assertFalse(result.get("isError").getAsBoolean());
+        assertEquals("new_session:continue", result.getAsJsonArray("content").get(0)
+                .getAsJsonObject().get("text").getAsString());
     }
 
     @Test

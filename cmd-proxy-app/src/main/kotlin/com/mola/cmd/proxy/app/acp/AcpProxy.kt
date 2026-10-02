@@ -575,6 +575,12 @@ object AcpProxy {
                             team.teamId, member.teamMemberId,
                             previousSessionId, newSessionId)
                     }
+                    client.setNewSessionListener { previousSessionId, newSessionId, prompt, messageId ->
+                        val manager = managerHolder.get()
+                            ?: throw IllegalStateException("Team manager is unavailable")
+                        manager.onMemberNewSession(team.teamId, member.teamMemberId,
+                            client, previousSessionId, newSessionId, prompt, messageId)
+                    }
                     client.setForceNewSession(options.isForceNewSession)
                     if (options.targetRestoreSessionId != null) {
                         client.setTargetRestoreSessionId(options.targetRestoreSessionId)

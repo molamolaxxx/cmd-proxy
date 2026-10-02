@@ -125,7 +125,7 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
 
     public static JsonArray tools() {
         return tools(new java.util.LinkedHashSet<>(java.util.Arrays.asList(
-                "dispatch_subagent", "schedule_task", "manage_schedule", "talk_to")));
+                "dispatch_subagent", "schedule_task", "manage_schedule", "talk_to", "new_session")));
     }
 
     public static JsonArray tools(Set<String> availableTools) {
@@ -202,12 +202,19 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
                             + "不表示目标已处理，也不保证当前 turn 内获得回复。发送后可以继续当前工作。",
                     talkTo));
         }
+        if (availableTools.contains("new_session")) {
+            tools.add(tool("new_session",
+                    "请求当前 Agent 在本轮结束后创建全新会话，并以传入的提示词自动开始运行。"
+                            + "返回结果表示请求已接收，执行结果通过后续会话事件反馈。",
+                    objectSchema("prompt", described(stringSchema(), "新会话的第一条输入提示词。"))));
+        }
         return tools;
     }
 
     private static boolean isActionTool(String name) {
         return "dispatch_subagent".equals(name) || "schedule_task".equals(name)
-                || "manage_schedule".equals(name) || "talk_to".equals(name);
+                || "manage_schedule".equals(name) || "talk_to".equals(name)
+                || "new_session".equals(name);
     }
 
     private static JsonObject tool(String name, String description, JsonObject schema) {

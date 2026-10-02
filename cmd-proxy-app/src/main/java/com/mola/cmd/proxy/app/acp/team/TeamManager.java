@@ -2225,6 +2225,38 @@ public final class TeamManager implements AutoCloseable {
         publishMemberSessionChanged(runtime, memberId, oldSessionId, newSessionId, "AUTO_IDLE");
     }
 
+    /** Synchronizes the member before an Agent-requested continuation starts. */
+    public void onMemberNewSession(String teamId, String memberId, AcpClient expected,
+                                   String oldSessionId, String newSessionId,
+                                   String prompt, String messageId) throws IOException {
+        TeamRuntime runtime = teams.get(teamId);
+        if (runtime == null || closed.get()) throw new IOException("Team is unavailable");
+        runtime.getOperationLock().lock();
+        try {
+            if (clientRegistry.get(teamId, memberId).orElse(null) != expected
+                    || !newSessionId.equals(expected.getSessionId())) {
+                throw new IOException("Team member session is no longer current");
+            }
+            ensureGrantActive(runtime.getDefinition());
+            publishMemberState(runtime, memberId, TeamMemberState.BUSY, null);
+            publishMemberSessionChanged(runtime, memberId, oldSessionId, newSessionId, "AGENT_TOOL");
+            TeamMemberDefinition member = findMember(runtime.getDefinition(), memberId);
+            Map<String, Object> accepted = new LinkedHashMap<>();
+            accepted.put("sessionId", newSessionId);
+            accepted.put("messageId", messageId);
+            accepted.put("revision", 1L);
+            accepted.put("content", prompt);
+            accepted.put("source", "AGENT_TOOL");
+            accepted.put("attachments", java.util.Collections.emptyList());
+            eventSink.publish(TeamEventEnvelope.next(runtime, memberId, member.getAcpClientId(),
+                    TeamEventType.USER_MESSAGE_ACCEPTED, accepted));
+        } catch (MemberRouteException failure) {
+            throw new IOException(failure);
+        } finally {
+            runtime.getOperationLock().unlock();
+        }
+    }
+
     public TeamCommandResult restoreSession(String requestId, TeamMemberCommand command) {
         try {
             return replaceSession(requestId, command,

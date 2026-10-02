@@ -304,6 +304,46 @@ public class StarweaveSessionManagerTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    public void agentToolRotationUpdatesIndexAndStartsPromptOnNewSession() throws Exception {
+        AcpClientRegistry registry = registry(new FakeFactory());
+        StarweaveSessionManager manager = manager(registry);
+        JSONObject opened = manager.open("Robot");
+        String groupId = opened.getString("groupId");
+        FakeClient client = (FakeClient) registry.getClient(groupId);
+        manager.send(groupId, "initial", opened.getString("sessionId"),
+                opened.getLongValue("generation"), "REJECT");
+        for (String fieldName : java.util.Arrays.asList("activeMcpOptions", "activeMcpListener")) {
+            java.lang.reflect.Field field = AcpClient.class.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            ((java.util.concurrent.atomic.AtomicReference<Object>) field.get(client))
+                    .set("activeMcpOptions".equals(fieldName)
+                            ? PromptOptions.defaults() : client.getLiveOutputListener());
+        }
+        com.google.gson.JsonObject args = new com.google.gson.JsonObject();
+        args.addProperty("prompt", "continue on new session");
+        com.mola.cmd.proxy.app.acp.action.ActionRuntimeRegistry.getInstance()
+                .execute(client.getAuthSessionId(), "new_session", args);
+        java.lang.reflect.Method finish = AcpClient.class.getDeclaredMethod(
+                "finishSuccessfulTurn", long.class, PromptOptions.class);
+        finish.setAccessible(true);
+        finish.invoke(client, client.getLifecycleGeneration(), PromptOptions.defaults());
+        JSONObject status = manager.status(groupId);
+        assertNotEquals(opened.getString("sessionId"), status.getString("sessionId"));
+        assertEquals(opened.getLongValue("generation") + 1, status.getLongValue("generation"));
+        assertEquals("continue on new session", client.sentMessage);
+        com.alibaba.fastjson.JSONArray events = manager.eventBatch(groupId,
+                status.getString("sessionId"), 0L, null).getJSONArray("events");
+        assertEquals("SESSION_REPLACED", events.getJSONObject(0).getString("type"));
+        assertEquals("AGENT_TOOL", events.getJSONObject(0).getJSONObject("payload").getString("reason"));
+        assertEquals("USER_MESSAGE_ACCEPTED", events.getJSONObject(1).getString("type"));
+        assertEquals("continue on new session",
+                events.getJSONObject(1).getJSONObject("payload").getString("content"));
+        assertNotNull(events.getJSONObject(1).getJSONObject("payload").getString("messageId"));
+        registry.closeAllForShutdown();
+    }
+
+    @Test
     public void externalChannelInboundUsesDedicatedCardEventInsteadOfUserMessage()
             throws Exception {
         FakeFactory factory = new FakeFactory();

@@ -54,6 +54,20 @@ public class PromptOptions {
     public PromptOptions() {
     }
 
+    /** A new execution has fresh counters and IDs, while retaining its business origin. */
+    public PromptOptions forNewSession() {
+        PromptOptions next = new PromptOptions();
+        next.setChannelTurnContext(channelTurnContext);
+        next.setAuthPrincipalContext(authPrincipalContext);
+        next.talkToParent = talkToParent;
+        if (isTaskTurn()) {
+            next.setTaskContext(taskId, taskEventId, taskEventSeq, taskRevision,
+                    taskContentVersion, false);
+        }
+        next.setClientMessageId(UUID.randomUUID().toString());
+        return next;
+    }
+
     public boolean isScheduleExecution() {
         return scheduleExecution;
     }

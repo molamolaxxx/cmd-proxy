@@ -19,12 +19,13 @@ public final class ActionToolService {
     public ActionToolService(Handler dispatchSubagent,
                              Handler scheduleTask,
                              Handler manageSchedule,
-                             Handler talkTo) {
+                             Handler talkTo, Handler newSession) {
         Map<String, Handler> configured = new LinkedHashMap<>();
         configured.put("dispatch_subagent", dispatchSubagent);
         configured.put("schedule_task", scheduleTask);
         configured.put("manage_schedule", manageSchedule);
         configured.put("talk_to", talkTo);
+        configured.put("new_session", newSession);
         handlers = Collections.unmodifiableMap(configured);
     }
 

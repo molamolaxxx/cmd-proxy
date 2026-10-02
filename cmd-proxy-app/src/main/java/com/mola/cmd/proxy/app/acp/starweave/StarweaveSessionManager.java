@@ -492,6 +492,16 @@ public final class StarweaveSessionManager {
                 () -> generation(groupId), eventStore, turnTracker(groupId)));
         client.setSessionRotationListener((previousSessionId, newSessionId) ->
                 onSessionRotatedOnWake(groupId, previousSessionId, newSessionId));
+        client.setNewSessionListener((previousSessionId, newSessionId, prompt, messageId) -> {
+            onSessionReplaced(groupId, previousSessionId, newSessionId, "AGENT_TOOL");
+            JSONObject payload = new JSONObject(true);
+            payload.put("content", prompt);
+            payload.put("messageId", messageId);
+            payload.put("source", "AGENT_TOOL");
+            payload.put("attachments", new JSONArray());
+            eventStore.append(groupId, newSessionId, turnTracker(groupId).begin(),
+                    generation(groupId), "USER_MESSAGE_ACCEPTED", payload);
+        });
         featureInitializer.initialize(groupId, client, robot);
     }
 

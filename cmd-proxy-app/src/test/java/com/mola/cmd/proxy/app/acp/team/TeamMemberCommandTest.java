@@ -270,6 +270,36 @@ public class TeamMemberCommandTest {
     }
 
     @Test
+    public void agentToolRotationPersistsMemberIdentityAndRejectsStaleClient() throws Exception {
+        Fixture fixture = fixture();
+        TestClient current = fixture.current.get();
+        current.changeSession("tool-session");
+        current.setClientState(AbstractAcpClient.State.STARTING);
+        fixture.manager.onMemberNewSession("team-1", "member-1", current,
+                "session-member-1", "tool-session", "continue", "new-message-id");
+        TeamMemberDefinition member = fixture.manager.getRuntime("team-1").get()
+                .getDefinition().getMembers().get(0);
+        assertEquals("tool-session", member.getSessionId());
+        assertEquals(TeamMemberState.BUSY, member.getState());
+        TeamEventEnvelope changed = fixture.events.stream()
+                .filter(event -> event.getType().name().equals("MEMBER_SESSION_CHANGED"))
+                .findFirst().get();
+        assertEquals("AGENT_TOOL", ((Map) changed.getData()).get("reason"));
+        Map accepted = (Map) fixture.events.stream()
+                .filter(event -> event.getType().name().equals("USER_MESSAGE_ACCEPTED"))
+                .findFirst().get().getData();
+        assertEquals("continue", accepted.get("content"));
+        assertEquals("new-message-id", accepted.get("messageId"));
+        assertEquals("tool-session", accepted.get("sessionId"));
+        try {
+            fixture.manager.onMemberNewSession("team-1", "member-1", current,
+                    "tool-session", "wrong-session", "continue", "new-message-id");
+            fail("stale identity accepted");
+        } catch (java.io.IOException expected) { }
+        fixture.manager.close();
+    }
+
+    @Test
     public void rejectsCrossOwnerMismatchedClientAndUnsafeFileNames() throws Exception {
         Fixture fixture = fixture();
         Map<String, String> owner = fixture.handler.handleGetStatus(
@@ -491,6 +521,7 @@ public class TeamMemberCommandTest {
     }
 
     private static final class TestClient extends AcpClient {
+        private void changeSession(String sessionId) { setSessionId(sessionId); }
         private String message;
         private List<Map<String, String>> files;
         private boolean cancelled;

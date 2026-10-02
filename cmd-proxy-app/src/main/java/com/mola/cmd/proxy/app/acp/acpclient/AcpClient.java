@@ -220,7 +220,8 @@ public class AcpClient extends AbstractAcpClient {
                 this::executeMcpDispatchSubagent,
                 args -> executeMcpSchedule("schedule_task", args),
                 args -> executeMcpSchedule("manage_schedule", args),
-                this::executeMcpTalkTo);
+                this::executeMcpTalkTo,
+                this::executeMcpNewSession);
         ActionRuntimeRegistry.getInstance().register(authSessionId,
                 actionToolService::execute, this::availableActionTools);
     }
@@ -312,6 +313,139 @@ public class AcpClient extends AbstractAcpClient {
                 logger.warn("session READY 后处理失败, sessionId={}", sessionId, e);
             }
         }
+    }
+
+    @FunctionalInterface
+    public interface NewSessionListener {
+        void onNewSession(String previousSessionId, String newSessionId,
+                          String prompt, String messageId);
+    }
+
+    private NewSessionListener newSessionListener;
+    private PendingNewSession pendingNewSession;
+    private boolean newSessionCancelled;
+
+    private static final class PendingNewSession {
+        final String sessionId;
+        final long generation;
+        final String prompt;
+        final PromptOptions options;
+        PendingNewSession(String sessionId, long generation, String prompt, PromptOptions options) {
+            this.sessionId = sessionId;
+            this.generation = generation;
+            this.prompt = prompt;
+            this.options = options;
+        }
+    }
+
+    public void setNewSessionListener(NewSessionListener listener) {
+        this.newSessionListener = listener;
+    }
+
+    private synchronized String executeMcpNewSession(JsonObject arguments) {
+        PromptOptions options = requireActiveMcpTurn();
+        if (newSessionCancelled) throw new IllegalStateException("当前轮已被取消");
+        if (arguments.size() != 1 || !arguments.has("prompt")
+                || !arguments.get("prompt").isJsonPrimitive()
+                || !arguments.getAsJsonPrimitive("prompt").isString()
+                || arguments.get("prompt").getAsString().trim().isEmpty()) {
+            throw new IllegalArgumentException("prompt 必须是非空字符串，且只能提供 prompt 参数");
+        }
+        if (pendingNewSession != null) {
+            throw new IllegalStateException("已有待执行的新会话请求");
+        }
+        pendingNewSession = new PendingNewSession(sessionId, currentLifecycleGeneration(),
+                arguments.get("prompt").getAsString(), options.forNewSession());
+        return "已接收，将在本轮结束后创建新会话并执行提示词。";
+    }
+
+    /** Called only after the old turn has released its MCP/auth context. */
+    void finishSuccessfulTurn(long generation, PromptOptions options) {
+        PendingNewSession request;
+        synchronized (this) {
+            request = pendingNewSession;
+            pendingNewSession = null;
+            if (request != null && (request.generation != generation
+                    || !java.util.Objects.equals(request.sessionId, sessionId)
+                    || !compareAndSetStateIfActive(generation, State.BUSY, State.STARTING))) {
+                request = null;
+            }
+        }
+        if (request != null) {
+            try {
+                boolean restarted = false;
+                synchronized (this) {
+                    if (!newSessionCancelled && getState() == State.STARTING) {
+                        restartForNewSession();
+                        state.set(State.STARTING);
+                        restarted = true;
+                    }
+                }
+                if (!restarted) {
+                    finishCancelledNewSession(request);
+                    return;
+                }
+                // Owner callbacks can acquire manager locks; never hold the client monitor.
+                if (newSessionListener != null) {
+                    newSessionListener.onNewSession(request.sessionId, sessionId,
+                            request.prompt, request.options.getClientMessageId());
+                }
+                synchronized (this) {
+                    if (!newSessionCancelled && getState() == State.STARTING) {
+                        state.set(State.READY);
+                        send(request.prompt, null, request.options);
+                        return;
+                    }
+                }
+                finishCancelledNewSession(request);
+            } catch (Exception failure) {
+                releaseChannelTurn(request.options);
+                if (setStateIfActive(currentLifecycleGeneration(), State.ERROR)) {
+                    notifyAfterTurnFailed();
+                    getLiveOutputListener().onError(new IOException("创建新会话并运行失败", failure));
+                }
+            }
+            return;
+        }
+        if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
+            lastActivityAt.set(System.currentTimeMillis());
+            notifyAfterTurnReady();
+            if (getState() == State.READY) deliverInboxAfterTurn(generation, options);
+        }
+    }
+
+    private void finishCancelledNewSession(PendingNewSession request) {
+        releaseChannelTurn(request.options);
+        if (state.compareAndSet(State.STARTING, State.READY)) notifyAfterTurnReady();
+    }
+
+    /** Retains logical identity and feature wiring, but creates a fresh provider runtime. */
+    protected void restartForNewSession() throws IOException {
+        historyManager.forceFlush(sessionId);
+        if (memoryManager != null && historyManager.getTurnCount() > initialTurnCount) {
+            final String oldSession = sessionId;
+            final int oldTurns = historyManager.getTurnCount();
+            historyManager.markMemoryExtractionPending(oldSession, oldTurns);
+        }
+        releaseRuntimeForSleep();
+        lifecycleBoundary();
+        historyManager.reset();
+        initialTurnCount = 0;
+        lastMessageAt.set(0L);
+        contextUsagePercentage = -1D;
+        compactionInProgress = false;
+        acpHarnessReinjectionPending.set(false);
+        restoredSession = false;
+        targetRestoreSessionId = null;
+        forceNewSession = true;
+        state.set(State.SLEEP);
+        try {
+            wakeRuntimeSession();
+        } finally {
+            forceNewSession = false;
+        }
+        lastActivityAt.set(System.currentTimeMillis());
+        notifySessionReady();
     }
 
     /**
@@ -707,6 +841,7 @@ public class AcpClient extends AbstractAcpClient {
                         "当前 client 状态不允许发送消息: " + state.get()));
                 return;
             }
+            newSessionCancelled = false;
         }
         acceptedPromptOptions.set(effectiveOptions);
         lastMessageAt.set(System.currentTimeMillis());
@@ -745,6 +880,7 @@ public class AcpClient extends AbstractAcpClient {
                 guardedListener, userInput, effectiveOptions);
         try {
             executor.submit(() -> {
+                boolean succeeded = false;
                 try {
                     activeMcpListener.set(guardedListener);
                     activeMcpOptions.set(effectiveOptions);
@@ -760,15 +896,9 @@ public class AcpClient extends AbstractAcpClient {
                             attachmentNames, guardedListener, effectiveOptions);
                     completeScheduleExecution(effectiveOptions, true, null);
                     releaseMcpAuthBinding(effectiveOptions);
-                    if (compareAndSetStateIfActive(generation, State.BUSY, State.READY)) {
-                        lastActivityAt.set(System.currentTimeMillis());
-                        notifyAfterTurnReady();
-                        // 中断式 pending 优先；仍为 READY 时才检查 inbox。
-                        if (getState() == State.READY) {
-                            deliverInboxAfterTurn(generation, effectiveOptions);
-                        }
-                    }
+                    succeeded = true;
                 } catch (Exception e) {
+                    synchronized (this) { pendingNewSession = null; }
                     completeScheduleExecution(effectiveOptions, false,
                             e.getClass().getName() + ": " + e.getMessage());
                     releaseMcpAuthBinding(effectiveOptions);
@@ -785,6 +915,7 @@ public class AcpClient extends AbstractAcpClient {
                     acceptedPromptOptions.compareAndSet(effectiveOptions, null);
                     queuedWorkCancellationPending.set(false);
                 }
+                if (succeeded) finishSuccessfulTurn(generation, effectiveOptions);
             });
         } catch (RejectedExecutionException e) {
             completeScheduleExecution(effectiveOptions, false,
@@ -870,7 +1001,9 @@ public class AcpClient extends AbstractAcpClient {
         listener.onScheduleEvent("SCHEDULE_EXECUTE", userInput, true);
     }
 
-    public void cancel() throws IOException {
+    public synchronized void cancel() throws IOException {
+        pendingNewSession = null;
+        newSessionCancelled = true;
         McpAuthManager.getInstance().clearBinding(authSessionId);
         if (sessionId == null) {
             logger.warn("cancel 调用时 sessionId 为空，忽略");
@@ -905,7 +1038,9 @@ public class AcpClient extends AbstractAcpClient {
         close(true);
     }
 
-    private void close(boolean deferMemoryExtraction) throws IOException {
+    private synchronized void close(boolean deferMemoryExtraction) throws IOException {
+        pendingNewSession = null;
+        newSessionCancelled = true;
         if (!beginClose()) {
             return;
         }
@@ -1032,6 +1167,8 @@ public class AcpClient extends AbstractAcpClient {
 
     Set<String> availableActionTools() {
         LinkedHashSet<String> tools = new LinkedHashSet<>();
+        if (clientIdentity.getScope() == AcpClientIdentity.Scope.MAIN
+                || clientIdentity.isTeam()) tools.add("new_session");
         if (subAgentDispatcher != null) tools.add("dispatch_subagent");
         if (scheduleTaskManager != null
                 && (robotParam == null || robotParam.isScheduleEnabled())) {
@@ -1286,11 +1423,10 @@ public class AcpClient extends AbstractAcpClient {
                 releaseChannelTurn(options);
                 IOException writeErr = stdinWriteError.get();
                 if (writeErr != null) {
-                    listener.onError(new IOException("ACP stdin 写入失败: " + writeErr.getMessage(), writeErr));
+                    throw new IOException("ACP stdin 写入失败: " + writeErr.getMessage(), writeErr);
                 } else {
-                    listener.onError(new IOException("ACP 进程意外关闭"));
+                    throw new IOException("ACP 进程意外关闭");
                 }
-                return;
             }
 
             String trimmed = line.trim();
@@ -1309,11 +1445,15 @@ public class AcpClient extends AbstractAcpClient {
 
             // prompt response（JSON-RPC Response 没有 method 字段，排除 Request 误匹配）
             if (!msg.has("method") && msg.has("id") && requestId.equals(msg.get("id").getAsString())) {
+                if (msg.has("error")) throw new IOException("ACP prompt 返回错误: " + msg.get("error"));
                 String stopReason = "unknown";
                 if (msg.has("result") && msg.getAsJsonObject("result").has("stopReason")) {
                     stopReason = msg.getAsJsonObject("result").get("stopReason").getAsString();
                 }
                 logger.info("ACP prompt turn 结束, stopReason={}, msg = {}", stopReason, trimmed);
+                if ("cancelled".equals(stopReason)) {
+                    synchronized (this) { pendingNewSession = null; }
+                }
 
                 // 排空迟到 chunk（OpenCode ACP bug workaround）
                 // sleep 让管道里迟到的数据到位，然后一次抽干 reader 缓冲区
@@ -1323,7 +1463,7 @@ public class AcpClient extends AbstractAcpClient {
                 historyManager.flushTurn(sessionId);
                 lastMessageAt.set(System.currentTimeMillis());
 
-                if (options.hasChannelTurnContext()) {
+                if (options.hasChannelTurnContext() && !hasPendingNewSession()) {
                     if (!options.hasChannelReplyAttempt()
                             && !hasPendingChannelReply(options.getChannelTurnContext())
                             && deliverAutomaticChannelReply(
@@ -1713,6 +1853,10 @@ public class AcpClient extends AbstractAcpClient {
         }
         logger.info("channel turn released: turnId={}, channelId={}, replyAttempts={}",
                 context.getTurnId(), context.getChannelId(), options.getChannelReplyAttempts());
+    }
+
+    private synchronized boolean hasPendingNewSession() {
+        return pendingNewSession != null;
     }
 
     /**
