@@ -7,13 +7,19 @@ const vm = require('node:vm')
 const html = fs.readFileSync(path.resolve(
     __dirname, '../../main/resources/configui/index.html'
 ), 'utf8')
+const script = fs.readFileSync(path.resolve(
+    __dirname, '../../main/resources/configui/assets/js/starweave.js'
+), 'utf8')
+const css = fs.readFileSync(path.resolve(
+    __dirname, '../../main/resources/configui/assets/css/responsive.css'
+), 'utf8')
 
 function section(start, end) {
-    const from = html.indexOf(start)
-    const to = html.indexOf(end, from)
+    const from = script.indexOf(start)
+    const to = script.indexOf(end, from)
     assert.notEqual(from, -1, `missing ${start}`)
     assert.notEqual(to, -1, `missing ${end}`)
-    return html.slice(from, to)
+    return script.slice(from, to)
 }
 
 function sidebar() {
@@ -61,6 +67,6 @@ test('mobile session backdrops close the matching sidebar', () => {
         assert.equal(target.open, false)
     }
 
-    assert.match(html, /@media\(max-width:860px\)\{\.session-sidebar\.open \+ \.session-sidebar-backdrop\{display:block;position:absolute;inset:0;z-index:19;/)
-    assert.match(html, /\.session-sidebar\.open\{display:flex;position:absolute;[^}]*z-index:20;/)
+    assert.match(css, /@media\(max-width:860px\)\{\.session-sidebar\.open \+ \.session-sidebar-backdrop\{display:block;position:absolute;inset:0;z-index:19;/)
+    assert.match(css, /\.session-sidebar\.open\{display:flex;position:absolute;[^}]*z-index:20;/)
 })
