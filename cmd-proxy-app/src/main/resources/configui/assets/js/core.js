@@ -246,11 +246,11 @@ document.addEventListener('keydown',function(event){if(event.key==='Escape'&&doc
 window.addEventListener('resize',function(){var menu=document.getElementById('envMenu');if(menu&&menu.classList.contains('open'))setEnvMenuOpen(true)});
 
 function renderEnvTabs(){
-var c=document.getElementById('envTabs'),trigger=document.getElementById('envTrigger'),note=document.getElementById('envMenuNote');
-if(!instances.length){c.innerHTML='<div class="env-tab"><div class="env-tab-name">环境列表不可用</div></div>';trigger.classList.remove('remote');trigger.title='环境列表不可用';note.style.display='none';return}
+var c=document.getElementById('envTabs'),trigger=document.getElementById('envTrigger');
+if(!instances.length){c.innerHTML='<div class="env-tab"><div class="env-tab-name">环境列表不可用</div></div>';trigger.title='环境列表不可用';return}
 c.innerHTML=instances.map(function(inst,index){
 var active=curInstance&&inst.instanceId===curInstance.instanceId;
-var cls='env-tab'+(active?' active':'')+(inst.self?'':' remote');
+var cls='env-tab'+(active?' active':'');
 var badge=inst.remote?'<span class="env-badge">'+(inst.online===false?'离线':'远程')+'</span>':inst.self?'<span class="env-badge">本机</span>'
 :(inst.configUiPort>0?'':'<span class="env-badge ro">只读</span>');
 var meta=inst.remote?(inst.online===false?'目标环境离线':(inst.sourceInstanceId||'已连接')):((inst.configUiPort>0?':'+inst.configUiPort:'配置页未开启')+' · '+((inst.robotNames&&inst.robotNames.length)||0)+' robots');
@@ -258,11 +258,7 @@ return '<button type="button" class="'+cls+'" onclick="switchInstance(instances[
 +'<span class="env-tab-name">'+esc(envName(inst))+badge+'</span>'
 +'<span class="env-tab-meta">'+esc(meta)+'</span></button>';
 }).join('');
-trigger.classList.toggle('remote',!curInstance.self);
-trigger.title='当前环境：'+envName(curInstance)+(curInstance.self?'（本机）':(curInstance.configUiPort>0?'（远程）':'（只读）'))+'；点击切换运行环境';
-if(curInstance&&!curInstance.self){
-note.style.display='block';note.textContent=curInstance.remote?('正在编辑远程环境 '+envName(curInstance)+'；所有操作作用于该环境'+(curInstance.online===false?'（当前离线）':'')):'正在编辑其它环境 '+curInstance.home+(curInstance.configUiPort>0?'（端口 '+curInstance.configUiPort+'）':'（配置页未开启，无法保存）')+'；保存、保存并应用、检查更新都会作用于该环境';
-}else{note.style.display='none';note.textContent=''}
+trigger.title='当前环境：'+envName(curInstance)+'；点击切换运行环境';
 }
 
 async function switchInstance(id){

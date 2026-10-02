@@ -45,6 +45,39 @@ test('cancellation only changes registration state', async () => {
 });
 const core = fs.readFileSync(path.resolve(__dirname, '../../main/resources/configui/assets/js/core.js'), 'utf8');
 function coreSection(start,end){const a=core.indexOf(start),b=core.indexOf(end,a);assert.ok(a>=0&&b>a);return core.slice(a,b)}
+test('local, same-host and registered environments share the selected style without a notice', () => {
+    const environments=[
+        {instanceId:'local',self:true,home:'/local',displayName:'本地',configUiPort:10528},
+        {instanceId:'other',self:false,home:'/other',displayName:'其它环境',configUiPort:10529},
+        {instanceId:'registered',self:false,remote:true,online:true,home:'我的电脑',displayName:'我的电脑',sourceInstanceId:'source',configUiPort:20000}
+    ];
+    for(const current of environments){
+        const tabs={innerHTML:''},trigger={title:''};
+        const context=vm.createContext({instances:environments,curInstance:current,envName:i=>i.displayName,esc:String,
+            document:{getElementById:id=>{assert.ok(['envTabs','envTrigger'].includes(id));return id==='envTabs'?tabs:trigger;}}});
+        vm.runInContext(coreSection('function renderEnvTabs(', 'async function switchInstance('),context);
+        context.renderEnvTabs();
+        assert.equal((tabs.innerHTML.match(/class="env-tab active"/g)||[]).length,1);
+        assert.equal((tabs.innerHTML.match(/aria-current="true"/g)||[]).length,1);
+        assert.ok(!/class="env-tab[^"]*remote/.test(tabs.innerHTML));
+        assert.ok(!tabs.innerHTML.includes('正在编辑'));
+        assert.equal(trigger.title,'当前环境：'+current.displayName+'；点击切换运行环境');
+    }
+});
+test('both themes retain normal selection styles and omit remote warning styles and markup', () => {
+    const resources=path.resolve(__dirname,'../../main/resources/configui');
+    const css=fs.readFileSync(path.join(resources,'assets/css/base.css'),'utf8');
+    const dark=fs.readFileSync(path.join(resources,'assets/css/dark-theme.css'),'utf8');
+    const html=fs.readFileSync(path.join(resources,'index.html'),'utf8');
+    assert.ok(css.includes('.env-tab.active{'));
+    assert.ok(dark.includes('.env-tab.active,'));
+    for(const content of [css,dark]){
+        assert.ok(!content.includes('.env-trigger.remote'));
+        assert.ok(!content.includes('.env-tab.active.remote'));
+        assert.ok(!content.includes('.env-menu-note'));
+    }
+    assert.ok(!html.includes('envMenuNote'));
+});
 test('offline environment clicks retain the current environment and its business state', async () => {
     const notices=[];
     const context=vm.createContext({curInstance:{instanceId:'local'},instances:[{instanceId:'remote',remote:true,online:false}],dirty:false,showSnackbar:m=>notices.push(m)});
