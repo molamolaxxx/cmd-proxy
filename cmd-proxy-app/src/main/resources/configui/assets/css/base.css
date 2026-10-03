@@ -25,7 +25,8 @@ body.dialog-open{overflow:hidden}
 .environment-switching .env-trigger .material-icons{animation:env-switch-spin 1s linear infinite}
 .environment-switching :is(.app-layout,.btn-fab,.dialog-overlay[inert]){opacity:.65}
 @keyframes env-switch-spin{to{transform:rotate(360deg)}}
-@media(max-width:700px){.env-switch-status{position:absolute;top:100%;right:12px;max-width:calc(100vw - 24px);padding:6px 10px;border-radius:6px;background:var(--sw-surface)}}
+@media(max-width:700px){.env-switch-status{position:absolute;top:calc(100% + 8px);left:17px;right:auto;transform:translateX(-50%);width:max-content;max-width:min(220px,calc(100vw - 24px));padding:6px 10px;border-radius:6px;background:var(--sw-surface)}}
+@media(max-width:380px){.env-switch-status{left:15px}}
 @media(prefers-reduced-motion:reduce){.environment-switching .env-trigger .material-icons{animation:none}}
 .env-menu{display:none;position:absolute;top:calc(100% + 9px);right:14px;width:min(340px,calc(100vw - 20px));max-height:min(440px,calc(100dvh - 90px));overflow:auto;padding:7px;border:1px solid var(--sw-border);border-radius:13px;background:var(--sw-surface);box-shadow:0 16px 42px rgba(39,43,77,.16)}
 .env-menu.open{display:block}
