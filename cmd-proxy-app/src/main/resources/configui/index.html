@@ -230,8 +230,12 @@
 
 <div class="dialog-overlay" id="taskDialog"><div class="dialog task-dialog task-dialog-create">
 <div class="robot-dialog-header"><div><div class="dialog-title" id="taskDialogTitle">创建任务</div><div class="resource-dialog-subtitle" id="taskDialogSubtitle">任务名称创建后不可修改；评论可在创建后添加</div></div><button type="button" class="dialog-close" onclick="closeTaskDialog()" title="关闭"><span class="material-icons">close</span></button></div>
-<div class="robot-dialog-content"><div class="task-dialog-grid">
-<main class="task-dialog-main">
+<div class="robot-dialog-tabs task-dialog-tabs" aria-label="任务内容">
+<button type="button" class="robot-dialog-tab active" id="taskDetailsTab" aria-pressed="true" aria-controls="taskDetailsPane" onclick="setTaskDialogTab('details')">编辑任务</button>
+<button type="button" class="robot-dialog-tab" id="taskActivityTab" aria-pressed="false" aria-controls="taskActivityPane" onclick="setTaskDialogTab('activity')">执行配置</button>
+</div>
+<div class="robot-dialog-content"><div class="task-dialog-grid" id="taskDialogGrid" data-active-tab="details">
+<main class="task-dialog-main" id="taskDetailsPane">
 <div id="taskConflict" class="task-conflict" role="alert"></div>
 <div id="taskDraftWarning" class="task-draft-warning task-edit-only">正文有未保存的更改；发布评论不会保存正文。</div>
 <div class="field-group"><label>任务名称</label><div class="task-name-lock"><input id="taskName" maxlength="200" placeholder="输入任务名称"><span class="material-icons task-edit-only" title="创建后不可修改">lock</span></div></div>
@@ -239,7 +243,7 @@
 <input id="taskContentFiles" type="file" multiple hidden onchange="uploadTaskFiles(this.files,'content')"><div class="task-dropzone" id="taskContentDrop" onclick="document.getElementById('taskContentFiles').click()" ondragover="taskDragOver(event)" ondragleave="taskDragLeave(event)" ondrop="taskDropFiles(event,'content')"><span class="material-icons" style="font-size:18px;vertical-align:-4px">attach_file</span>拖拽或选择正文附件（单个不超过 20 MiB，每次最多 10 个）</div><div class="task-attachments" id="taskContentAttachments"></div></div>
 
 </main>
-<aside class="task-dialog-side">
+<aside class="task-dialog-side" id="taskActivityPane">
 <div class="task-create-only"><div class="section-title" style="margin-top:0">执行配置</div><div class="task-target-panel"><div class="task-target-fields"><div class="field-group" style="margin:0"><label>目标类型</label><select id="taskTargetType" onchange="renderTaskTargetFields()"><option value="AGENT">智能体</option><option value="TEAM">团队</option></select></div><div class="field-group" style="margin:0"><label id="taskTargetLabel">智能体</label><select id="taskTargetRef" onchange="renderTaskTargetFields()"></select></div><div class="field-group task-target-member" id="taskTeamModeField" style="margin:0"><label>成员分配</label><select id="taskTeamMode" onchange="renderTaskTargetFields()"><option value="FIXED">固定成员</option><option value="RANDOM">随机选择一次并固定</option><option value="AFFINITY">任务亲和</option></select></div><div class="field-group task-target-member" id="taskTeamMemberField" style="margin:0"><label>固定成员</label><select id="taskTeamMember"></select></div></div></div></div>
 <div class="task-edit-only"><div class="section-title">评论记录</div><div class="task-comments" id="taskComments"></div><div class="task-comment-compose"><div class="field-group"><label>添加评论</label><textarea id="taskComment" placeholder="记录进展、阻塞、结果或补充说明；支持 Markdown" oninput="updateTaskDraftWarning()"></textarea></div><input id="taskCommentFiles" type="file" multiple hidden onchange="uploadTaskFiles(this.files,'comment')"><div class="task-dropzone" id="taskCommentDrop" onclick="document.getElementById('taskCommentFiles').click()" ondragover="taskDragOver(event)" ondragleave="taskDragLeave(event)" ondrop="taskDropFiles(event,'comment')">添加评论附件</div><div class="task-attachments" id="taskCommentAttachments"></div><button class="btn btn-primary" id="taskCommentSubmit" onclick="submitTaskComment()"><span class="material-icons">add_comment</span>发布评论</button></div></div>
 </aside></div></div>

@@ -20,7 +20,19 @@
 .task-list-head,.task-list-row{grid-template-columns:minmax(150px,1.5fr) 90px minmax(120px,1fr) 65px 135px minmax(120px,.8fr) 220px}
 .task-dialog-view .task-create-only,.task-dialog-view .task-comment-compose,.task-dialog-view .task-dropzone,.task-dialog-view .task-attachment button,.task-dialog-view #taskSaveButton,.task-dialog-view .task-editor-toolbar>button{display:none!important}
 .task-dialog-view .task-dialog-side{display:flex;flex-direction:column;overflow:hidden}.task-dialog-view .task-dialog-side>.task-edit-only{display:flex;flex:1;min-height:0;flex-direction:column}.task-dialog-view .task-comments{flex:1;min-height:0;max-height:none}
-@media(max-width:860px){.task-dialog-view .task-dialog-side{display:block;overflow:visible}.task-dialog-view .task-dialog-side>.task-edit-only{display:block}.task-dialog-view .task-comments{max-height:none}}
+.task-dialog-tabs{display:none}
+@media(max-width:860px){
+  #taskDialog .task-dialog-tabs{display:flex}
+  #taskDialog .robot-dialog-content{overflow:hidden}
+  #taskDialog .task-dialog-grid{display:flex;overflow:hidden}
+  #taskDialog .task-dialog-main,#taskDialog .task-dialog-side{flex:1;min-height:0;overflow:auto;border:0}
+  #taskDialogGrid[data-active-tab="details"] .task-dialog-side,
+  #taskDialogGrid[data-active-tab="activity"] .task-dialog-main{display:none}
+  #taskDialog .task-dialog-side>.task-edit-only{display:block}
+  #taskDialog .task-comments{max-height:none;overflow:visible}
+  #taskDialog .task-editor textarea,#taskDialog .task-editor-preview{min-height:220px}
+  #taskDialog .robot-dialog-header,#taskDialog .dialog-actions{flex-shrink:0}
+}
 .task-editor-preview[contenteditable=true]{outline:none;cursor:text}.task-editor-preview:focus{box-shadow:inset 0 0 0 2px var(--sw-primary-soft)}
 #taskHistoryDialog .task-history{max-height:none}
 #taskHistoryDialog .task-dialog-grid{grid-template-columns:300px minmax(0,1fr)}

@@ -147,7 +147,7 @@ public class StarweaveTaskUiContractTest {
         assertTrue(html.contains(".task-dialog-view .task-dialog-side{display:flex;flex-direction:column;overflow:hidden}"));
         assertTrue(html.contains(".task-dialog-view .task-dialog-side>.task-edit-only{display:flex;flex:1;min-height:0;flex-direction:column}"));
         assertTrue(html.contains(".task-dialog-view .task-comments{flex:1;min-height:0;max-height:none}"));
-        assertTrue(html.contains("@media(max-width:860px){.task-dialog-view .task-dialog-side{display:block;overflow:visible}"));
+        assertTrue(html.contains("#taskDialog .task-comments{max-height:none;overflow:visible}"));
         assertTrue(html.contains("className='dialog task-dialog task-dialog-'+mode"));
     }
 
