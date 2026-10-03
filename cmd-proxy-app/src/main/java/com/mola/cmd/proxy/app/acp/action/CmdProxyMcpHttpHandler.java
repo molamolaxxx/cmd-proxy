@@ -215,7 +215,7 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
         addProperty(observation, "name", described(stringSchema(), "通道名称，create 必填。"));
         addProperty(observation, "script", described(stringSchema(), "JavaScript 脚本，通过 module.exports 导出返回字符串的函数，create 必填。"));
         addProperty(observation, "frequency", described(stringSchema(),
-                "观测频率，默认 15s，支持 s、min、h。除非用户明确要求，否则建议使用默认值，"
+                "观测频率，默认 30s，支持 s、min、h。除非用户明确要求，否则建议使用默认值，"
                         + "或在修改已有通道时保持原频率，不主动调整。"));
         JsonObject booleanSchema = new JsonObject(); booleanSchema.addProperty("type", "boolean");
         addProperty(observation, "enabled", described(booleanSchema, "是否启用通道，默认 true。"));

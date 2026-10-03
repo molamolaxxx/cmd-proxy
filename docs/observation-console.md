@@ -23,7 +23,7 @@ module.exports = async function observe() {
 
 脚本使用执行实例上的 Node 和所属智能体的工作目录，可以读取工作目录文件、使用该目录的 Node 依赖并访问网络。示例中的 `fetch` 需要提供内置 fetch 的 Node 版本。控制台日志与结果分离，不能通过 `console.log` 返回观测结果。
 
-默认频率 `15s`，支持正整数加 `s`、`min`、`h`。同一通道不重叠执行，超过频率的执行不会累积补跑。脚本超时 20 秒，源码上限 256 KiB，返回字符串上限 1 MiB。超限作为失败处理。
+默认频率 `30s`，支持正整数加 `s`、`min`、`h`。同一通道不重叠执行，超过频率的执行不会累积补跑。脚本超时 20 秒，源码上限 256 KiB，返回字符串上限 1 MiB。超限作为失败处理。
 
 首次成功建立基线，不产生事件。之后精确比较字符串，变化才产生包含前后完整结果的事件。失败保留上一成功基线，恢复后继续比较。修改脚本重新建立基线，修改名称或频率保留基线。脚本应排除当前时间、随机值等无关变化，并稳定输出集合顺序。
 
@@ -56,7 +56,7 @@ module.exports = async function observe() {
   "action": "create",
   "name": "文件更新监听",
   "script": "module.exports = () => require('fs').readFileSync('status.txt', 'utf8');",
-  "frequency": "15s"
+  "frequency": "30s"
 }
 ```
 
