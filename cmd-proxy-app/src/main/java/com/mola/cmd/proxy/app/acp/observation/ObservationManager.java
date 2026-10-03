@@ -429,7 +429,7 @@ public final class ObservationManager implements AutoCloseable {
         String script = required(input, "script");
         ObservationScriptRunner.validate(script);
         channel.addProperty("script", script);
-        String interval = input.has("frequency") ? required(input, "frequency") : "30s";
+        String interval = input.has("frequency") ? required(input, "frequency") : "15s";
         frequency(interval);
         channel.addProperty("frequency", interval);
         channel.addProperty("enabled", bool(input, "enabled", true));
@@ -601,7 +601,7 @@ public final class ObservationManager implements AutoCloseable {
 
     public static long frequency(String value) {
         Matcher m = Pattern.compile("^([1-9][0-9]*)(s|min|h)$").matcher(value == null ? "" : value);
-        if (!m.matches()) throw new IllegalArgumentException("观测频率须为正整数加 s、min 或 h，例如 30s");
+        if (!m.matches()) throw new IllegalArgumentException("观测频率须为正整数加 s、min 或 h，例如 15s");
         try {
             long interval =
                     Math.multiplyExact(

@@ -66,6 +66,8 @@ public class ObservationAdminHttpTest {
                                 "{\"name\":\"Jira\",\"script\":\"module.exports=()=>"
                                         + " 'result'\",\"ownerPath\":\"assistant\"}");
                 assertEquals(200, created.status);
+                assertEquals("15s", JsonParser.parseString(created.body).getAsJsonObject()
+                        .get("frequency").getAsString());
                 String id =
                         JsonParser.parseString(created.body)
                                 .getAsJsonObject()

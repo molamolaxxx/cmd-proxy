@@ -44,7 +44,7 @@ async function openObservationEditor(id,test){
         if(token!==observationState.editorToken)return;
         var channel=results[1];observationState.editing=channel;observationState.owners=results[0].items||[];
         document.getElementById('observationEditorTitle').textContent=channel?'编辑观测通道':'新建观测通道';
-        document.getElementById('observationName').value=channel?channel.name:'';document.getElementById('observationFrequency').value=channel?channel.frequency:'30s';document.getElementById('observationEnabled').checked=channel?channel.enabled:true;
+        document.getElementById('observationName').value=channel?channel.name:'';document.getElementById('observationFrequency').value=channel?channel.frequency:'15s';document.getElementById('observationEnabled').checked=channel?channel.enabled:true;
         var owner=channel?channel.owner:(observationState.owners.length===1?observationState.owners[0]:null);
         document.getElementById('observationOwner').value=owner?owner.ownerPath:'';document.getElementById('observationOwnerSearch').value=owner?observationOwnerLabel(owner):'';document.getElementById('observationOwnerSearch').disabled=!!channel;
         document.getElementById('observationOwnerOptions').hidden=true;
@@ -80,7 +80,7 @@ async function testObservationDraft(){
 }
 async function saveObservation(){
     var owner=document.getElementById('observationOwner').value,name=document.getElementById('observationName').value.trim(),script=document.getElementById('observationScript').value,frequency=document.getElementById('observationFrequency').value.trim();
-    if(!owner||!name||!script.trim()||!/^([1-9][0-9]*)(s|min|h)$/.test(frequency)){showSnackbar('请填写名称、选择智能体和脚本，频率格式如 30s、10min、60h');switchObservationTab('config');return}
+    if(!owner||!name||!script.trim()||!/^([1-9][0-9]*)(s|min|h)$/.test(frequency)){showSnackbar('请填写名称、选择智能体和脚本，频率格式如 15s、10min、60h');switchObservationTab('config');return}
     var channel=observationState.editing,button=document.getElementById('observationSaveButton');button.disabled=true;
     try{await observationApi('/channels'+(channel?'?channelId='+encodeURIComponent(channel.id):''),Object.assign({method:channel?'PUT':'POST'},observationBody({ownerPath:owner,name:name,script:script,frequency:frequency,enabled:document.getElementById('observationEnabled').checked})));closeDialog('observationEditorDialog');showSnackbar('观测通道已保存');await loadObservations(false)}catch(e){showSnackbar('保存失败：'+e.message)}finally{button.disabled=false}
 }
