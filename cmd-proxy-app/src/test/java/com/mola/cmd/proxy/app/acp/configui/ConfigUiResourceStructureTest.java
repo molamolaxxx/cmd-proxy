@@ -32,6 +32,7 @@ public class ConfigUiResourceStructureTest {
                 "assets/css/responsive.css",
                 "assets/css/dark-theme.css",
                 "assets/css/schedules.css",
+                "assets/css/observations.css",
                 "assets/js/core.js",
                 "assets/js/registry.js",
                 "assets/js/mcp-auth.js",
@@ -42,6 +43,7 @@ public class ConfigUiResourceStructureTest {
                 "assets/js/agents.js",
                 "assets/js/tasks.js",
                 "assets/js/schedules.js",
+                "assets/js/observations.js",
                 "assets/js/ui.js",
                 "assets/js/app.js");
         Matcher matcher = LOCAL_RESOURCE.matcher(html);

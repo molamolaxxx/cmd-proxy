@@ -12,7 +12,7 @@ function esc(s){if(!s)return '';var d=document.createElement('div');d.textConten
 // 服务设置区域的输入变更也算未保存改动
 ['input','change'].forEach(function(evt){
 document.addEventListener(evt,function(e){
-if(e.target&&e.target.closest&&e.target.closest('.app-layout')&&!e.target.closest('.toolbar')&&!e.target.closest('#page-mcp-auth')&&!e.target.closest('#page-sessions')&&!e.target.closest('#page-tasks')&&!e.target.closest('#page-schedules'))markDirty();
+if(e.target&&e.target.closest&&e.target.closest('.app-layout')&&!e.target.closest('.toolbar')&&!e.target.closest('#page-mcp-auth')&&!e.target.closest('#page-sessions')&&!e.target.closest('#page-tasks')&&!e.target.closest('#page-schedules')&&!e.target.closest('#page-observations'))markDirty();
 });
 });
 window.addEventListener('beforeunload',function(e){

@@ -23,6 +23,10 @@ public class AcpRobotParam {
     /** Owners allowed to borrow this robot as a remote mixed-Team fragment source. */
     private List<String> teamSharedWithChatterIds;
     private boolean scheduleEnabled = false;
+    private boolean observationEnabled = false;
+
+    public boolean isObservationEnabled() { return observationEnabled; }
+    public void setObservationEnabled(boolean observationEnabled) { this.observationEnabled = observationEnabled; }
     private AutoNewSessionConfig autoNewSession;
     private AutoSleepConfig autoSleep;
     private List<ContactRef> contacts;

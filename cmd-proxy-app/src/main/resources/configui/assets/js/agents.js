@@ -32,6 +32,7 @@ var featuresTab='<section class="robot-tab-panel" data-robot-panel="features" ro
 '<div class="toggle-row"><div><div class="toggle-label">仅作为子智能体</div></div><label class="switch"><input type="checkbox" id="dOnlySub"'+(r.onlySubAgent?' checked':'')+' onchange="toggleExclusiveRobotRole(\'sub\')"><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">仅作为团队成员</div><div style="color:#757575;font-size:12px">不单独运行，仅在 Fast Team 中作为成员使用</div></div><label class="switch"><input type="checkbox" id="dOnlyTeam"'+(r.onlyTeamMember?' checked':'')+' onchange="toggleExclusiveRobotRole(\'team\')"><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">定时任务</div></div><label class="switch"><input type="checkbox" id="dSchedule"'+(r.scheduleEnabled?' checked':'')+'><span class="slider"></span></label></div>'+
+'<div class="toggle-row"><div><div class="toggle-label">开启观测能力</div></div><label class="switch"><input type="checkbox" id="dObservation"'+(r.observationEnabled?' checked':'')+'><span class="slider"></span></label></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">自动睡眠</div><div style="color:#757575;font-size:12px">空闲后释放运行进程，收到请求时自动唤醒</div></div><label class="switch"><input type="checkbox" id="dAutoSleep"'+(r.autoSleep.enabled?' checked':'')+' onchange="toggleAutoSleepPanel()"><span class="slider"></span></label></div>'+
 '<div class="grid-2" id="dAutoSleepPanel" style="'+(r.autoSleep.enabled?'':'display:none')+'"><div class="field-group"><label>空闲阈值（分钟）</label><input type="number" id="dAutoSleepIdle" min="1" value="'+(r.autoSleep.idleMinutes||30)+'"></div></div>'+
 '<div class="toggle-row"><div><div class="toggle-label">自动开启新会话</div><div style="color:#757575;font-size:12px">同时应用于该智能体的独立会话和团队成员实例</div></div><label class="switch"><input type="checkbox" id="dAutoNewSession"'+(r.autoNewSession.enabled?' checked':'')+' onchange="toggleAutoNewSessionPanel()"><span class="slider"></span></label></div>'+
@@ -240,6 +241,7 @@ onlySubAgent:document.getElementById('dOnlySub').checked,
 onlyTeamMember:document.getElementById('dOnlyTeam').checked,
 teamSharedWithChatterIds:dlgTeamSharedOwners.slice(),
 scheduleEnabled:document.getElementById('dSchedule').checked,
+observationEnabled:document.getElementById('dObservation').checked,
 autoSleep:{enabled:document.getElementById("dAutoSleep").checked,idleMinutes:Math.max(1,parseInt(document.getElementById("dAutoSleepIdle").value)||30)},
 autoNewSession:{enabled:document.getElementById('dAutoNewSession').checked,checkIntervalMinutes:Math.max(1,parseInt(document.getElementById('dAutoNewSessionCheck').value)||360),idleMinutes:Math.max(1,parseInt(document.getElementById('dAutoNewSessionIdle').value)||180)}
 });

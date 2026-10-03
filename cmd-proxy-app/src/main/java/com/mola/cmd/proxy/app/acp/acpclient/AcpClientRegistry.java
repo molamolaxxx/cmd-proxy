@@ -260,6 +260,17 @@ public class AcpClientRegistry {
         }
     }
 
+    /** Current MAIN session lookup and observation admission share the lifecycle lock. */
+    public boolean sendObservation(String groupId, String prompt) {
+        synchronized (sessionLock(groupId)) {
+            AcpClient client = clients.get(groupId);
+            if (client == null || client.getRobotParam() == null
+                    || !client.getRobotParam().isObservationEnabled()) return false;
+            if (wakeForRequest(client) != null || client.getState() != AbstractAcpClient.State.READY) return false;
+            return client.trySendObservation(prompt);
+        }
+    }
+
     /** Task control may interrupt only the currently running turn for the same task. */
     public PromptCommandResult sendTaskMessageWithResult(String groupId, String message,
                                                          PromptOptions options) {

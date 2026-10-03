@@ -1195,6 +1195,31 @@ public final class TeamManager implements AutoCloseable {
         }
     }
 
+    /** Observation notifications use the current member session without replacing it. */
+    public boolean sendObservation(ScheduleOwnerKey owner, String prompt) throws IOException {
+        TeamRuntime runtime = teams.get(owner.getTeamId());
+        if (runtime == null || closed.get()) return false;
+        runtime.getOperationLock().lock();
+        try {
+            TeamDefinition team = runtime.getDefinition();
+            if (!runtime.isAcceptingRequests() || team.getState() != TeamState.READY
+                    || !team.getOwnerChatterId().equals(owner.getOwnerId()) || !grantsActive(team)) return false;
+            TeamMemberDefinition member = findMember(team, owner.getTeamMemberId());
+            AcpClient client = clientRegistry.get(owner.getTeamId(), owner.getTeamMemberId()).orElse(null);
+            if (member == null || client == null || client.getRobotParam() == null
+                    || !client.getRobotParam().isObservationEnabled()) return false;
+            if (client.getState() == AbstractAcpClient.State.SLEEP) {
+                client.wakeIfSleeping();
+                publishMemberState(runtime, owner.getTeamMemberId(), TeamMemberState.READY, null);
+            }
+            if (client.getState() != AbstractAcpClient.State.READY) return false;
+            publishMemberState(runtime, owner.getTeamMemberId(), TeamMemberState.BUSY, null);
+            boolean accepted = client.trySendObservation(prompt);
+            if (!accepted) publishMemberState(runtime, owner.getTeamMemberId(), TeamMemberState.READY, null);
+            return accepted;
+        } finally { runtime.getOperationLock().unlock(); }
+    }
+
     public TeamCommandResult send(String requestId, TeamMemberCommand command) {
         return sendWithOptions(requestId, command, null);
     }

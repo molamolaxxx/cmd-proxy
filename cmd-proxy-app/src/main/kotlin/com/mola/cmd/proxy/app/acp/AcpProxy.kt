@@ -140,6 +140,8 @@ object AcpProxy {
 
     /** 定时任务管理器（全局单例） */
     private val scheduleTaskManager = ScheduleTaskManager()
+    private var observationManager = com.mola.cmd.proxy.app.acp.observation.ObservationManager(
+        CmdProxyHome.resolve("observations"))
 
     /** robotName → groupId 反向索引，用于 talkTo 查找目标 client */
     private val robotToGroupIdMap = ConcurrentHashMap<String, String>()
@@ -219,6 +221,10 @@ object AcpProxy {
             throw IllegalStateException(
                 "AcpProxy is already started; stop it before starting a new generation")
         }
+        // Full service refresh creates fresh executors and reloads durable observation state.
+        observationManager.close()
+        observationManager = com.mola.cmd.proxy.app.acp.observation.ObservationManager(
+            CmdProxyHome.resolve("observations"))
         if (taskService == null) {
             try {
                 val service = com.mola.cmd.proxy.app.acp.task.service.TaskService(
@@ -1534,9 +1540,27 @@ object AcpProxy {
             groupId, allowedNames)
     }
 
-    /**
-     * 初始化定时任务支持。
-     */
+    /** 配置中的普通智能体无需先打开会话即可观测，事件出现后再创建会话。 */
+    private fun syncConfiguredObservationTargets() {
+        observationManager.clearConfiguredTargets()
+        for (robot in configuredRobotRegistry.values) {
+            if (robot.isOnlySubAgent || robot.isOnlyTeamMember || robot.workDir.isBlank()) continue
+            val identity = StarweaveIdentity.identity(CmdProxyHome.instanceId(), robot.name)
+            val owner = ScheduleOwnerKey.main(identity.ownerId, identity.surface, identity.logicalId, robot.name)
+            observationManager.registerConfigured(owner, robot.workDir, {
+                configuredRobotRegistry[robot.name]?.let {
+                    it.isEnabled && it.isObservationEnabled && !it.isOnlySubAgent && !it.isOnlyTeamMember
+                } ?: false
+            }) { prompt ->
+                if (registry.getClient(identity.logicalId) == null) {
+                    checkNotNull(starweaveSessionManager).open(robot.name)
+                }
+                registry.sendObservation(identity.logicalId, prompt)
+            }
+        }
+    }
+
+    /** 初始化定时任务和观测能力。 */
     private fun initScheduleSupport(
         context: AcpClientFeatureInitializer.Context,
         client: AcpClient,
@@ -1569,6 +1593,14 @@ object AcpProxy {
             }
         }
         client.setScheduleSupport(scheduleTaskManager, injector, owner)
+        val observationOwner = if (owner.isTeam) owner else ScheduleOwnerKey.main(
+            client.clientIdentity.ownerId ?: client.clientIdentity.logicalId,
+            client.clientIdentity.surface, client.clientIdentity.logicalId,
+            robot?.name ?: context.featureOwnerKey)
+        client.setObservationSupport(observationManager, observationOwner) { prompt ->
+            if (observationOwner.isTeam) teamManager?.sendObservation(observationOwner, prompt) ?: false
+            else registry.sendObservation(context.sourceGroupId, prompt)
+        }
         log.info("定时任务支持初始化完成, owner={}, scheduleEnabled={}",
             owner, robot?.isScheduleEnabled ?: true)
     }
@@ -1717,6 +1749,7 @@ object AcpProxy {
      * 启动定时任务调度器（在所有 client 初始化完成后调用）。
      */
     fun startScheduler(groupRobotMap: Map<String, AcpRobotParam>) {
+        syncConfiguredObservationTargets()
         // 设置执行回调：检查 client 状态，空闲则新建 session 并执行
         scheduleTaskManager.setScopedExecutionCallback { owner, taskId, groupName, prompt, authPrincipal, channelDelivery ->
             if (owner.isTeam) {
@@ -1825,6 +1858,8 @@ object AcpProxy {
         }
 
         scheduleTaskManager.start()
+        observationManager.start()
+        com.mola.cmd.proxy.app.acp.observation.ObservationAdminApiBridge.install(observationManager)
         com.mola.cmd.proxy.app.acp.schedule.ScheduleAdminApiBridge.install(scheduleTaskManager)
         log.info("定时任务调度器已启动")
     }
@@ -2024,6 +2059,8 @@ object AcpProxy {
         }
 
         // 停止定时任务调度器
+        com.mola.cmd.proxy.app.acp.observation.ObservationAdminApiBridge.clear(observationManager)
+        observationManager.close()
         try {
             com.mola.cmd.proxy.app.acp.schedule.ScheduleAdminApiBridge.clear(scheduleTaskManager)
             scheduleTaskManager.stop()
@@ -2391,6 +2428,7 @@ object AcpProxy {
             !latestConfiguredRobots.containsKey(it.key)
         }
         configuredRobotRegistry.putAll(latestConfiguredRobots)
+        syncConfiguredObservationTargets()
         configuredRobotNames.clear()
         configuredRobotNames.addAll(latestConfiguredRobots.keys)
 

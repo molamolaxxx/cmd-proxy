@@ -48,8 +48,10 @@ document.querySelectorAll('.app-layout,.dialog-overlay:not(#confirmDialog):not(#
 function installEnvironmentGuards(){
 // 在所有业务脚本加载后安装，保持既有全局入口和脚本加载顺序。
 var operations='saveRobot deleteRobot toggleRobot refreshRobot applyRobotConfig saveConfig refreshService reloadService applyGlobalProxy addChatterId toggleChannelEnabled saveChannelDialog deleteChannel refreshChannel applyChannelConfig deleteExternalTaskApi deleteAgentGateway openStarweaveAgentSession startStarweaveSession newStarweaveSession restoreStarweaveSession deleteStarweaveSession cancelStarweaveSession uploadStarweaveFiles sendStarweaveMessage retryChatMessage deliverChatMessage runTeamBatchAction createStarweaveTeam saveStarweaveTeamEdit deleteStarweaveTeam newTeamSession restoreTeamSession cancelTeamSession uploadTeamSessionFiles sendTeamSessionMessage submitAgentImport triggerAgentMemoryDream installSelectedProviderVersion saveTask deleteTask updateTaskStatus submitTaskComment retryTaskDelivery uploadTaskFiles saveScheduleTask deleteScheduleTask saveMcpPolicy configureRegistry'.split(' ');
+operations.push('saveObservation','deleteObservation','toggleObservation','testObservationDraft','retryObservationEvent');
 operations.forEach(function(name){var original=window[name];if(typeof original!=='function')return;window[name]=async function(){if(environmentGate.switching||environmentGate.recoveryRequired){showSnackbar(environmentGate.switching?'环境正在切换，请稍候':'环境状态待确认，请重新选择环境');return false}environmentGate.operations+=1;syncEnvironmentGate();try{return await original.apply(this,arguments)}finally{environmentGate.operations-=1;syncEnvironmentGate()}}});
 var reads='loadConfig loadInstances loadChannelStatus loadItemRefreshStatus loadTeamSharingStatus loadChannelBindingTargets loadMcpAuth loadRegistrySettings loadStarweaveSessions loadStarweaveTeams loadStarweaveSnapshot loadTeamSessionSnapshot refreshTeamSessionContextUsage loadTaskCount loadTasks loadScheduleCount loadSchedules loadScheduleExecutions refreshChannelStatuses pollStarweaveTeamStates refreshChannelBindingTargets loadAgentGatewayRuntime loadRobotModels loadProviderVersions browseDir loadStarweaveResources previewStarweaveResource loadTeamSessionResources previewTeamSessionResource openAgentResource reloadAgentResource loadAgentResourceContent exportAgentResources refreshChannelKnownTargets checkAgentMemoryDream openTaskEdit loadTaskTargets loadMoreTaskComments loadMoreTaskHistory openTaskHistory viewTaskHistory openFileLinkPreview'.split(' ');
+reads.push('loadObservations','loadObservationCount','loadObservationEvents','openObservationEditor','openObservationDetail','openObservationEventDetail');
 reads.forEach(function(name){var original=window[name];if(typeof original!=='function')return;window[name]=function(){if(environmentGate.switching&&!environmentGate.loading)return Promise.resolve(false);var args=arguments,owner=this;var pending=Promise.resolve().then(function(){return original.apply(owner,args)});environmentGate.reads.add(pending);return pending.finally(function(){environmentGate.reads.delete(pending)})}});
 }
 var dirty=false;
@@ -92,7 +94,7 @@ else{updateSidebarToggle(true,true);sidebarTransitionTimer=setTimeout(function()
 function restoreSidebarState(){var collapsed=false;try{collapsed=localStorage.getItem('starweave-sidebar-collapsed')==='1'}catch(e){}setSidebarCollapsed(collapsed)}
 
 function switchPage(page){
-if(['basic','channels','acp','sessions','teams','tasks','schedules','mcp-auth'].indexOf(page)<0)page='basic';
+if(['basic','channels','acp','sessions','teams','tasks','schedules','observations','mcp-auth'].indexOf(page)<0)page='basic';
 activePage=page;
 document.body.classList.toggle('sessions-active',page==='sessions');
 document.querySelectorAll('.page-section').forEach(function(el){el.classList.toggle('active',el.id==='page-'+page)});
@@ -101,6 +103,7 @@ document.querySelector('.btn-fab').style.display=page==='acp'?'flex':'none';
 try{sessionStorage.setItem('configui-page',page)}catch(e){}
 if(page==='sessions'){syncStarweaveViewport();loadStarweaveSessions(false)}else closeStarweaveStream();if(page==='teams'){loadStarweaveSessions(false);loadStarweaveTeams(false)}if(page==='tasks')loadTasks(false);if(page==='schedules')loadSchedules(false);if(page==='channels')refreshChannelBindingTargets(true);if(page==='channels'&&externalChannelTab==='gateway')loadAgentGatewayRuntime();
 window.scrollTo({top:0,behavior:page==='sessions'?'auto':'smooth'});
+if(page==='observations')loadObservations(false);
 }
 
 function switchExternalChannelTab(tab){
@@ -241,6 +244,7 @@ var required=environmentGate.switching&&environmentGate.loading&&(
 ['/api/starweave/v1/sessions','/api/starweave/v1/teams','/api/item-refresh-status','/api/channels/status'].indexOf(path)>=0||
 (activePage==='tasks'&&path.indexOf('/api/starweave/v1/tasks')===0)||
 (activePage==='schedules'&&path.indexOf('/api/schedules/v1')===0)||
+(activePage==='observations'&&path.indexOf('/api/observations/v1')===0)||
 (activePage==='mcp-auth'&&path.indexOf('/api/mcp-auth/v1')===0));
 try{var response=await fetch(url,Object.assign({},opts,{signal:controller.signal}));
 // 读取正文也属于请求生命周期，避免响应头到达后仍留下旧环境的数据回调。
@@ -324,6 +328,7 @@ environmentGate.version+=1;
 registryLoadToken+=1;
 previousState={channelRuntime:channelRuntime,itemRefreshRuntime:itemRefreshRuntime,itemToggleRuntime:itemToggleRuntime,teamSharingRuntime:teamSharingRuntime,channelBindingTargets:channelBindingTargets,mcpAuthRuntime:mcpAuthRuntime,starSessions:starSessions,starTeams:starTeams,teamSession:teamSession,taskState:taskState,taskEditor:taskEditor};
 clearTimeout(taskState.filterTimer);clearTimeout(scheduleState.timer);clearTimeout(channelMessages.timer);clearTimeout(resourceDream.timer);resourceDream.robot='';fileLinkPreview.request+=1;
+previousState.observationState=observationState;resetObservationState();
 document.body.classList.remove('resource-modal-open');
 document.querySelectorAll('.dialog-overlay.show').forEach(function(el){closeDialog(el.id)});
 setEnvMenuOpen(false);
@@ -339,6 +344,7 @@ channelRuntime={instanceId:id,statuses:{},errors:{}};itemRefreshRuntime={robots:
 committed=true;environmentGate.loading=true;environmentGate.loadErrors=[];
 await loadConfig(nextConfig);
 if(activePage==='tasks')await loadTasks(false);if(activePage==='schedules')await loadSchedules(false);
+if(activePage==='observations')await loadObservations(false);
 if(environmentGate.loadErrors.length)throw environmentGate.loadErrors[0];
 environmentGate.recoveryRequired=false;
 location.hash='instance='+encodeURIComponent(id);
@@ -348,7 +354,8 @@ showSnackbar('已切换到 '+envName(target));
 closeStarweaveStream();closeTeamSessionStream();curInstance=previous;environmentGate.version+=1;
 channelRuntime=previousState.channelRuntime;itemRefreshRuntime=previousState.itemRefreshRuntime;itemToggleRuntime=previousState.itemToggleRuntime;teamSharingRuntime=previousState.teamSharingRuntime;channelBindingTargets=previousState.channelBindingTargets;mcpAuthRuntime=previousState.mcpAuthRuntime;
 starSessions=previousState.starSessions;starTeams=previousState.starTeams;teamSession=previousState.teamSession;taskState=previousState.taskState;taskEditor=previousState.taskEditor;
-environmentGate.loading=true;environmentGate.loadErrors=[];await loadConfig(previousConfig);dirty=previousDirty;if(activePage==='tasks')await loadTasks(false);if(activePage==='schedules')await loadSchedules(false);environmentGate.recoveryRequired=environmentGate.loadErrors.length>0;
+observationState=previousState.observationState;resetObservationTokens();
+environmentGate.loading=true;environmentGate.loadErrors=[];await loadConfig(previousConfig);dirty=previousDirty;if(activePage==='tasks')await loadTasks(false);if(activePage==='schedules')await loadSchedules(false);if(activePage==='observations')await loadObservations(false);environmentGate.recoveryRequired=environmentGate.loadErrors.length>0;
 }showSnackbar('切换到 '+envName(target)+' 失败，仍在原环境：'+(e.name==='AbortError'?'连接超时':e.message))}
 finally{environmentGate.loading=false;environmentGate.switching=false;environmentGate.target=null;renderEnvTabs();syncEnvironmentGate();document.getElementById('envTrigger').focus()}
 }
@@ -375,6 +382,7 @@ render();
 await loadRegistrySettings(true);
 await Promise.all([loadStarweaveSessions(false),loadStarweaveTeams(false),loadTaskCount()]);
 await loadScheduleCount();
+await loadObservationCount();
 }
 
 async function loadChannelStatus(){

@@ -260,6 +260,7 @@ public class ConfigUiServer {
                         Paths.get(CONFIG_PATH), TaskApiBridge::getService)));
         server.createContext(TaskRestHandler.PREFIX, proxied(this::handleTasks));
         server.createContext("/api/schedules/v1/", proxied(this::handleSchedules));
+        server.createContext("/api/observations/v1/", proxied(this::handleObservations));
         // REST API：带 instance 参数且非本环境时，转发到目标环境的 ConfigUI
         server.createContext("/api/config", proxied(this::handleConfig));
         server.createContext("/api/channels/status", proxied(this::handleChannelStatus));
@@ -510,6 +511,49 @@ public class ConfigUiServer {
         new TaskRestHandler(service).handle(exchange);
     }
 
+    private void handleObservations(HttpExchange exchange) throws IOException {
+        String path = exchange.getRequestURI().getPath();
+        String method = exchange.getRequestMethod();
+        try {
+            com.mola.cmd.proxy.app.acp.observation.ObservationManager manager =
+                    com.mola.cmd.proxy.app.acp.observation.ObservationAdminApiBridge.current();
+            com.google.gson.JsonObject body = new com.google.gson.JsonObject();
+            if ("POST".equals(method) || "PUT".equals(method)) {
+                String raw = new String(readAllBytes(exchange.getRequestBody()), StandardCharsets.UTF_8);
+                if (!raw.trim().isEmpty()) body = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
+            }
+            com.google.gson.JsonObject result;
+            String channel = param(exchange, "channelId"), owner = param(exchange, "ownerPath");
+            if ("/api/observations/v1/channels".equals(path)) {
+                if ("GET".equals(method)) result = channel != null ? manager.get(channel, null) : manager.list(owner,
+                        param(exchange, "query"), param(exchange, "status"), intParam(exchange, "page", 1), intParam(exchange, "pageSize", 10));
+                else if ("POST".equals(method)) result = manager.create(body.has("ownerPath") ? body.get("ownerPath").getAsString() : "", body);
+                else if ("PUT".equals(method)) result = manager.update(channel, null, body);
+                else if ("DELETE".equals(method)) result = manager.delete(channel, null);
+                else { sendResponse(exchange, 405, "application/json", "{\"message\":\"Method Not Allowed\"}"); return; }
+            } else if ("/api/observations/v1/test".equals(path) && "POST".equals(method)) {
+                result = manager.test(body.has("ownerPath") ? body.get("ownerPath").getAsString() : "", body);
+            } else if ("/api/observations/v1/events".equals(path) && "GET".equals(method)) {
+                result = manager.events(owner, channel, param(exchange, "status"), param(exchange, "eventId"), intParam(exchange,"page",1),intParam(exchange,"pageSize",10));
+            } else if ("/api/observations/v1/retry".equals(path) && "POST".equals(method)) {
+                result = manager.retry(channel, param(exchange,"eventId"));
+            } else if ("/api/observations/v1/owners".equals(path) && "GET".equals(method)) result = manager.owners();
+            else if ("/api/observations/v1/catalog".equals(path) && "GET".equals(method)) result = manager.catalog();
+            else if ("/api/observations/v1/stats".equals(path) && "GET".equals(method)) result = manager.stats();
+            else { sendResponse(exchange,"GET".equals(method)?404:405,"application/json","{\"message\":\"观测接口不存在\"}"); return; }
+            sendResponse(exchange,200,"application/json",result.toString());
+        } catch (IllegalArgumentException error) {
+            sendResponse(exchange,400,"application/json",observationError(error.getMessage()));
+        } catch (Exception error) {
+            logger.warn("观测台接口失败",error);
+            sendResponse(exchange,503,"application/json",observationError("观测服务不可用"));
+        }
+    }
+
+    private static String observationError(String message) {
+        com.google.gson.JsonObject result = new com.google.gson.JsonObject(); result.addProperty("message",message); return result.toString();
+    }
+
     private void handleSchedules(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
@@ -697,6 +741,7 @@ public class ConfigUiServer {
         addConfigUiAsset(assets, "css/responsive.css", "text/css; charset=utf-8", false);
         addConfigUiAsset(assets, "css/dark-theme.css", "text/css; charset=utf-8", false);
         addConfigUiAsset(assets, "css/schedules.css", "text/css; charset=utf-8", false);
+        addConfigUiAsset(assets, "css/observations.css", "text/css; charset=utf-8", false);
         addConfigUiAsset(assets, "js/theme.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/registry.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/core.js", "application/javascript; charset=utf-8", false);
@@ -708,6 +753,7 @@ public class ConfigUiServer {
         addConfigUiAsset(assets, "js/agents.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/tasks.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/schedules.js", "application/javascript; charset=utf-8", false);
+        addConfigUiAsset(assets, "js/observations.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/ui.js", "application/javascript; charset=utf-8", false);
         addConfigUiAsset(assets, "js/app.js", "application/javascript; charset=utf-8", false);
         return java.util.Collections.unmodifiableMap(assets);

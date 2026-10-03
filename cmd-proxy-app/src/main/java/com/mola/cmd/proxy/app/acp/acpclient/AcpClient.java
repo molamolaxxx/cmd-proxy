@@ -16,6 +16,7 @@ import com.mola.cmd.proxy.app.acp.acpclient.listener.LifecycleGuardedAcpResponse
 import com.mola.cmd.proxy.app.acp.gateway.CompositeAcpResponseListener;
 import com.mola.cmd.proxy.app.acp.gateway.GatewayAcpResponseListener;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleContextInjector;
+import com.mola.cmd.proxy.app.acp.observation.ObservationManager;
 import com.mola.cmd.proxy.app.acp.schedule.ScheduleTaskManager;
 import com.mola.cmd.proxy.app.acp.schedule.model.ScheduleOwnerKey;
 import com.mola.cmd.proxy.app.acp.channel.model.ChannelTurnContext;
@@ -121,6 +122,8 @@ public class AcpClient extends AbstractAcpClient {
 
     /** 定时任务管理器，通过 setter 注入，未启用时为 null */
     private volatile ScheduleTaskManager scheduleTaskManager;
+    private volatile ObservationManager observationManager;
+    private ScheduleOwnerKey observationOwner;
 
     /** 定时任务上下文注入器，通过 setter 注入 */
     private ScheduleContextInjector scheduleContextInjector;
@@ -221,7 +224,10 @@ public class AcpClient extends AbstractAcpClient {
                 args -> executeMcpSchedule("schedule_task", args),
                 args -> executeMcpSchedule("manage_schedule", args),
                 this::executeMcpTalkTo,
-                this::executeMcpNewSession);
+                this::executeMcpNewSession,
+                args -> executeMcpObservation("manage_observation_channels", args),
+                args -> executeMcpObservation("test_observation_script", args),
+                args -> executeMcpObservation("query_observation_events", args));
         ActionRuntimeRegistry.getInstance().register(authSessionId,
                 actionToolService::execute, this::availableActionTools);
     }
@@ -596,6 +602,21 @@ public class AcpClient extends AbstractAcpClient {
     /**
      * 注入定时任务支持。
      */
+    public void setObservationSupport(ObservationManager manager, ScheduleOwnerKey owner,
+                                      ObservationManager.Delivery delivery) {
+        this.observationManager = manager;
+        this.observationOwner = owner;
+        manager.register(this, owner, workspacePath,
+                () -> robotParam != null && robotParam.isEnabled() && robotParam.isObservationEnabled(), delivery);
+    }
+
+    private String executeMcpObservation(String tool, JsonObject arguments) {
+        requireActiveMcpTurn();
+        if (observationManager == null || robotParam == null || !robotParam.isObservationEnabled())
+            throw new IllegalStateException("OBSERVATION_DISABLED");
+        return observationManager.executeTool(tool, arguments, observationOwner.getPersistencePath());
+    }
+
     public void setScheduleSupport(ScheduleTaskManager taskManager,
                                    ScheduleContextInjector contextInjector) {
         setScheduleSupport(taskManager, contextInjector, null);
@@ -815,12 +836,17 @@ public class AcpClient extends AbstractAcpClient {
         sendInternal(userInput, null, localFiles, options);
     }
 
-    private void sendInternal(String userInput, List<Map<String, String>> files,
+    /** Returns admission, including lifecycle CAS and executor rejection, for durable background work. */
+    public boolean trySendObservation(String prompt) {
+        return sendInternal(prompt, null, Collections.emptyList(), PromptOptions.defaults());
+    }
+
+    private boolean sendInternal(String userInput, List<Map<String, String>> files,
                               Collection<String> localFiles, PromptOptions options) {
         AcpResponseListener outputListener = executionListener();
         if (userInput == null || userInput.trim().isEmpty()) {
             outputListener.onError(new IllegalArgumentException("用户输入不能为空"));
-            return;
+            return false;
         }
         final PromptOptions effectiveOptions = options == null ? PromptOptions.defaults() : options;
         if (!effectiveOptions.isInboundTalkTo()) consecutiveInboxTurns.set(0);
@@ -831,7 +857,7 @@ public class AcpClient extends AbstractAcpClient {
                     wakeIfSleeping();
                 } catch (IOException | RuntimeException failure) {
                     outputListener.onError(new IOException("唤醒智能体失败", failure));
-                    return;
+                    return false;
                 }
             }
             generation = currentLifecycleGeneration();
@@ -839,7 +865,7 @@ public class AcpClient extends AbstractAcpClient {
                 releaseChannelTurn(effectiveOptions);
                 outputListener.onError(new IllegalStateException(
                         "当前 client 状态不允许发送消息: " + state.get()));
-                return;
+                return false;
             }
             newSessionCancelled = false;
         }
@@ -928,7 +954,9 @@ public class AcpClient extends AbstractAcpClient {
                 notifyAfterTurnFailed();
                 guardedListener.onError(e);
             }
+            return false;
         }
+        return true;
     }
 
     private void completeScheduleExecution(PromptOptions options, boolean success,
@@ -1093,6 +1121,8 @@ public class AcpClient extends AbstractAcpClient {
 
             releaseAllPendingChannelReplies();
             ActionRuntimeRegistry.getInstance().unregister(authSessionId);
+            if (observationManager != null && observationOwner != null)
+                observationManager.unregister(this, observationOwner);
             McpAuthManager.getInstance().removeSession(authSessionId);
             executor.shutdownNow();
         } finally {
@@ -1176,6 +1206,11 @@ public class AcpClient extends AbstractAcpClient {
             tools.add("manage_schedule");
         }
         if (talkToDispatcher != null) tools.add("talk_to");
+        if (observationManager != null && robotParam != null && robotParam.isObservationEnabled()) {
+            tools.add("manage_observation_channels");
+            tools.add("test_observation_script");
+            tools.add("query_observation_events");
+        }
         return Collections.unmodifiableSet(tools);
     }
 
@@ -1345,6 +1380,9 @@ public class AcpClient extends AbstractAcpClient {
                     logger.warn("构建 TalkTo 上下文失败，跳过", e);
                 }
             }
+
+            if (observationManager != null && robotParam != null && robotParam.isObservationEnabled())
+                fullTextBuilder.append(ObservationManager.CONTEXT).append("\n");
 
             // 注入记忆上下文
             if (memoryManager != null) {

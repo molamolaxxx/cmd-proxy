@@ -20,12 +20,21 @@ public final class ActionToolService {
                              Handler scheduleTask,
                              Handler manageSchedule,
                              Handler talkTo, Handler newSession) {
+        this(dispatchSubagent,scheduleTask,manageSchedule,talkTo,newSession,null,null,null);
+    }
+
+    public ActionToolService(Handler dispatchSubagent, Handler scheduleTask, Handler manageSchedule,
+                             Handler talkTo, Handler newSession, Handler manageObservation,
+                             Handler testObservation, Handler queryObservation) {
         Map<String, Handler> configured = new LinkedHashMap<>();
         configured.put("dispatch_subagent", dispatchSubagent);
         configured.put("schedule_task", scheduleTask);
         configured.put("manage_schedule", manageSchedule);
         configured.put("talk_to", talkTo);
         configured.put("new_session", newSession);
+        if (manageObservation != null) configured.put("manage_observation_channels", manageObservation);
+        if (testObservation != null) configured.put("test_observation_script", testObservation);
+        if (queryObservation != null) configured.put("query_observation_events", queryObservation);
         handlers = Collections.unmodifiableMap(configured);
     }
 

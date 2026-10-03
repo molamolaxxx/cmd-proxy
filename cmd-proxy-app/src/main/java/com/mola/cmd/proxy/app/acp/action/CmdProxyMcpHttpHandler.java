@@ -125,7 +125,8 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
 
     public static JsonArray tools() {
         return tools(new java.util.LinkedHashSet<>(java.util.Arrays.asList(
-                "dispatch_subagent", "schedule_task", "manage_schedule", "talk_to", "new_session")));
+                "dispatch_subagent", "schedule_task", "manage_schedule", "talk_to", "new_session",
+                "manage_observation_channels", "test_observation_script", "query_observation_events")));
     }
 
     public static JsonArray tools(Set<String> availableTools) {
@@ -208,13 +209,40 @@ public final class CmdProxyMcpHttpHandler implements HttpHandler {
                             + "返回结果表示请求已接收，执行结果通过后续会话事件反馈。",
                     objectSchema("prompt", described(stringSchema(), "新会话的第一条输入提示词。"))));
         }
+        JsonObject observation = objectSchema("action", enumStringSchema(
+                new String[]{"list", "get", "create", "update", "delete"}, "操作类型。"));
+        addProperty(observation, "channel_id", described(stringSchema(), "通道 ID，get、update、delete 必填。"));
+        addProperty(observation, "name", described(stringSchema(), "通道名称，create 必填。"));
+        addProperty(observation, "script", described(stringSchema(), "JavaScript 脚本，通过 module.exports 导出返回字符串的函数，create 必填。"));
+        addProperty(observation, "frequency", described(stringSchema(), "观测频率，默认 30s，支持 s、min、h。"));
+        JsonObject booleanSchema = new JsonObject(); booleanSchema.addProperty("type", "boolean");
+        addProperty(observation, "enabled", described(booleanSchema, "是否启用通道，默认 true。"));
+        addObservationPageProperties(observation);
+        if (availableTools.contains("manage_observation_channels")) tools.add(tool("manage_observation_channels", "管理当前 Agent 自己的观测通道。", observation));
+        JsonObject test = objectWithRequired(new String[]{});
+        addProperty(test, "script", described(stringSchema(), "要测试的脚本草稿，与 channel_id 至少提供一个。"));
+        addProperty(test, "channel_id", described(stringSchema(), "要测试的已保存通道 ID。"));
+        if (availableTools.contains("test_observation_script")) tools.add(tool("test_observation_script", "执行观测脚本，返回结果或错误堆栈，不修改基线或产生事件。", test));
+        JsonObject events = objectSchema("channel_id", described(stringSchema(), "观测通道 ID。"));
+        addProperty(events, "event_id", described(stringSchema(), "事件 ID，提供时返回完整明细，否则返回分页预览。"));
+        addObservationPageProperties(events);
+        if (availableTools.contains("query_observation_events")) tools.add(tool("query_observation_events", "查询当前 Agent 的观测事件及完整明细。", events));
         return tools;
+    }
+
+    private static void addObservationPageProperties(JsonObject schema) {
+        JsonObject integer = new JsonObject(); integer.addProperty("type", "integer"); integer.addProperty("minimum", 1);
+        addProperty(schema, "page", described(integer.deepCopy(), "页码，默认 1。"));
+        addProperty(schema, "page_size", described(integer.deepCopy(), "每页条数，默认 10，最多 100。"));
+        addProperty(schema, "status", described(stringSchema(), "状态筛选。"));
+        addProperty(schema, "query", described(stringSchema(), "名称搜索。"));
     }
 
     private static boolean isActionTool(String name) {
         return "dispatch_subagent".equals(name) || "schedule_task".equals(name)
                 || "manage_schedule".equals(name) || "talk_to".equals(name)
-                || "new_session".equals(name);
+                || "new_session".equals(name) || "manage_observation_channels".equals(name)
+                || "test_observation_script".equals(name) || "query_observation_events".equals(name);
     }
 
     private static JsonObject tool(String name, String description, JsonObject schema) {
