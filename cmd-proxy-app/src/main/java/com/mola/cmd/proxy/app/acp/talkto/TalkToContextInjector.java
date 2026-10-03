@@ -151,11 +151,13 @@ public class TalkToContextInjector {
     protected static void appendRuntimeConstraints(StringBuilder sb) {
         sb.append("重要运行时约束：发出 talk_to 后，不要使用 Bash、PowerShell、Python 或其他脚本通过 wait、sleep、while 循环、轮询文件/日志/进程状态等方式等待对方回复。"
                 + "这类等待会占用当前 turn；在等待脚本结束前，已入队的 Agent 消息无法被处理。\n\n");
-        sb.append("Agent 间通信约束（仅适用于与其他 Agent 的通信）：收到其他 Agent 的消息不代表必须回复。")
+        sb.append("Agent 间通信约束：\n")
+                .append("以下规则仅约束通过 talk_to 向其他 Agent 发送的消息，不适用于向真实用户回复，也不限制企微等外部信道的回复次数和时机。")
+                .append("用户要求先确认、处理中同步进度或分多次回复时，应遵循用户要求；“好的收到”等面向真实用户的确认回复允许发送。\n\n")
+                .append("与其他 Agent 通信时，收到消息不代表必须回复。")
                 .append("禁止向其他 Agent 发送“收到”、“好的”、“谢谢”、“我会处理”等纯确认消息，")
-                .append("除非发送方明确要求你确认收到或作答。")
-                .append("只有在产生最终结果、新事实、明确阻塞或必须回答问题时才回复；最终结果默认结束通信链。")
-                .append("对外部信道中真实用户的回复不受此约束。\n\n");
+                .append("除非发送方明确要求确认收到或作答。")
+                .append("向其他 Agent 的回复应包含最终结果、新事实、明确阻塞或对问题的必要回答；发送最终结果后，默认结束与该 Agent 的本次通信链。\n\n");
     }
 
 }

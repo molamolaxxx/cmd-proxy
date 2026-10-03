@@ -26,7 +26,13 @@ public class TalkToContextInjectorTest {
         assertFalse(context.contains("主动通知完成后"));
         assertTrue(context.contains("重要运行时约束"));
         assertTrue(context.contains("禁止向其他 Agent 发送“收到”"));
-        assertTrue(context.contains("除非发送方明确要求你确认收到或作答"));
+        assertTrue(context.contains("除非发送方明确要求确认收到或作答"));
+        assertTrue(context.contains("以下规则仅约束通过 talk_to 向其他 Agent 发送的消息"));
+        assertTrue(context.contains("不限制企微等外部信道的回复次数和时机"));
+        assertTrue(context.contains("用户要求先确认、处理中同步进度或分多次回复时，应遵循用户要求"));
+        assertTrue(context.contains("“好的收到”等面向真实用户的确认回复允许发送"));
+        assertTrue(context.contains("默认结束与该 Agent 的本次通信链"));
+        assertFalse(context.contains("只有在产生最终结果"));
         assertFalse(context.contains("目标 Agent 忙碌时消息会排队"));
         assertFalse(context.contains("不表示接收方已处理"));
         assertFalse(context.contains("与 dispatch_subagent 的区别"));
