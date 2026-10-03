@@ -35,6 +35,23 @@ var resourceDream={robot:'',available:false,running:false,pending:false,timer:nu
 // 多环境：环境列表、当前选中环境、未保存标记
 var instances=[];
 var curInstance=null;
+// 环境切换拥有页面锁；操作计数覆盖确认、提交和后续状态同步。
+var environmentGate={switching:false,loading:false,recoveryRequired:false,target:null,operations:0,version:0,reads:new Set(),requests:new Set(),loadErrors:[]};
+function environmentOperationPending(){return environmentGate.operations>0||Object.keys(itemRefreshRuntime.robots||{}).length>0||Object.keys(itemRefreshRuntime.channels||{}).length>0||Object.keys(itemToggleRuntime.robots||{}).length>0||Object.keys(itemToggleRuntime.channels||{}).length>0||(typeof registryBusy!=='undefined'&&registryBusy)}
+function syncEnvironmentGate(){
+var switching=environmentGate.switching,locked=switching||environmentGate.recoveryRequired,trigger=document.getElementById('envTrigger'),status=document.getElementById('envSwitchStatus');
+if(trigger){trigger.disabled=switching||environmentOperationPending();trigger.setAttribute('aria-busy',String(switching));trigger.title=switching?'正在切换环境，请稍候':environmentOperationPending()?'当前操作完成后可切换环境':'当前环境：'+(curInstance?envName(curInstance):'')+'；点击切换运行环境';var icon=trigger.querySelector('.material-icons');if(icon)icon.textContent=switching?'sync':'dns'}
+if(status){status.hidden=!locked;status.textContent=switching?'正在切换到 '+envName(environmentGate.target)+'…':environmentGate.recoveryRequired?'环境状态待确认，请重新选择环境':''}
+document.body.classList.toggle('environment-switching',switching);
+document.querySelectorAll('.app-layout,.dialog-overlay:not(#confirmDialog):not(#registryAccessDialog),.btn-fab,.app-bar-actions > .btn:not(#themeToggle):not(#sidebarToggle)').forEach(function(el){el.inert=locked});
+}
+function installEnvironmentGuards(){
+// 在所有业务脚本加载后安装，保持既有全局入口和脚本加载顺序。
+var operations='saveRobot deleteRobot toggleRobot refreshRobot applyRobotConfig saveConfig refreshService reloadService applyGlobalProxy addChatterId toggleChannelEnabled saveChannelDialog deleteChannel refreshChannel applyChannelConfig deleteExternalTaskApi deleteAgentGateway openStarweaveAgentSession startStarweaveSession newStarweaveSession restoreStarweaveSession deleteStarweaveSession cancelStarweaveSession uploadStarweaveFiles sendStarweaveMessage retryChatMessage deliverChatMessage runTeamBatchAction createStarweaveTeam saveStarweaveTeamEdit deleteStarweaveTeam newTeamSession restoreTeamSession cancelTeamSession uploadTeamSessionFiles sendTeamSessionMessage submitAgentImport triggerAgentMemoryDream installSelectedProviderVersion saveTask deleteTask updateTaskStatus submitTaskComment retryTaskDelivery uploadTaskFiles saveScheduleTask deleteScheduleTask saveMcpPolicy configureRegistry'.split(' ');
+operations.forEach(function(name){var original=window[name];if(typeof original!=='function')return;window[name]=async function(){if(environmentGate.switching||environmentGate.recoveryRequired){showSnackbar(environmentGate.switching?'环境正在切换，请稍候':'环境状态待确认，请重新选择环境');return false}environmentGate.operations+=1;syncEnvironmentGate();try{return await original.apply(this,arguments)}finally{environmentGate.operations-=1;syncEnvironmentGate()}}});
+var reads='loadConfig loadInstances loadChannelStatus loadItemRefreshStatus loadTeamSharingStatus loadChannelBindingTargets loadMcpAuth loadRegistrySettings loadStarweaveSessions loadStarweaveTeams loadStarweaveSnapshot loadTeamSessionSnapshot refreshTeamSessionContextUsage loadTaskCount loadTasks loadScheduleCount loadSchedules loadScheduleExecutions refreshChannelStatuses pollStarweaveTeamStates refreshChannelBindingTargets loadAgentGatewayRuntime loadRobotModels loadProviderVersions browseDir loadStarweaveResources previewStarweaveResource loadTeamSessionResources previewTeamSessionResource openAgentResource reloadAgentResource loadAgentResourceContent exportAgentResources refreshChannelKnownTargets checkAgentMemoryDream openTaskEdit loadTaskTargets loadMoreTaskComments loadMoreTaskHistory openTaskHistory viewTaskHistory openFileLinkPreview'.split(' ');
+reads.forEach(function(name){var original=window[name];if(typeof original!=='function')return;window[name]=function(){if(environmentGate.switching&&!environmentGate.loading)return Promise.resolve(false);var args=arguments,owner=this;var pending=Promise.resolve().then(function(){return original.apply(owner,args)});environmentGate.reads.add(pending);return pending.finally(function(){environmentGate.reads.delete(pending)})}});
+}
 var dirty=false;
 var activePage='basic';
 var externalChannelTab='wecom';
@@ -206,12 +223,33 @@ function clearListSearch(type){var input=document.getElementById(type==='robot'?
 function changePageSize(type){var select=document.getElementById(type==='robot'?'robotPageSize':(type==='channel'?'channelPageSize':'externalTaskApiPageSize'));listState[type].pageSize=parseInt(select.value)||5;listState[type].page=1;if(type==='robot')renderRobots();else if(type==='channel')renderChannels();else renderExternalTaskApis()}
 
 /** 统一请求入口：自动携带当前环境标识，非本环境时由后端转发到目标环境 */
-function api(path,opts){
+async function api(path,opts,local){
+if(environmentGate.switching&&!environmentGate.loading)throw new Error('环境正在切换');
+if(environmentGate.switching&&opts&&opts.method&&opts.method!=='GET')throw new Error('环境正在切换');
+if(environmentGate.recoveryRequired&&opts&&opts.method&&opts.method!=='GET')throw new Error('环境状态待确认，请重新选择环境');
+var version=environmentGate.version,controller=new AbortController(),external=opts&&opts.signal;
+var mutation=opts&&opts.method&&opts.method!=='GET'&&path.indexOf('/file-preview')<0;
+var readTimeout=!mutation&&path.indexOf('/api/agent-resources/export')!==0?setTimeout(function(){controller.abort()},15000):null;
+function abort(){controller.abort()}
+if(external){if(external.aborted)abort();else external.addEventListener('abort',abort,{once:true})}
+environmentGate.requests.add(controller);
 var url=path;
-if(curInstance&&curInstance.instanceId){
+if(!local&&curInstance&&curInstance.instanceId&&!/[?&]instance=/.test(path)){
 url+=(path.indexOf('?')>=0?'&':'?')+'instance='+encodeURIComponent(curInstance.instanceId);
 }
-return fetch(url,opts);
+var required=environmentGate.switching&&environmentGate.loading&&(
+['/api/starweave/v1/sessions','/api/starweave/v1/teams','/api/item-refresh-status','/api/channels/status'].indexOf(path)>=0||
+(activePage==='tasks'&&path.indexOf('/api/starweave/v1/tasks')===0)||
+(activePage==='schedules'&&path.indexOf('/api/schedules/v1')===0)||
+(activePage==='mcp-auth'&&path.indexOf('/api/mcp-auth/v1')===0));
+try{var response=await fetch(url,Object.assign({},opts,{signal:controller.signal}));
+// 读取正文也属于请求生命周期，避免响应头到达后仍留下旧环境的数据回调。
+var body=await response.arrayBuffer();if(version!==environmentGate.version)throw new Error('环境已切换');
+if(mutation&&response.status>=500){environmentGate.recoveryRequired=true;syncEnvironmentGate()}
+if(required){var result;try{result=JSON.parse(new TextDecoder().decode(body))}catch(e){throw new Error('目标环境数据无效')}if(!response.ok||result.accepted===false)throw new Error(result.message||'目标环境数据加载失败（HTTP '+response.status+'）')}
+return new Response(response.status===204||response.status===205||response.status===304?null:body,{status:response.status,statusText:response.statusText,headers:response.headers});
+}catch(e){if(required)environmentGate.loadErrors.push(e);if(mutation){environmentGate.recoveryRequired=true;syncEnvironmentGate()}throw e}
+finally{clearTimeout(readTimeout);environmentGate.requests.delete(controller);if(external)external.removeEventListener('abort',abort)}
 }
 
 function envName(inst){
@@ -222,15 +260,17 @@ return i>=0?h.substring(i+1):h;
 }
 
 async function loadInstances(manual){
+if(environmentGate.switching)return;
 try{
-var r=await fetch('/api/instances');
+var r=await api('/api/instances',null,true);
 instances=await r.json();
 }catch(e){instances=[];showSnackbar('环境列表加载失败:'+e.message)}
 if(!instances.length){renderEnvTabs();return}
 var want=(location.hash.match(/instance=([^&]+)/)||[])[1];
 want=want?decodeURIComponent(want):(curInstance&&curInstance.instanceId);
 var found=instances.filter(function(i){return i.instanceId===want})[0];
-curInstance=found||instances.filter(function(i){return i.self})[0]||instances[0];
+if(!curInstance)curInstance=found||instances.filter(function(i){return i.self})[0]||instances[0];
+else if(found)curInstance=found;
 renderEnvTabs();
 if(manual)showSnackbar('环境列表已刷新（'+instances.length+' 个）');
 }
@@ -240,7 +280,7 @@ var menu=document.getElementById('envMenu'),trigger=document.getElementById('env
 menu.classList.toggle('open',open);trigger.setAttribute('aria-expanded',String(open));
 if(open){menu.style.transform='';var bounds=menu.getBoundingClientRect(),shift=0;if(bounds.right>window.innerWidth-10)shift=window.innerWidth-10-bounds.right;if(bounds.left+shift<10)shift=10-bounds.left;menu.style.transform='translateX('+shift+'px)'}
 }
-function toggleEnvMenu(){setEnvMenuOpen(!document.getElementById('envMenu').classList.contains('open'))}
+function toggleEnvMenu(){if(environmentGate.switching||environmentOperationPending()){showSnackbar(environmentGate.switching?'环境正在切换，请稍候':'当前操作完成后可切换环境');return}setEnvMenuOpen(!document.getElementById('envMenu').classList.contains('open'))}
 document.addEventListener('click',function(event){var picker=document.getElementById('envPicker'),menu=document.getElementById('envMenu');if(picker&&!picker.contains(event.target)&&menu&&!menu.contains(event.target))setEnvMenuOpen(false)});
 document.addEventListener('keydown',function(event){if(event.key==='Escape'&&document.getElementById('envMenu').classList.contains('open')){setEnvMenuOpen(false);document.getElementById('envTrigger').focus()}});
 window.addEventListener('resize',function(){var menu=document.getElementById('envMenu');if(menu&&menu.classList.contains('open'))setEnvMenuOpen(true)});
@@ -259,16 +299,33 @@ return '<button type="button" class="'+cls+'" onclick="switchInstance(instances[
 +'<span class="env-tab-meta">'+esc(meta)+'</span></button>';
 }).join('');
 trigger.title='当前环境：'+envName(curInstance)+'；点击切换运行环境';
+syncEnvironmentGate();
 }
 
 async function switchInstance(id){
-if(curInstance&&curInstance.instanceId===id){setEnvMenuOpen(false);document.getElementById('envTrigger').focus();return}
-if(dirty&&!await showConfirm('当前环境有未保存的修改，切换环境后这些修改将丢失。',{title:'放弃未保存的修改？',confirmText:'放弃并切换',danger:true}))return;
+if(environmentGate.switching||environmentOperationPending()){showSnackbar(environmentGate.switching?'环境正在切换，请稍候':'当前操作完成后可切换环境');return}
+if(environmentGate.recoveryRequired&&curInstance&&id!==curInstance.instanceId){showSnackbar('请先重新选择当前环境，确认环境状态');return}
+if(curInstance&&curInstance.instanceId===id&&!environmentGate.recoveryRequired){setEnvMenuOpen(false);document.getElementById('envTrigger').focus();return}
 var target=instances.filter(function(i){return i.instanceId===id})[0];
 if(!target)return;
 if(target.remote&&target.online===false){showSnackbar('目标环境离线');return}
+environmentGate.switching=true;environmentGate.target=target;setEnvMenuOpen(false);syncEnvironmentGate();
+var previous=curInstance,previousConfig=config,previousDirty=dirty,committed=false,previousState;
+try{
+if(dirty&&!await showConfirm('当前环境有未保存的修改，切换环境后这些修改将丢失。',{title:'放弃未保存的修改？',confirmText:'放弃并切换',danger:true}))return;
 if(target.remote&&!await ensureRegistryEnvironmentAccess(id))return;
+environmentGate.requests.forEach(function(controller){controller.abort()});
+await Promise.allSettled(Array.from(environmentGate.reads));
+if(environmentOperationPending())throw new Error('原环境仍有操作正在执行，请稍后重试');
+var controller=new AbortController(),timeout=setTimeout(function(){controller.abort()},15000),nextConfig;
+try{var response=await fetch('/api/config?instance='+encodeURIComponent(id),{signal:controller.signal});if(!response.ok)throw new Error('目标环境不可用（HTTP '+response.status+'）');nextConfig=await response.json();if(!nextConfig||typeof nextConfig!=='object'||Array.isArray(nextConfig))throw new Error('目标环境配置无效')}
+finally{clearTimeout(timeout)}
+environmentGate.version+=1;
 registryLoadToken+=1;
+previousState={channelRuntime:channelRuntime,itemRefreshRuntime:itemRefreshRuntime,itemToggleRuntime:itemToggleRuntime,teamSharingRuntime:teamSharingRuntime,channelBindingTargets:channelBindingTargets,mcpAuthRuntime:mcpAuthRuntime,starSessions:starSessions,starTeams:starTeams,teamSession:teamSession,taskState:taskState,taskEditor:taskEditor};
+clearTimeout(taskState.filterTimer);clearTimeout(scheduleState.timer);clearTimeout(channelMessages.timer);clearTimeout(resourceDream.timer);resourceDream.robot='';fileLinkPreview.request+=1;
+document.body.classList.remove('resource-modal-open');
+document.querySelectorAll('.dialog-overlay.show').forEach(function(el){closeDialog(el.id)});
 setEnvMenuOpen(false);
 document.getElementById('envTrigger').focus();
 closeStarweaveStream();closeTeamSessionStream();closeDialog('channelMessagesDialog');closeDialog('channelDialog');starSessions={items:[],selectedGroupId:'',events:[],lastSeq:0,polling:false,stream:null,streamKey:'',uploads:[],followOutput:true,transitioning:false,transitionId:0,snapshotToken:0};
@@ -278,13 +335,26 @@ taskState={items:[],stats:{},page:1,pageSize:10,total:0,totalPages:1,status:'',q
 taskEditor={mode:'create',task:null,originalContent:'',contentAttachments:[],commentAttachments:[],targets:{agents:[],teams:[]},history:[],historyNext:null,comments:[],commentsNext:null,editorMode:'edit'};
 channelBindingTargetRequest+=1;channelBindingTargets={instanceId:id,sessions:[],teams:[]};
 curInstance=target;
+channelRuntime={instanceId:id,statuses:{},errors:{}};itemRefreshRuntime={robots:{},channels:{}};itemToggleRuntime={robots:{},channels:{}};
+committed=true;environmentGate.loading=true;environmentGate.loadErrors=[];
+await loadConfig(nextConfig);
+if(activePage==='tasks')await loadTasks(false);if(activePage==='schedules')await loadSchedules(false);
+if(environmentGate.loadErrors.length)throw environmentGate.loadErrors[0];
+environmentGate.recoveryRequired=false;
 location.hash='instance='+encodeURIComponent(id);
 renderEnvTabs();
-await loadConfig();
+showSnackbar('已切换到 '+envName(target));
+}catch(e){if(committed){
+closeStarweaveStream();closeTeamSessionStream();curInstance=previous;environmentGate.version+=1;
+channelRuntime=previousState.channelRuntime;itemRefreshRuntime=previousState.itemRefreshRuntime;itemToggleRuntime=previousState.itemToggleRuntime;teamSharingRuntime=previousState.teamSharingRuntime;channelBindingTargets=previousState.channelBindingTargets;mcpAuthRuntime=previousState.mcpAuthRuntime;
+starSessions=previousState.starSessions;starTeams=previousState.starTeams;teamSession=previousState.teamSession;taskState=previousState.taskState;taskEditor=previousState.taskEditor;
+environmentGate.loading=true;environmentGate.loadErrors=[];await loadConfig(previousConfig);dirty=previousDirty;if(activePage==='tasks')await loadTasks(false);if(activePage==='schedules')await loadSchedules(false);environmentGate.recoveryRequired=environmentGate.loadErrors.length>0;
+}showSnackbar('切换到 '+envName(target)+' 失败，仍在原环境：'+(e.name==='AbortError'?'连接超时':e.message))}
+finally{environmentGate.loading=false;environmentGate.switching=false;environmentGate.target=null;renderEnvTabs();syncEnvironmentGate();document.getElementById('envTrigger').focus()}
 }
 
-async function loadConfig(){
-try{var r=await api('/api/config');if(!r.ok)throw new Error('目标环境不可用（HTTP '+r.status+'）');config=await r.json();
+async function loadConfig(prefetched){
+try{if(prefetched)config=prefetched;else{var r=await api('/api/config');if(!r.ok)throw new Error('目标环境不可用（HTTP '+r.status+'）');config=await r.json()}
 if(!config.robots)config.robots=[];
 config.robots.forEach(function(robot){if(robot.onlyTeamMember===undefined)robot.onlyTeamMember=false});
 if(!config.chatterIds)config.chatterIds=[];

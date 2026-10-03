@@ -53,7 +53,7 @@ test('local, same-host and registered environments share the selected style with
     ];
     for(const current of environments){
         const tabs={innerHTML:''},trigger={title:''};
-        const context=vm.createContext({instances:environments,curInstance:current,envName:i=>i.displayName,esc:String,
+        const context=vm.createContext({instances:environments,curInstance:current,envName:i=>i.displayName,esc:String,syncEnvironmentGate(){},
             document:{getElementById:id=>{assert.ok(['envTabs','envTrigger'].includes(id));return id==='envTabs'?tabs:trigger;}}});
         vm.runInContext(coreSection('function renderEnvTabs(', 'async function switchInstance('),context);
         context.renderEnvTabs();
@@ -80,12 +80,12 @@ test('both themes retain normal selection styles and omit remote warning styles 
 });
 test('offline environment clicks retain the current environment and its business state', async () => {
     const notices=[];
-    const context=vm.createContext({curInstance:{instanceId:'local'},instances:[{instanceId:'remote',remote:true,online:false}],dirty:false,showSnackbar:m=>notices.push(m)});
+    const context=vm.createContext({environmentGate:{switching:false},environmentOperationPending:()=>false,curInstance:{instanceId:'local'},instances:[{instanceId:'remote',remote:true,online:false}],dirty:false,showSnackbar:m=>notices.push(m)});
     vm.runInContext(coreSection('async function switchInstance(', 'async function loadConfig('),context);
     await context.switchInstance('remote');assert.equal(context.curInstance.instanceId,'local');assert.deepEqual(notices,['目标环境离线']);
 });
 test('refresh retains an offline selection instead of redirecting operations to the center', async () => {
-    const context=vm.createContext({curInstance:{instanceId:'remote'},instances:[],location:{hash:'instance=remote'},renderEnvTabs(){},showSnackbar(){},fetch:async()=>({json:async()=>[{instanceId:'local',self:true},{instanceId:'remote',remote:true,online:false}]})});
+    const context=vm.createContext({environmentGate:{switching:false},curInstance:{instanceId:'remote'},instances:[],location:{hash:'instance=remote'},renderEnvTabs(){},showSnackbar(){},api:async()=>({json:async()=>[{instanceId:'local',self:true},{instanceId:'remote',remote:true,online:false}]})});
     vm.runInContext(coreSection('async function loadInstances(', 'function setEnvMenuOpen('),context);
     await context.loadInstances(false);assert.equal(context.curInstance.instanceId,'remote');assert.equal(context.curInstance.online,false);
 });

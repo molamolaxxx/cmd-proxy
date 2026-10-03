@@ -4,9 +4,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
 
-const html = fs.readFileSync(path.resolve(
-    __dirname, '../../main/resources/configui/index.html'
-), 'utf8')
+const resourceRoot = path.resolve(__dirname, '../../main/resources/configui')
+const markup = fs.readFileSync(path.join(resourceRoot, 'index.html'), 'utf8')
+const html = markup + [...markup.matchAll(/(?:src|href)="\/(assets\/(?:js|css)\/[^\"]+)"/g)]
+    .map(match => fs.readFileSync(path.join(resourceRoot, match[1]), 'utf8')).join('\n')
 
 function section(start, end) {
     const from = html.indexOf(start)
@@ -15,6 +16,15 @@ function section(start, end) {
     assert.notEqual(to, -1, `missing ${end}`)
     return html.slice(from, to)
 }
+
+test('robot refresh keeps its button across asynchronous confirmation', async () => {
+    const button={disabled:false,innerHTML:''};let applied=false;
+    const context=vm.createContext({config:{robots:[{name:'robot'}]},event:{target:{closest:()=>button}},
+        itemOperationPending:()=>false,showConfirm:async()=>{context.event=undefined;return true;},
+        saveConfig:async()=>true,applyRobotConfig:async()=>{assert.equal(button.disabled,true);applied=true;},showSnackbar(){}});
+    vm.runInContext(section('async function refreshRobot(', 'function taskStatusLabel('),context);
+    await context.refreshRobot(0);assert.equal(applied,true);assert.equal(button.disabled,false);
+});
 
 test('applies only the saved channel and advances its runtime identity', async () => {
     const calls = []

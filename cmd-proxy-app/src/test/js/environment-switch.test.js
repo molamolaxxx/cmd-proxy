@@ -1,0 +1,145 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const core = fs.readFileSync(path.resolve(__dirname, '../../main/resources/configui/assets/js/core.js'), 'utf8');
+function section(start, end) { return core.slice(core.indexOf(start), core.indexOf(end, core.indexOf(start))); }
+function deferred() { let resolve, reject; const promise = new Promise((a,b) => {resolve=a;reject=b;}); return {promise,resolve,reject}; }
+function harness(extra = {}) {
+    const nodes = new Map(), messages = [], loaded = [], locked = {inert:false};
+    const get = id => {if (!nodes.has(id)) nodes.set(id, {hidden:false, disabled:false, textContent:'', attributes:{}, setAttribute(k,v){this.attributes[k]=v;}, querySelector(){return get('icon');}, focus(){}});return nodes.get(id);};
+    const context = vm.createContext({
+        document:{body:{classList:{toggle(){},remove(){}}},getElementById:get,querySelectorAll:selector=>selector.includes('.app-layout')?[locked]:[]},
+        itemRefreshRuntime:{robots:{},channels:{}},itemToggleRuntime:{robots:{},channels:{}},registryBusy:false,
+        curInstance:{instanceId:'a',displayName:'A'},instances:[{instanceId:'a',displayName:'A'},{instanceId:'b',displayName:'B'},{instanceId:'c',displayName:'C'}],
+        config:{robots:[{name:'old'}]},dirty:false,activePage:'acp',location:{hash:'instance=a'},
+        channelRuntime:{},teamSharingRuntime:{},channelBindingTargets:{},mcpAuthRuntime:{},starSessions:{},starTeams:{},teamSession:{},taskState:{},taskEditor:{},
+        scheduleState:{},channelMessages:{},resourceDream:{},fileLinkPreview:{request:0},
+        envName:i=>i.displayName,showSnackbar:m=>messages.push(m),setEnvMenuOpen(){},renderEnvTabs(){context.syncEnvironmentGate();},
+        showConfirm:async()=>true,ensureRegistryEnvironmentAccess:async()=>true,
+        registryLoadToken:0,channelBindingTargetRequest:0,closeStarweaveStream(){},closeTeamSessionStream(){},closeDialog(){},
+        loadConfig:async config=>{context.config=config;loaded.push(config);},
+        fetch:async()=>new Response(JSON.stringify({robots:[{name:'new'}]})),
+        Response,AbortController,TextDecoder,setTimeout,clearTimeout,...extra
+    });
+    context.window=context;
+    vm.runInContext(section('var environmentGate=', 'var dirty='),context);
+    vm.runInContext(section('async function switchInstance(', 'async function loadConfig('),context);
+    return {context,get,messages,loaded,locked};
+}
+test('switch locks the page immediately and publishes success only after target data is ready', async()=>{
+    const fetchWait=deferred(),loadWait=deferred();
+    const h=harness({fetch:()=>fetchWait.promise,loadConfig:()=>loadWait.promise});
+    const switching=h.context.switchInstance('b');
+    assert.equal(h.locked.inert,true);
+    assert.equal(h.get('envTrigger').disabled,true);
+    assert.equal(h.get('envSwitchStatus').textContent,'正在切换到 B…');
+    assert.equal(h.context.curInstance.instanceId,'a');
+    await h.context.switchInstance('c');
+    fetchWait.resolve(new Response('{}'));
+    await new Promise(setImmediate);
+    assert.equal(h.messages.includes('已切换到 B'),false);
+    assert.equal(h.locked.inert,true);
+    loadWait.resolve();await switching;
+    assert.equal(h.context.curInstance.instanceId,'b');
+    assert.equal(h.context.location.hash,'instance=b');
+    assert.equal(h.locked.inert,false);
+    assert.equal(h.get('envSwitchStatus').hidden,true);
+    assert.ok(h.messages.includes('已切换到 B'));
+});
+test('failed preflight preserves original environment, configuration and dirty draft', async()=>{
+    const h=harness({dirty:true,fetch:async()=>new Response('{}',{status:503})});const old=h.context.config;
+    await h.context.switchInstance('b');
+    assert.equal(h.context.curInstance.instanceId,'a');assert.equal(h.context.config,old);assert.equal(h.context.dirty,true);
+    assert.equal(h.context.location.hash,'instance=a');assert.equal(h.locked.inert,false);
+    assert.ok(h.messages.some(m=>m.includes('仍在原环境')));
+});
+test('cancelled confirmation releases switch lock without losing the draft', async()=>{
+    const h=harness({dirty:true,showConfirm:async()=>false});await h.context.switchInstance('b');
+    assert.equal(h.context.curInstance.instanceId,'a');assert.equal(h.context.dirty,true);assert.equal(h.locked.inert,false);assert.equal(h.loaded.length,0);
+});
+test('target projection failure rolls back rather than showing switch success', async()=>{
+    const h=harness({dirty:true});const old=h.context.config;
+    h.context.loadConfig=async config=>{h.context.config=config;if(config!==old)h.context.environmentGate.loadErrors.push(new Error('session query failed'));};
+    await h.context.switchInstance('b');
+    assert.equal(h.context.curInstance.instanceId,'a');assert.equal(h.context.config,old);assert.equal(h.context.dirty,true);
+    assert.equal(h.messages.includes('已切换到 B'),false);assert.equal(h.locked.inert,false);
+});
+test('concurrent operations keep environment disabled until every workflow finishes', async()=>{
+    const first=deferred(),second=deferred();let calls=0;
+    const h=harness({refreshRobot:()=>++calls===1?first.promise:second.promise});h.context.installEnvironmentGuards();
+    const a=h.context.refreshRobot(),b=h.context.refreshRobot();
+    await h.context.switchInstance('b');assert.equal(h.context.curInstance.instanceId,'a');
+    first.resolve();await a;assert.equal(h.get('envTrigger').disabled,true);
+    second.resolve();await b;assert.equal(h.get('envTrigger').disabled,false);
+});
+test('operation lock includes confirmation and post-submit synchronization', async()=>{
+    const confirm=deferred(),sync=deferred();
+    const h=harness({newTeamSession:async()=>{await confirm.promise;await sync.promise;}});h.context.installEnvironmentGuards();
+    const operation=h.context.newTeamSession();assert.equal(h.get('envTrigger').disabled,true);
+    confirm.resolve();await new Promise(setImmediate);assert.equal(h.get('envTrigger').disabled,true);
+    sync.resolve();await operation;assert.equal(h.get('envTrigger').disabled,false);
+});
+test('operation rejection releases its counter and switch blocks programmatic mutations', async()=>{
+    let called=0;const h=harness({saveConfig:async()=>{called++;throw new Error('failed');}});h.context.installEnvironmentGuards();
+    await assert.rejects(h.context.saveConfig(),/failed/);assert.equal(h.context.environmentGate.operations,0);
+    h.context.environmentGate.switching=true;assert.equal(await h.context.saveConfig(),false);assert.equal(called,1);
+});
+test('backend refresh state also prevents switching', async()=>{
+    const h=harness();h.context.itemRefreshRuntime.robots.old=Date.now();await h.context.switchInstance('b');
+    assert.equal(h.context.curInstance.instanceId,'a');assert.equal(h.loaded.length,0);
+});
+test('switch waits for old read workflows before committing the target', async()=>{
+    const read=deferred();const h=harness({loadStarweaveTeams:()=>read.promise});h.context.installEnvironmentGuards();
+    const pending=h.context.loadStarweaveTeams();await new Promise(setImmediate);
+    const switching=h.context.switchInstance('b');await new Promise(setImmediate);
+    assert.equal(h.context.curInstance.instanceId,'a');
+    assert.equal(await h.context.loadStarweaveTeams(),false);
+    read.resolve();await pending;await switching;assert.equal(h.context.curInstance.instanceId,'b');
+});
+test('API aborts old queries and guards the response body with an environment version', async()=>{
+    const body=deferred();let url;
+    const h=harness({fetch:async target=>{url=target;return {arrayBuffer:()=>body.promise,status:200,statusText:'OK',headers:{}};}});
+    vm.runInContext(section('async function api(', 'function envName('),h.context);
+    const query=h.context.api('/api/config');await new Promise(setImmediate);
+    assert.equal(url,'/api/config?instance=a');assert.equal(h.context.environmentGate.requests.size,1);
+    h.context.environmentGate.version++;body.resolve('{}');await assert.rejects(query,/环境已切换/);
+    assert.equal(h.context.environmentGate.requests.size,0);
+});
+test('automatic environment discovery does not silently select another environment', async()=>{
+    const h=harness({fetch:async()=>new Response(JSON.stringify([{instanceId:'b',self:true}]))});
+    vm.runInContext(section('async function api(', 'function envName('),h.context);
+    vm.runInContext(section('async function loadInstances(', 'function setEnvMenuOpen('),h.context);
+    await h.context.loadInstances(false);assert.equal(h.context.curInstance.instanceId,'a');
+});
+test('API preserves binary resource exports and external abort signals', async()=>{
+    const bytes=new Uint8Array([0,255,128,80,75]);const external=new AbortController();let signal;
+    const h=harness({fetch:async(url,opts)=>{signal=opts.signal;return new Response(bytes);}});
+    vm.runInContext(section('async function api(', 'function envName('),h.context);
+    const response=await h.context.api('/api/agent-resources/export',{signal:external.signal});
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()),bytes);assert.equal(signal.aborted,false);
+    external.abort();assert.equal(h.context.environmentGate.requests.size,0);
+});
+test('API rejects mutation requests even during internal target loading', async()=>{
+    let calls=0;const h=harness({fetch:async()=>{calls++;return new Response('{}');}});
+    vm.runInContext(section('async function api(', 'function envName('),h.context);
+    h.context.environmentGate.switching=true;h.context.environmentGate.loading=true;
+    await assert.rejects(h.context.api('/api/refresh',{method:'POST'}),/环境正在切换/);assert.equal(calls,0);
+});
+test('failed rollback leaves operations locked and selecting the original environment retries recovery', async()=>{
+    const h=harness();let fail=true;
+    h.context.loadConfig=async config=>{h.context.config=config;if(fail)h.context.environmentGate.loadErrors.push(new Error('offline'));};
+    await h.context.switchInstance('b');
+    assert.equal(h.context.curInstance.instanceId,'a');assert.equal(h.context.environmentGate.recoveryRequired,true);assert.equal(h.locked.inert,true);
+    assert.equal(h.get('envTrigger').disabled,false);
+    fail=false;await h.context.switchInstance('a');
+    assert.equal(h.context.environmentGate.recoveryRequired,false);assert.equal(h.locked.inert,false);
+});
+test('uncertain mutation result requires confirming the original environment before switching elsewhere', async()=>{
+    const h=harness({fetch:async()=>{throw new Error('connection lost');}});
+    vm.runInContext(section('async function api(', 'function envName('),h.context);
+    await assert.rejects(h.context.api('/api/refresh',{method:'POST'}),/connection lost/);
+    assert.equal(h.context.environmentGate.recoveryRequired,true);assert.equal(h.locked.inert,true);
+    await h.context.switchInstance('b');assert.equal(h.context.curInstance.instanceId,'a');
+});

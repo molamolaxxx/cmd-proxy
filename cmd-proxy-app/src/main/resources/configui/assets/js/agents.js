@@ -375,15 +375,16 @@ if(!r.ok||!d.ok)throw new Error(d.error||'刷新失败');robot._runtimeName=name
 finally{await loadItemRefreshStatus(false);renderRobots()}
 }
 async function refreshRobot(index){
+var btn=typeof event!=='undefined'&&event.target?event.target.closest('button'):null;
 var robot=config.robots[index];if(!robot)return;var name=(robot.name||'').trim();
 if(itemOperationPending('robots',name)){showSnackbar(itemRefreshMessage('robots',name));return}
 if(!await showConfirm('将保存当前配置并应用到智能体「'+name+'」。',{title:'保存并应用到智能体？',confirmText:'保存并应用'}))return;
-var btn=event.target.closest('button');btn.disabled=true;btn.innerHTML='<span class="material-icons">hourglass_top</span>';
+if(btn){btn.disabled=true;btn.innerHTML='<span class="material-icons">hourglass_top</span>'}
 var ok=await saveConfig(true);
-if(!ok){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>';return}
+if(!ok){if(btn){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>'}return}
 try{await applyRobotConfig(index);showSnackbar('配置已应用到智能体「'+name+'」')}
 catch(e){showSnackbar('应用失败:'+e.message)}
-finally{btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>'}
+finally{if(btn){btn.disabled=false;btn.innerHTML='<span class="material-icons">refresh</span>'}}
 }
 
 function taskStatusLabel(status){return {START:'未开始',IN_PROGRESS:'进行中',COMPLETED:'已完成',CANCELLED:'已取消',SUSPENDED:'已挂起'}[status]||status||'未知'}

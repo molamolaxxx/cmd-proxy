@@ -1,15 +1,16 @@
+installEnvironmentGuards();
 (async function init(){
 restoreSidebarState();
 await loadInstances(false);
 await loadConfig();
 var savedPage='basic';try{savedPage=sessionStorage.getItem('configui-page')||'basic'}catch(e){}
 switchPage(savedPage);
-setInterval(refreshChannelStatuses,5000);
-setInterval(function(){loadInstances(false);if(activePage==='basic'&&!registryBusy)loadRegistrySettings(false)},5000);
-setInterval(function(){loadItemRefreshStatus(true)},1000);
-setInterval(function(){if(activePage==='sessions')loadStarweaveSessions(false)},5000);
-setInterval(function(){if(activePage==='channels')refreshChannelBindingTargets(false)},5000);
-setInterval(pollStarweaveTeamStates,2000);
+setInterval(function(){if(!environmentGate.switching)refreshChannelStatuses()},5000);
+setInterval(function(){if(environmentGate.switching)return;loadInstances(false);if(activePage==='basic'&&!registryBusy)loadRegistrySettings(false)},5000);
+setInterval(function(){if(!environmentGate.switching){loadItemRefreshStatus(true);syncEnvironmentGate()}},1000);
+setInterval(function(){if(!environmentGate.switching&&activePage==='sessions')loadStarweaveSessions(false)},5000);
+setInterval(function(){if(!environmentGate.switching&&activePage==='channels')refreshChannelBindingTargets(false)},5000);
+setInterval(function(){if(!environmentGate.switching)pollStarweaveTeamStates()},2000);
 syncUpdateButtonStatus();
 setInterval(syncUpdateButtonStatus,1000);
 

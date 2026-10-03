@@ -166,7 +166,7 @@ public class ConfigUiLayoutContractTest {
         assertTrue(html.contains("channelBindingTargets.sessions"));
         assertTrue(html.contains("if(page==='channels')refreshChannelBindingTargets(true)"));
         assertTrue(html.contains("async function refreshChannelBindingTargets(notify)"));
-        assertTrue(html.contains("if(activePage==='channels')refreshChannelBindingTargets(false)"));
+        assertTrue(html.contains("if(!environmentGate.switching&&activePage==='channels')refreshChannelBindingTargets(false)"));
         assertTrue(html.contains("request!==channelBindingTargetRequest"));
         assertTrue(html.contains("channelBindingTargets={instanceId:id,sessions:[],teams:[]}"));
         assertTrue(html.contains("await loadStarweaveTeams(false);await refreshChannelBindingTargets(false)"));

@@ -4,9 +4,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
 
-const html = fs.readFileSync(path.resolve(
-    __dirname, '../../main/resources/configui/index.html'
-), 'utf8')
+const resourceRoot = path.resolve(__dirname, '../../main/resources/configui')
+const markup = fs.readFileSync(path.join(resourceRoot, 'index.html'), 'utf8')
+const html = markup + [...markup.matchAll(/(?:src|href)="\/(assets\/(?:js|css)\/[^\"]+)"/g)]
+    .map(match => fs.readFileSync(path.join(resourceRoot, match[1]), 'utf8')).join('\n')
 
 function section(start, end) {
     const from = html.indexOf(start)
@@ -105,14 +106,17 @@ test('keeps ready upload metadata on the optimistic team user bubble', async () 
             liveItems: []
         },
         selectedTeamSessionMember: () => member,
+        curInstance:{instanceId:'test'},setTimeout,clearTimeout,teamChatScope:()=> 'test|team|member',starRequestId:()=> 'request-1',
         document: {getElementById: id => id === 'teamSessionInput' ? input : null},
-        teamSessionPost: async (action, body) => sent.push({action, body}),
+        fetch:async (url,opts)=>{const body=JSON.parse(opts.body);sent.push({action:body.action,body:{message:body.message,sessionId:body.sessionId,uploadIds:body.uploadIds}});return {ok:true,json:async()=>({accepted:true,data:{accepted:true,data:{}}})};},
+        renderStarweaveEvents(){},renderTeamSessionMessages(){},renderTeamSessionUploads(){},loadTeamSessionSnapshot:async()=>{},
         isAgentOperable: state => state === 'READY' || state === 'SLEEP',
         showSnackbar() {},
         renderTeamSessionMembers() {},
         renderTeamSessionDetail() {},
         connectTeamSessionStream() {}
     })
+    vm.runInContext(section('var chatOutbox=', 'function starRequestId('),sendContext)
     vm.runInContext(section('async function sendTeamSessionMessage',
         'function teamSessionKeydown'), sendContext)
 
@@ -122,11 +126,9 @@ test('keeps ready upload metadata on the optimistic team user bubble', async () 
         action: 'send',
         body: {message: 'please inspect', sessionId: 'session-1', uploadIds: ['upload-1']}
     }])
-    assert.deepEqual(JSON.parse(JSON.stringify(sendContext.teamSession.liveItems)), [{
-        kind: 'user',
-        text: 'please inspect',
-        attachments: [{fileName: 'screen.png', size: 128}]
-    }])
+    const queued=Object.values(sendContext.chatOutbox)[0]
+    assert.equal(queued.text,'please inspect')
+    assert.deepEqual(JSON.parse(JSON.stringify(queued.attachments)), [{uploadId:'upload-1',fileName:'screen.png',size:128}])
     assert.equal(sendContext.teamSession.uploads.length, 0)
 })
 

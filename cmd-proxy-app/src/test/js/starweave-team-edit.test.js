@@ -4,8 +4,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
 
-const html = fs.readFileSync(path.resolve(__dirname,
-    '../../main/resources/configui/index.html'), 'utf8')
+const resourceRoot = path.resolve(__dirname, '../../main/resources/configui')
+const markup = fs.readFileSync(path.join(resourceRoot, 'index.html'), 'utf8')
+const html = markup + [...markup.matchAll(/(?:src|href)="\/(assets\/(?:js|css)\/[^\"]+)"/g)]
+    .map(match => fs.readFileSync(path.join(resourceRoot, match[1]), 'utf8')).join('\n')
 
 function section(start, end) {
     const from = html.indexOf(start)
